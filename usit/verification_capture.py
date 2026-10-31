@@ -38,6 +38,9 @@ _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 MAX_COMMAND_TIMEOUT_SECONDS = 600
 MAX_CAPTURE_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_SNAPSHOT_FILES = 5000
+MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024
+MAX_SNAPSHOT_TOTAL_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -128,13 +131,17 @@ def _safe_relative_file(root: Path, rel: str) -> Path:
     return path
 
 
-def _read_snapshot(path: Path, rel: str) -> dict[str, Any]:
+def _read_snapshot(path: Path, rel: str, remaining_total_bytes: int) -> dict[str, Any]:
     try:
         before = os.lstat(path)
     except FileNotFoundError:
         return {"path": rel, "state": "MISSING", "size": None, "sha256": None}
     if not stat.S_ISREG(before.st_mode):
         raise OSError(f"snapshot target is not a regular file: {rel}")
+    if before.st_size > MAX_SNAPSHOT_FILE_BYTES:
+        raise OSError(f"snapshot target exceeds the {MAX_SNAPSHOT_FILE_BYTES}-byte per-file limit: {rel}")
+    if before.st_size > remaining_total_bytes:
+        raise OSError(f"snapshot set exceeds the {MAX_SNAPSHOT_TOTAL_BYTES}-byte total limit at: {rel}")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -145,19 +152,21 @@ def _read_snapshot(path: Path, rel: str) -> dict[str, Any]:
         opened = os.fstat(fd)
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
             raise OSError(f"snapshot target changed before read: {rel}")
-        while True:
-            block = os.read(fd, 1024 * 1024)
+        while size <= MAX_SNAPSHOT_FILE_BYTES:
+            block = os.read(fd, min(1024 * 1024, MAX_SNAPSHOT_FILE_BYTES + 1 - size))
             if not block:
                 break
             size += len(block)
+            if size > MAX_SNAPSHOT_FILE_BYTES or size > remaining_total_bytes:
+                raise OSError(f"snapshot target exceeded its read budget: {rel}")
             digest.update(block)
         after_fd = os.fstat(fd)
     finally:
         os.close(fd)
     after_path = os.lstat(path)
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_after = (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns)
-    path_identity = (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns)
+    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    identity_after = (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns, after_fd.st_ctime_ns)
+    path_identity = (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns, after_path.st_ctime_ns)
     if identity_before != identity_after or identity_after != path_identity or size != after_fd.st_size:
         raise OSError(f"snapshot target changed during read: {rel}")
     return {"path": rel, "state": "PRESENT", "size": size, "sha256": digest.hexdigest()}
@@ -166,10 +175,18 @@ def _read_snapshot(path: Path, rel: str) -> dict[str, Any]:
 def _snapshot(root: Path, relative_paths: Sequence[str]) -> tuple[list[dict[str, Any]], list[str]]:
     entries: list[dict[str, Any]] = []
     errors: list[str] = []
+    total_bytes = 0
+    if len(relative_paths) > MAX_SNAPSHOT_FILES:
+        message = f"snapshot file count exceeds {MAX_SNAPSHOT_FILES}"
+        return ([{"path": rel, "state": "ERROR", "size": None, "sha256": None} for rel in relative_paths],
+                [message])
     for rel in relative_paths:
         try:
             path = _safe_relative_file(root, rel)
-            entries.append(_read_snapshot(path, rel))
+            item = _read_snapshot(path, rel, MAX_SNAPSHOT_TOTAL_BYTES - total_bytes)
+            entries.append(item)
+            if item["state"] == "PRESENT":
+                total_bytes += int(item["size"])
         except (OSError, ValueError, TypeError) as exc:
             entries.append({"path": rel, "state": "ERROR", "size": None, "sha256": None})
             errors.append(f"{rel}: {type(exc).__name__}: {exc}")
@@ -346,6 +363,8 @@ def capture_run(
     if (not files or any(not isinstance(item, str) for item in files)
             or len(set(files)) != len(files)):
         raise ValueError("files must contain at least one unique project-relative path")
+    if len(files) > MAX_SNAPSHOT_FILES:
+        raise ValueError(f"files exceeds the {MAX_SNAPSHOT_FILES}-entry snapshot limit")
     if timeout is None:
         timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
     if timeout <= 0 or timeout > MAX_COMMAND_TIMEOUT_SECONDS:
