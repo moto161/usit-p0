@@ -306,6 +306,7 @@ def _read_verified_bytes(path: Path, max_bytes: int, label: str) -> bytes:
     fd = os.open(path, flags)
     try:
         opened = os.fstat(fd)
+        _reject_reparse_components(path)
         identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
         opened_identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
         if identity != opened_identity:
