@@ -114,6 +114,20 @@ class VerificationCaptureBoundsTests(unittest.TestCase):
                     timeout=capture.MAX_COMMAND_TIMEOUT_SECONDS + 1,
                 )
 
+    def test_capture_rejects_non_finite_timing_values(self):
+        import math
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            for value in (math.nan, math.inf, -math.inf):
+                with self.subTest(timeout=value):
+                    with self.assertRaises(ValueError):
+                        capture.capture_run(
+                            ["python", "-c", "pass"], project_root=project,
+                            evidence_parent=parent, files=["stable.py"],
+                            approval_ref="unit-test-approval", timeout=value,
+                        )
+
     def test_capture_snapshot_per_file_limit_fails_closed(self):
         import sys
         from usit import verification_capture as capture
