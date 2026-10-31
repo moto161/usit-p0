@@ -215,6 +215,7 @@ class BusinessSemanticsAdapter:
         self._started_at = time.monotonic()
         self._discovered: set[str] = set()
         self._read_cache: dict[str, dict[str, Any]] = {}
+        self._files_cache: tuple[Path, ...] | None = None
 
     def _check_budget(self) -> None:
         if time.monotonic() - self._started_at > MAX_SCAN_SECONDS:
@@ -297,42 +298,59 @@ class BusinessSemanticsAdapter:
         return path.resolve().relative_to(self.root).as_posix()
 
     # --------------------------------------------------------------- discovery
+    def _project_files(self) -> tuple[Path, ...]:
+        """Discover project files once, pruning skipped directories before descent."""
+        if self._files_cache is not None:
+            return self._files_cache
+
+        found: list[Path] = []
+
+        def on_walk_error(exc: OSError) -> None:
+            raise SemanticsBlocked("DIRECTORY_READ_FAILED", f"Could not enumerate project directory: {type(exc).__name__}") from exc
+
+        for current, dirnames, filenames in os.walk(
+            self.root, topdown=True, followlinks=False, onerror=on_walk_error
+        ):
+            self._check_budget()
+            base = Path(current)
+            kept_dirs: list[str] = []
+            for name in dirnames:
+                child = base / name
+                rel = child.relative_to(self.root)
+                if _is_skipped(rel):
+                    continue
+                self._count_discovery(child)
+                kept_dirs.append(name)
+            dirnames[:] = kept_dirs
+
+            for name in filenames:
+                path = base / name
+                rel = path.relative_to(self.root)
+                if _is_skipped(rel):
+                    continue
+                self._count_discovery(path)
+                found.append(path)
+
+        self._files_cache = tuple(found)
+        return self._files_cache
+
     def _find_docs(self) -> list[Path]:
-        out: list[Path] = []
-        for p in self.root.rglob("*.md"):
-            self._count_discovery(p)
-            if p.is_file() and not _is_skipped(p.relative_to(self.root)):
-                out.append(p)
-        return out
+        return [p for p in self._project_files() if p.suffix.lower() == ".md"]
 
     def _find_route_files(self) -> list[Path]:
         out: list[Path] = []
-        for p in self.root.rglob("*"):
-            self._count_discovery(p)
-            if not p.is_file():
+        for path in self._project_files():
+            if path.suffix.lower() not in (".js", ".ts"):
                 continue
-            rel = p.relative_to(self.root)
-            if _is_skipped(rel):
-                continue
-            if p.suffix not in (".js", ".ts"):
-                continue
-            posix = rel.as_posix().lower()
-            if "routes" in rel.parts or rel.name in ("auth.js", "auth.ts", "mediaauth.js", "ratelimit.js"):
-                out.append(p)
+            rel = path.relative_to(self.root)
+            if "routes" in rel.parts or path.name in ("auth.js", "auth.ts", "mediaauth.js", "ratelimit.js"):
+                out.append(path)
         return out
 
     def _find_code_files(self) -> list[Path]:
         """All source files whose contents we may grep for field references."""
-        out: list[Path] = []
-        for p in self.root.rglob("*"):
-            if not p.is_file():
-                continue
-            rel = p.relative_to(self.root)
-            if _is_skipped(rel):
-                continue
-            if p.suffix in (".js", ".ts", ".kt", ".java", ".py", ".sql", ".rb", ".go", ".cs", ".php"):
-                out.append(p)
-        return out
+        suffixes = {".js", ".ts", ".kt", ".java", ".py", ".sql", ".rb", ".go", ".cs", ".php"}
+        return [p for p in self._project_files() if p.suffix.lower() in suffixes]
 
     # ------------------------------------------------- markdown table parsing
     def _parse_md_tables(self, text: str) -> list[dict[str, Any]]:
