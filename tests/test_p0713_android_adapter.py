@@ -434,8 +434,8 @@ class CliIntegrationTests(unittest.TestCase):
 
     def test_force_requires_explicit_overwrite_authorization(self):
         p = _SyntheticAndroidProject(self)
-        p.write("settings.gradle", "include ':app'\\n")
-        p.write("app/build.gradle", "android {}\\n")
+        p.write("settings.gradle", "include ':app'\n")
+        p.write("app/build.gradle", "android {}\n")
         out = p.base / "inspect-out"
         out.mkdir()
         marker = out / "preserve.txt"
@@ -454,9 +454,9 @@ class CliIntegrationTests(unittest.TestCase):
 
     def test_force_replaces_output_symlink_without_following_target(self):
         p = _SyntheticAndroidProject(self)
-        p.write("settings.gradle", "include ':app'\\n")
-        p.write("app/build.gradle", "android {}\\n")
-        p.write("app/src/main/AndroidManifest.xml", '<manifest package="com.safe"/>\\n')
+        p.write("settings.gradle", "include ':app'\n")
+        p.write("app/build.gradle", "android {}\n")
+        p.write("app/src/main/AndroidManifest.xml", '<manifest package="com.safe"/>\n')
         out = p.base / "inspect-out"
         out.mkdir()
         outside = p.base / "outside.json"
