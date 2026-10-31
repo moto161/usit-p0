@@ -250,15 +250,31 @@ class SafeDegradationTests(unittest.TestCase):
         self.assertTrue(bad["encoding_issue"])
         self.assertTrue(bad["read_ok"])
 
-    def test_oversized_file_is_skipped_safely(self):
+    def test_oversized_file_blocks_android_analysis(self):
         p = _SyntheticAndroidProject(self)
-        p.write("settings.gradle", "include ':app'\n")
-        big = "x = 1\n" * 200000  # ~2 MiB, exceeds MAX_FILE_BYTES (1 MiB)
+        p.write("settings.gradle", "include ':app'\\n")
+        big = "x = 1\\n" * 200000  # ~2 MiB, exceeds MAX_FILE_BYTES (1 MiB)
         p.write("app/build.gradle", big)
-        prof = p.profile()
-        # Analysis still completes; the oversized file is not read for content.
-        self.assertEqual(prof["detection_status"], "DETECTED_GRADLE_NO_ANDROID_MANIFEST")
-        self.assertTrue(any(b["rel_path"].endswith("build.gradle") for b in prof["build_files"]))
+        with self.assertRaises(AdapterBlocked) as blocked:
+            p.profile()
+        self.assertEqual(blocked.exception.code, "FILE_SIZE_LIMIT_EXCEEDED")
+
+    def test_android_scan_time_budget_fails_closed(self):
+        p = _SyntheticAndroidProject(self)
+        p.write("settings.gradle", "include ':app'\\n")
+        with patch.object(adapter, "MAX_SCAN_SECONDS", -1):
+            with self.assertRaises(AdapterBlocked) as blocked:
+                p.profile()
+        self.assertEqual(blocked.exception.code, "SCAN_TIME_BUDGET_EXCEEDED")
+
+    def test_android_entry_budget_fails_closed(self):
+        p = _SyntheticAndroidProject(self)
+        p.write("settings.gradle", "include ':app'\\n")
+        obj = AndroidProjectAdapter(p.root)
+        obj._entry_count = adapter.MAX_FILES
+        with self.assertRaises(AdapterBlocked) as blocked:
+            obj._check_budget()
+        self.assertEqual(blocked.exception.code, "FILE_BUDGET_EXCEEDED")
 
 
 class PathSafetyTests(unittest.TestCase):
