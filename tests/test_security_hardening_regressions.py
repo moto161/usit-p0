@@ -114,6 +114,50 @@ class VerificationCaptureBoundsTests(unittest.TestCase):
                     timeout=capture.MAX_COMMAND_TIMEOUT_SECONDS + 1,
                 )
 
+    def test_capture_snapshot_per_file_limit_fails_closed(self):
+        import sys
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            with patch.object(capture, "MAX_SNAPSHOT_FILE_BYTES", 4):
+                result = capture.capture_run(
+                    [sys.executable, "-c", "print('should-not-run')"],
+                    project_root=project, evidence_parent=parent,
+                    files=["stable.py"], approval_ref="unit-test-approval",
+                )
+            self.assertEqual(result.status, "NOT_VERIFIED")
+            self.assertEqual(result.exit_code, None)
+            self.assertTrue(result.manifest_valid)
+            self.assertTrue(any("per-file limit" in item for item in result.errors))
+
+    def test_capture_snapshot_total_limit_fails_closed(self):
+        import sys
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            with patch.object(capture, "MAX_SNAPSHOT_TOTAL_BYTES", 4):
+                result = capture.capture_run(
+                    [sys.executable, "-c", "print('should-not-run')"],
+                    project_root=project, evidence_parent=parent,
+                    files=["stable.py"], approval_ref="unit-test-approval",
+                )
+            self.assertEqual(result.status, "NOT_VERIFIED")
+            self.assertIsNone(result.exit_code)
+            self.assertTrue(result.manifest_valid)
+            self.assertTrue(any("total limit" in item for item in result.errors))
+
+    def test_capture_rejects_snapshot_file_count_over_limit(self):
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            with patch.object(capture, "MAX_SNAPSHOT_FILES", 0):
+                with self.assertRaises(ValueError):
+                    capture.capture_run(
+                        ["python", "-c", "pass"], project_root=project,
+                        evidence_parent=parent, files=["stable.py"],
+                        approval_ref="unit-test-approval",
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
