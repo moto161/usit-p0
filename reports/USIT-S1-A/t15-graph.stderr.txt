@@ -1,0 +1,24 @@
+test_corrupt_json_has_machine_and_human_reports (tests.test_graph_validation.GraphValidationTests.test_corrupt_json_has_machine_and_human_reports) ... ok
+test_duplicate_edge_ids_when_present (tests.test_graph_validation.GraphValidationTests.test_duplicate_edge_ids_when_present) ... ok
+test_duplicate_node_id (tests.test_graph_validation.GraphValidationTests.test_duplicate_node_id) ... ok
+test_empty_graph_is_explicitly_warned (tests.test_graph_validation.GraphValidationTests.test_empty_graph_is_explicitly_warned) ... ok
+test_invalid_line_number (tests.test_graph_validation.GraphValidationTests.test_invalid_line_number) ... ok
+test_legacy_v1_boolean_does_not_claim_resolved_without_explicit_state (tests.test_graph_validation.GraphValidationTests.test_legacy_v1_boolean_does_not_claim_resolved_without_explicit_state) ... ok
+test_markdown_lists_relation_reference_and_reason (tests.test_graph_validation.GraphValidationTests.test_markdown_lists_relation_reference_and_reason) ... ok
+test_missing_evidence (tests.test_graph_validation.GraphValidationTests.test_missing_evidence) ... ok
+test_missing_project_file_reference_is_rejected (tests.test_graph_validation.GraphValidationTests.test_missing_project_file_reference_is_rejected) ... ok
+test_missing_source_node (tests.test_graph_validation.GraphValidationTests.test_missing_source_node) ... ok
+test_missing_target_node (tests.test_graph_validation.GraphValidationTests.test_missing_target_node) ... ok
+test_out_of_range_line_number (tests.test_graph_validation.GraphValidationTests.test_out_of_range_line_number) ... ok
+test_path_traversal_is_rejected (tests.test_graph_validation.GraphValidationTests.test_path_traversal_is_rejected) ... ok
+test_resolved_call_requires_real_definition_edge (tests.test_graph_validation.GraphValidationTests.test_resolved_call_requires_real_definition_edge) ... ok
+test_unknown_relation_status_is_not_success (tests.test_graph_validation.GraphValidationTests.test_unknown_relation_status_is_not_success) ... ok
+test_unknown_relation_type (tests.test_graph_validation.GraphValidationTests.test_unknown_relation_type) ... ok
+test_valid_v1_fixture_and_metrics (tests.test_graph_validation.GraphValidationTests.test_valid_v1_fixture_and_metrics) ... ok
+test_windows_absolute_path_is_rejected (tests.test_graph_validation.GraphValidationTests.test_windows_absolute_path_is_rejected) ... ok
+test_wrong_version_blocks_valid_status (tests.test_graph_validation.GraphValidationTests.test_wrong_version_blocks_valid_status) ... ok
+
+----------------------------------------------------------------------
+Ran 19 tests in 0.478s
+
+OK

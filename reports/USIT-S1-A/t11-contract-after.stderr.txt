@@ -1,0 +1,12 @@
+test_contract_record_shape_statuses_and_graph_v1_adapter (tests.test_parser_contract.ParserContractTests.test_contract_record_shape_statuses_and_graph_v1_adapter) ... ok
+test_failure_and_size_boundaries_are_diagnostic_and_bounded (tests.test_parser_contract.ParserContractTests.test_failure_and_size_boundaries_are_diagnostic_and_bounded) ... ok
+test_fixture_benchmark_metrics_keep_unsupported_languages_unmeasured (tests.test_parser_contract.ParserContractTests.test_fixture_benchmark_metrics_keep_unsupported_languages_unmeasured) ... ok
+test_javascript_typescript_associations_recompute_after_source_changes (tests.test_parser_contract.ParserContractTests.test_javascript_typescript_associations_recompute_after_source_changes) ... ok
+test_javascript_typescript_semantic_fixture_and_jvm_honest_fallback (tests.test_parser_contract.ParserContractTests.test_javascript_typescript_semantic_fixture_and_jvm_honest_fallback) ... ok
+test_python_ground_truth_includes_namespace_star_decorator_and_rebinding (tests.test_parser_contract.ParserContractTests.test_python_ground_truth_includes_namespace_star_decorator_and_rebinding) ... ok
+test_test_asset_links_only_explicit_import_and_call (tests.test_parser_contract.ParserContractTests.test_test_asset_links_only_explicit_import_and_call) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 69.132s
+
+OK

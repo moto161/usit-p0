@@ -1,0 +1,13 @@
+{
+  "schema_version": "usit-graph-v1",
+  "nodes": [
+    {"id": "file:app.py", "type": "file", "label": "app.py", "evidence": {"path": "app.py"}},
+    {"id": "symbol:app.py#run:1", "type": "function", "label": "run", "evidence": {"path": "app.py", "line": 1, "excerpt": "def run():"}}
+  ],
+  "edges": [
+    {"source": "file:app.py", "target": "symbol:app.py#run:1", "type": "defines", "evidence": {"path": "app.py", "line": 1}, "method": "python-ast", "confidence": "high"},
+    {"source": "file:app.py", "target": "symbol:app.py#run:1", "type": "calls", "evidence": {"path": "app.py", "line": 2}, "method": "python-ast", "confidence": "high", "resolved": true, "resolution_status": "RESOLVED"}
+  ],
+  "edge_type_counts": {"defines": 1, "calls": 1},
+  "node_type_counts": {"file": 1, "function": 1}
+}

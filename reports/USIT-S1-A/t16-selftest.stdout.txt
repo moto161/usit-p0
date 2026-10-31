@@ -1,0 +1,7 @@
+PASS | 敏感文件/目录排除
+PASS | Python符号提取
+PASS | Python导入提取
+PASS | 扫描输出生成
+PASS | 增量未变识别
+PASS | 输出目录安全守卫
+RESULT: PASS (6/6)

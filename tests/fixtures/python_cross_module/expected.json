@@ -1,0 +1,33 @@
+{
+  "schema_version": "usit-python-fixture-truth-v2",
+  "scope": "Synthetic fixture only; no claim about all Python projects.",
+  "expected_relations": [
+    {"path":"main.py","line":6,"column":4,"callee":"mod.same","status":"RESOLVED","target":{"file":"alpha.py","name":"same","line":1,"id":"symbol:alpha.py#same:1"},"import_evidence":{"path":"main.py","line":1},"candidate_targets":["symbol:alpha.py#same:1"]},
+    {"path":"main.py","line":7,"column":4,"callee":"beta_same","status":"RESOLVED","target":{"file":"beta.py","name":"same","line":1,"id":"symbol:beta.py#same:1"},"import_evidence":{"path":"main.py","line":2},"candidate_targets":null},
+    {"path":"pkg/entry.py","line":5,"column":4,"callee":"local_helper","status":"RESOLVED","target":{"file":"pkg/util.py","name":"helper","line":1,"id":"symbol:pkg/util.py#helper:1"},"import_evidence":{"path":"pkg/entry.py","line":1},"candidate_targets":null},
+    {"path":"pkg/entry.py","line":6,"column":4,"callee":"util_module.helper","status":"RESOLVED","target":{"file":"pkg/util.py","name":"helper","line":1,"id":"symbol:pkg/util.py#helper:1"},"import_evidence":{"path":"pkg/entry.py","line":2},"candidate_targets":["symbol:pkg/util.py#helper:1"]},
+    {"path":"cycle_left.py","line":4,"column":11,"callee":"right","status":"RESOLVED","target":{"file":"cycle_right.py","name":"right","line":3,"id":"symbol:cycle_right.py#right:3"},"import_evidence":{"path":"cycle_left.py","line":1},"candidate_targets":null},
+    {"path":"cycle_right.py","line":4,"column":11,"callee":"left","status":"RESOLVED","target":{"file":"cycle_left.py","name":"left","line":3,"id":"symbol:cycle_left.py#left:3"},"import_evidence":{"path":"cycle_right.py","line":1},"candidate_targets":null},
+    {"path":"ns/sub/caller.py","line":6,"column":4,"callee":"renamed","status":"RESOLVED","target":{"file":"ns/api.py","name":"public_api","line":3,"id":"symbol:ns/api.py#public_api:3"},"import_evidence":{"path":"ns/sub/caller.py","line":1},"candidate_targets":null},
+    {"path":"tests/test_api.py","line":4,"column":11,"callee":"public_api","status":"RESOLVED","target":{"file":"ns/api.py","name":"public_api","line":3,"id":"symbol:ns/api.py#public_api:3"},"import_evidence":{"path":"tests/test_api.py","line":1},"candidate_targets":null},
+
+    {"path":"main.py","line":8,"column":4,"callee":"sqrt","status":"EXTERNAL","target":null,"import_evidence":{"path":"main.py","line":3},"candidate_targets":null},
+    {"path":"main.py","line":10,"column":4,"callee":"getattr","status":"EXTERNAL","target":null,"import_evidence":null,"candidate_targets":null},
+    {"path":"missing_module.py","line":4,"column":11,"callee":"absent_call","status":"EXTERNAL","target":null,"import_evidence":{"path":"missing_module.py","line":1},"candidate_targets":null},
+    {"path":"ns/sub/caller.py","line":7,"column":4,"callee":"decorated_api","status":"UNKNOWN","target":{"file":"ns/api.py","name":"decorated_api","line":13,"id":"symbol:ns/api.py#decorated_api:13"},"import_evidence":{"path":"ns/sub/caller.py","line":2},"candidate_targets":null},
+    {"path":"ns/sub/caller.py","line":8,"column":4,"callee":"hidden_api","status":"UNKNOWN","target":null,"import_evidence":null,"candidate_targets":null},
+    {"path":"conditional.py","line":5,"column":4,"callee":"same","status":"UNKNOWN","target":null,"import_evidence":{"path":"conditional.py","line":2},"candidate_targets":["symbol:alpha.py#same:1"]},
+    {"path":"main.py","line":9,"column":4,"callee":"missing","status":"UNRESOLVED","target":null,"import_evidence":null,"candidate_targets":null},
+    {"path":"ambiguous.py","line":7,"column":4,"callee":"same","status":"AMBIGUOUS","target":null,"import_evidence":null,"candidate_targets":["symbol:alpha.py#same:1","symbol:beta.py#same:1"]},
+    {"path":"duplicate_use.py","line":4,"column":4,"callee":"dup.work","status":"AMBIGUOUS","target":null,"import_evidence":{"path":"duplicate_use.py","line":1},"candidate_targets":["symbol:duplicate.py#work:1","symbol:duplicate/__init__.py#work:1"]},
+    {"path":"main.py","line":10,"column":4,"callee":"getattr(mod, 'same')","status":"DYNAMIC","target":null,"import_evidence":null,"candidate_targets":null},
+    {"path":"main.py","line":13,"column":4,"callee":"func","status":"DYNAMIC","target":null,"import_evidence":null,"candidate_targets":null},
+    {"path":"main.py","line":16,"column":4,"callee":"mod.same","status":"DYNAMIC","target":null,"import_evidence":null,"candidate_targets":null},
+    {"path":"shadowed.py","line":7,"column":4,"callee":"target","status":"DYNAMIC","target":null,"import_evidence":null,"candidate_targets":["symbol:shadowed.py#target:1"]},
+    {"path":"ns/sub/rebind.py","line":9,"column":4,"callee":"chosen","status":"DYNAMIC","target":null,"import_evidence":null,"candidate_targets":null}
+  ],
+  "expected_parse_errors": [{"path":"broken.py","code":"PYTHON_SYNTAX_ERROR","line":1}],
+  "expected_files_with_parse_errors": ["broken.py"],
+  "expected_modules_indexed": 20,
+  "expected_symbols_indexed": 25
+}

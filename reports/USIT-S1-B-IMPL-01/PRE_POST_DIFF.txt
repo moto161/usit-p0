@@ -1,0 +1,6 @@
+10a11
+> 12f688261feea6cb231837f5223dbce5e1aa2cb695aa61140722c70983a182bd	usit/scanner.py
+46a48
+> ac7f77fe1c8e92728ea7ee4bb2b9d59aa0fd537523a92cf87580e84ef8698d40	tests/test_s1b_degradation.py
+54d55
+< c70a1a4baf3a6a17cb7ec0ed4748db7194d70e3008ab32f0ac05e3e55f797912	usit/scanner.py

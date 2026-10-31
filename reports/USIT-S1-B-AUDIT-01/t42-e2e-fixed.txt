@@ -1,0 +1,17 @@
+=== C：四场景端到端结果 ===
+broken.py    lang=Python     degraded=True reason=PYTHON_SYNTAX_ERROR method=regex-candidate status=UNKNOWN
+             symbols=['broken']  ref=0 ref_valid=True ref_code=PYTHON_SYNTAX_ERROR
+main.js      lang=JavaScript degraded=True reason=SEMANTIC_PARSER_UNAVAILABLE method=regex-candidate status=UNKNOWN
+             symbols=[]  ref=0 ref_valid=False ref_code=None
+notes.xyz    lang=Unknown    degraded=True reason=UNSUPPORTED_LANGUAGE_NO_SEMANTIC_PARSER method=discovery-only status=UNKNOWN
+             symbols=[]  ref=None ref_valid=False ref_code=None
+ok.py        lang=Python     degraded=False reason=None method=python-ast status=RESOLVED
+             symbols=['S', 'h', 'r']  ref=None ref_valid=False ref_code=None
+=== E：重复扫描确定性 ===
+   degradation 两次一致 = True
+=== B：传播路径 ===
+   scan_manifest.json 含字段 = True
+   knowledge_graph.json 含字段 = False
+   report.md 含 'degraded' = False
+   report.md 含 'analysis_degradation' = False
+   report.md 是否含调用解析状态行 = True

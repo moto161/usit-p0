@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+node_modules/
+outputs/
+.codex-remote-attachments/
+_zrf12impl_restore_backup/

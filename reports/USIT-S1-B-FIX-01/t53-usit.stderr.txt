@@ -1,0 +1,19 @@
+test_is_sensitive_chinese_and_english (tests.test_usit.P0_1_Sensitive.test_is_sensitive_chinese_and_english) ... ok
+test_scrub_defense_in_depth (tests.test_usit.P0_1_Sensitive.test_scrub_defense_in_depth) ... ok
+test_sensitive_content_and_path_not_in_outputs (tests.test_usit.P0_1_Sensitive.test_sensitive_content_and_path_not_in_outputs) ... ok
+test_backup_dir_classified (tests.test_usit.P0_2_Category.test_backup_dir_classified) ... ok
+test_category_split (tests.test_usit.P0_2_Category.test_category_split) ... ok
+test_language_separate_from_category (tests.test_usit.P0_2_Category.test_language_separate_from_category) ... ok
+test_graph_has_calls_and_references (tests.test_usit.P0_3_Relations.test_graph_has_calls_and_references) ... ok
+test_import_only_call_is_not_claimed_as_resolved (tests.test_usit.P0_3_Relations.test_import_only_call_is_not_claimed_as_resolved) ... ok
+test_python_calls_resolved (tests.test_usit.P0_3_Relations.test_python_calls_resolved) ... ok
+test_call_relation_stats_and_consistency (tests.test_usit.P0_4_TestPlan.test_call_relation_stats_and_consistency) ... ok
+test_inventory_classification (tests.test_usit.P0_4_TestPlan.test_inventory_classification) ... ok
+test_five_scenarios (tests.test_usit.P0_5_Incremental.test_five_scenarios) ... ok
+test_no_overwrite_creates_subdir (tests.test_usit.P0_5_Incremental.test_no_overwrite_creates_subdir) ... ok
+test_target_not_modified (tests.test_usit.P0_5_Incremental.test_target_not_modified) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 24.503s
+
+OK

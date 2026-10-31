@@ -1,0 +1,28 @@
+test_all_five_conclusion_types_exist (tests.test_understanding_projection.ConclusionTypeLegalityTests.test_all_five_conclusion_types_exist) ... ok
+test_evidence_reference_rejects_caller_trust_claims (tests.test_understanding_projection.ConclusionTypeLegalityTests.test_evidence_reference_rejects_caller_trust_claims) ... ok
+test_verified_fact_cannot_be_constructed (tests.test_understanding_projection.ConclusionTypeLegalityTests.test_verified_fact_cannot_be_constructed)
+Static data may never claim runtime verification. ... ok
+test_same_identity_different_content_is_conflict (tests.test_understanding_projection.ConflictTests.test_same_identity_different_content_is_conflict) ... ok
+test_repeated_projection_is_identical (tests.test_understanding_projection.DeterminismTests.test_repeated_projection_is_identical) ... ok
+test_schema_version_is_stamped (tests.test_understanding_projection.DeterminismTests.test_schema_version_is_stamped) ... ok
+test_invalid_line_is_dropped_not_guessed (tests.test_understanding_projection.EvidenceProvenanceTests.test_invalid_line_is_dropped_not_guessed) ... ok
+test_missing_location_is_not_invented (tests.test_understanding_projection.EvidenceProvenanceTests.test_missing_location_is_not_invented) ... ok
+test_path_symbol_and_line_are_taken_from_evidence_when_present (tests.test_understanding_projection.EvidenceProvenanceTests.test_path_symbol_and_line_are_taken_from_evidence_when_present) ... ok
+test_projection_does_not_mutate_input (tests.test_understanding_projection.InputImmutabilityTests.test_projection_does_not_mutate_input) ... ok
+test_ai_hypothesis_is_not_success (tests.test_understanding_projection.ProjectionClassificationTests.test_ai_hypothesis_is_not_success) ... ok
+test_confidence_is_not_assigned (tests.test_understanding_projection.ProjectionClassificationTests.test_confidence_is_not_assigned) ... ok
+test_invalid_or_missing_status_is_unknown (tests.test_understanding_projection.ProjectionClassificationTests.test_invalid_or_missing_status_is_unknown) ... ok
+test_missing_evidence_is_unknown_not_fabricated (tests.test_understanding_projection.ProjectionClassificationTests.test_missing_evidence_is_unknown_not_fabricated) ... ok
+test_non_success_states_not_counted_as_success (tests.test_understanding_projection.ProjectionClassificationTests.test_non_success_states_not_counted_as_success) ... ok
+test_non_success_states_preserved_as_unknown (tests.test_understanding_projection.ProjectionClassificationTests.test_non_success_states_preserved_as_unknown) ... ok
+test_projection_never_emits_verified_fact (tests.test_understanding_projection.ProjectionClassificationTests.test_projection_never_emits_verified_fact) ... ok
+test_resolved_with_evidence_is_static_inference (tests.test_understanding_projection.ProjectionClassificationTests.test_resolved_with_evidence_is_static_inference) ... ok
+test_duplicate_records_are_stable_and_not_conflicts (tests.test_understanding_projection.RobustnessTests.test_duplicate_records_are_stable_and_not_conflicts) ... ok
+test_empty_input_yields_empty_projection (tests.test_understanding_projection.RobustnessTests.test_empty_input_yields_empty_projection) ... ok
+test_non_mapping_record_degrades_to_unknown (tests.test_understanding_projection.RobustnessTests.test_non_mapping_record_degrades_to_unknown) ... ok
+test_non_sequence_input_is_rejected (tests.test_understanding_projection.RobustnessTests.test_non_sequence_input_is_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 22 tests in 0.015s
+
+OK

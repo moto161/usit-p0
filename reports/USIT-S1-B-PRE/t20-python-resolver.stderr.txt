@@ -1,0 +1,11 @@
+test_javascript_intra_file_call_uses_compiler_api_evidence (tests.test_python_resolver.PythonCrossModuleResolverTests.test_javascript_intra_file_call_uses_compiler_api_evidence) ... ok
+test_no_project_code_is_imported_or_executed (tests.test_python_resolver.PythonCrossModuleResolverTests.test_no_project_code_is_imported_or_executed) ... ok
+test_resolved_calls_have_definition_and_import_evidence (tests.test_python_resolver.PythonCrossModuleResolverTests.test_resolved_calls_have_definition_and_import_evidence) ... ok
+test_resolves_alias_direct_relative_and_cycle_imports (tests.test_python_resolver.PythonCrossModuleResolverTests.test_resolves_alias_direct_relative_and_cycle_imports) ... ok
+test_scan_emits_traceable_cross_file_edges_and_quality_gate (tests.test_python_resolver.PythonCrossModuleResolverTests.test_scan_emits_traceable_cross_file_edges_and_quality_gate) ... ok
+test_states_external_unresolved_ambiguous_and_dynamic (tests.test_python_resolver.PythonCrossModuleResolverTests.test_states_external_unresolved_ambiguous_and_dynamic) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 9.885s
+
+OK

@@ -1,0 +1,9 @@
+receipt_version: 1
+manifest_filename: USIT-STAGE-B-DESIGN-05.4-HASH-MANIFEST.md
+manifest_size_bytes: 1032
+manifest_sha256: d29c0dfb103b53b3f0258f861113429ec355528349a45b21866f7a9c3feec016
+hash_algorithm: SHA-256
+generated_at: 2026-10-30T23:34:00+08:00
+source_workspace: C:\Users\Administrator\WorkBuddy\2026-10-15-22-09-47\usit_p0
+verification_status: NOT_VERIFIED
+verification_method: external-audit-anchor-pending

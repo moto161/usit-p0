@@ -1,0 +1,527 @@
+{
+  "schema_version": "usit-js-ts-fixture-truth-v1",
+  "expected_relations": [
+    {
+      "id": "call-named-alias",
+      "path": "src/main.ts",
+      "line": 18,
+      "column": 13,
+      "callee": "renamed",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/a.ts",
+        "name": "named",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-default",
+      "path": "src/main.ts",
+      "line": 19,
+      "column": 13,
+      "callee": "defaultFn",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/b.ts",
+        "name": "defaultFn",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-namespace",
+      "path": "src/main.ts",
+      "line": 20,
+      "column": 13,
+      "callee": "namespaceMod.namespaceCall",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/modules/namespace.ts",
+        "name": "namespaceCall",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-reexport",
+      "path": "src/main.ts",
+      "line": 21,
+      "column": 13,
+      "callee": "reexported",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/modules/reexported.ts",
+        "name": "reexported",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "reexport",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-same-left",
+      "path": "src/main.ts",
+      "line": 22,
+      "column": 13,
+      "callee": "leftSame",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/modules/left.ts",
+        "name": "same",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-same-right",
+      "path": "src/main.ts",
+      "line": 23,
+      "column": 13,
+      "callee": "rightSame",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/modules/right.ts",
+        "name": "same",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-path-alias",
+      "path": "src/main.ts",
+      "line": 24,
+      "column": 13,
+      "callee": "aliased",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/modules/aliased.ts",
+        "name": "aliased",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-cycle",
+      "path": "src/main.ts",
+      "line": 25,
+      "column": 13,
+      "callee": "cycleEntry",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/cycle/a.ts",
+        "name": "cycleEntry",
+        "line": 2
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-external",
+      "path": "src/main.ts",
+      "line": 26,
+      "column": 13,
+      "callee": "externalCall",
+      "status": "EXTERNAL",
+      "evidence_kinds": [
+        "call",
+        "external_definition"
+      ]
+    },
+    {
+      "id": "call-missing",
+      "path": "src/main.ts",
+      "line": 27,
+      "column": 13,
+      "callee": "missingCall",
+      "status": "UNRESOLVED",
+      "diagnostic": "PROJECT_MODULE_NOT_FOUND"
+    },
+    {
+      "id": "call-imported-local",
+      "path": "src/main.ts",
+      "line": 28,
+      "column": 13,
+      "callee": "importedLocalSame",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/modules/local.ts",
+        "name": "localSame",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-local",
+      "path": "src/main.ts",
+      "line": 29,
+      "column": 13,
+      "callee": "localSame",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/main.ts",
+        "name": "localSame",
+        "line": 15
+      },
+      "evidence_kinds": [
+        "call",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-computed",
+      "path": "src/main.ts",
+      "line": 30,
+      "column": 13,
+      "callee": "(namespaceMod as any)[key]",
+      "status": "DYNAMIC",
+      "diagnostic": "COMPUTED_PROPERTY_CALL"
+    },
+    {
+      "id": "call-types-only",
+      "path": "src/main.ts",
+      "line": 31,
+      "column": 13,
+      "callee": "typeOnlyCall",
+      "status": "UNKNOWN",
+      "diagnostic": "TYPE_DECLARATION_HAS_NO_RUNTIME_TARGET"
+    },
+    {
+      "id": "call-overload",
+      "path": "src/main.ts",
+      "line": 32,
+      "column": 13,
+      "callee": "overloaded",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/modules/overloads.ts",
+        "name": "overloaded",
+        "line": 3
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-random",
+      "path": "src/main.ts",
+      "line": 33,
+      "column": 18,
+      "callee": "Math.random",
+      "status": "EXTERNAL",
+      "target": {
+        "file": "<ts-lib>/lib/lib.es5.d.ts",
+        "name": "random",
+        "line": 744,
+        "id": "external:<ts-lib>/lib/lib.es5.d.ts#random:744"
+      }
+    },
+    {
+      "id": "call-conditional",
+      "path": "src/main.ts",
+      "line": 34,
+      "column": 13,
+      "callee": "choose",
+      "status": "AMBIGUOUS",
+      "candidate_targets": [
+        "symbol:src/modules/left.ts#same:1",
+        "symbol:src/modules/right.ts#same:1"
+      ]
+    },
+    {
+      "id": "call-join",
+      "path": "src/main.ts",
+      "line": 35,
+      "column": 10,
+      "callee": "[a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p].join",
+      "status": "EXTERNAL",
+      "target": {
+        "file": "<ts-lib>/lib/lib.es5.d.ts",
+        "name": "join",
+        "line": 1362,
+        "id": "external:<ts-lib>/lib/lib.es5.d.ts#join:1362"
+      }
+    },
+    {
+      "id": "call-js-esm",
+      "path": "src/main.js",
+      "line": 3,
+      "column": 10,
+      "callee": "jsTarget",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/js-target.mjs",
+        "name": "jsTarget",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-commonjs",
+      "path": "src/cjs-main.cjs",
+      "line": 2,
+      "column": 39,
+      "callee": "target.cjsTarget",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/cjs-target.cjs",
+        "name": "cjsTarget",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-test-link",
+      "path": "src/__tests__/test_main.ts",
+      "line": 2,
+      "column": 32,
+      "callee": "run",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/main.ts",
+        "name": "run",
+        "line": 17
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-cycle-back",
+      "path": "src/cycle/a.ts",
+      "line": 2,
+      "column": 47,
+      "callee": "cycleOther",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/cycle/b.ts",
+        "name": "cycleOther",
+        "line": 2
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "call-cycle-forward",
+      "path": "src/cycle/b.ts",
+      "line": 3,
+      "column": 46,
+      "callee": "cycleEntry",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/cycle/a.ts",
+        "name": "cycleEntry",
+        "line": 2
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "extra-path-fallback",
+      "path": "src/extra-cases.ts",
+      "line": 8,
+      "column": 13,
+      "callee": "fallbackTarget",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/routes/api.ts",
+        "name": "fallbackTarget",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "extra-specific-path-wins",
+      "path": "src/extra-cases.ts",
+      "line": 9,
+      "column": 13,
+      "callee": "priorityTarget",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/priority/api.ts",
+        "name": "priorityTarget",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "extra-multilevel-barrel",
+      "path": "src/extra-cases.ts",
+      "line": 10,
+      "column": 13,
+      "callee": "reexported",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/modules/reexported.ts",
+        "name": "reexported",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "reexport",
+        "definition"
+      ]
+    },
+    {
+      "id": "extra-package-exports-types-condition",
+      "path": "src/extra-cases.ts",
+      "line": 11,
+      "column": 13,
+      "callee": "conditionalTarget",
+      "status": "EXTERNAL",
+      "target": {
+        "file": "node_modules/conditional-lib/types.d.ts",
+        "name": "conditionalTarget",
+        "line": 1
+      },
+      "diagnostic": "DECLARATION_OUTSIDE_ANALYZED_SOURCE_SET",
+      "evidence_kinds": [
+        "call",
+        "external_definition"
+      ]
+    },
+    {
+      "id": "extra-local-parameter-shadows-import",
+      "path": "src/extra-cases.ts",
+      "line": 12,
+      "column": 13,
+      "callee": "shadowed",
+      "status": "UNKNOWN",
+      "import_evidence": null
+    },
+    {
+      "id": "extra-unshadowed-import",
+      "path": "src/extra-cases.ts",
+      "line": 17,
+      "column": 10,
+      "callee": "shadowed",
+      "status": "RESOLVED",
+      "target": {
+        "file": "src/a.ts",
+        "name": "named",
+        "line": 1
+      },
+      "evidence_kinds": [
+        "call",
+        "import",
+        "definition"
+      ]
+    },
+    {
+      "id": "extra-computed-property",
+      "path": "src/extra-cases.ts",
+      "line": 21,
+      "column": 10,
+      "callee": "object[key]",
+      "status": "DYNAMIC",
+      "diagnostic": "COMPUTED_PROPERTY_CALL"
+    },
+    {
+      "id": "test-framework-test-call",
+      "path": "src/__tests__/test_main.ts",
+      "line": 2,
+      "column": 1,
+      "callee": "test",
+      "status": "DYNAMIC",
+      "diagnostic": "CALL_TARGET_HAS_ANY_TYPE"
+    },
+    {
+      "id": "test-framework-assertion-chain",
+      "path": "src/__tests__/test_main.ts",
+      "line": 2,
+      "column": 25,
+      "callee": "expect(run('dynamic')).toBeDefined",
+      "status": "DYNAMIC",
+      "diagnostic": "CALL_TARGET_HAS_ANY_TYPE"
+    },
+    {
+      "id": "test-framework-expect",
+      "path": "src/__tests__/test_main.ts",
+      "line": 2,
+      "column": 25,
+      "callee": "expect",
+      "status": "DYNAMIC",
+      "diagnostic": "CALL_TARGET_HAS_ANY_TYPE"
+    }
+  ],
+  "expected_parse_errors": [
+    {
+      "path": "src/broken.ts",
+      "code_prefix": "TYPESCRIPT_SYNTAX_ERROR_",
+      "line": 2
+    }
+  ],
+  "expected_capabilities": {
+    "supported_extensions": [
+      ".js",
+      ".jsx",
+      ".mjs",
+      ".cjs",
+      ".ts",
+      ".tsx"
+    ],
+    "unresolved_config_diagnostics": 0
+  },
+  "test_execution_status": "NOT_RUN"
+}

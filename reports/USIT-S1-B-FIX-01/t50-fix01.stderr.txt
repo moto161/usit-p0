@@ -1,0 +1,12 @@
+test_a_js_ts_ref_resolves_after_serialisation (tests.test_s1b_fix01_ref.DiagnosticsRefEndToEnd.test_a_js_ts_ref_resolves_after_serialisation) ... ok
+test_b_python_syntax_error_ref_still_valid (tests.test_s1b_fix01_ref.DiagnosticsRefEndToEnd.test_b_python_syntax_error_ref_still_valid) ... ok
+test_c_clean_ast_has_no_false_degradation (tests.test_s1b_fix01_ref.DiagnosticsRefEndToEnd.test_c_clean_ast_has_no_false_degradation) ... ok
+test_d_unsupported_language_unchanged (tests.test_s1b_fix01_ref.DiagnosticsRefEndToEnd.test_d_unsupported_language_unchanged) ... ok
+test_e_serialisation_roundtrip_keeps_ref_valid (tests.test_s1b_fix01_ref.DiagnosticsRefEndToEnd.test_e_serialisation_roundtrip_keeps_ref_valid) ... ok
+test_f_repeated_scan_is_deterministic (tests.test_s1b_fix01_ref.DiagnosticsRefEndToEnd.test_f_repeated_scan_is_deterministic) ... ok
+test_g_symbol_and_call_structures_unchanged (tests.test_s1b_fix01_ref.DiagnosticsRefEndToEnd.test_g_symbol_and_call_structures_unchanged) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 67.833s
+
+OK

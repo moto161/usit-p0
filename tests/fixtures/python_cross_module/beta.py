@@ -1,0 +1,2 @@
+def same():
+    return "beta"

@@ -1,0 +1,10 @@
+=== 直接 analyze_file（单元测试路径） ===
+symbols = ['S', 'h']
+diagnostics = [{'code': 'PYTHON_SYNTAX_ERROR', 'severity': 'ERROR', 'line': 2, 'message': 'SyntaxError'}]
+degradation = {'degraded': True, 'reason': 'PYTHON_SYNTAX_ERROR', 'method': 'regex-candidate', 'resolution_status': 'UNKNOWN', 'diagnostics_ref': 0}
+=== 端到端 scan_project 路径 ===
+path = ok.py
+  symbols = ['S', 'h']
+  diagnostics = [{'code': 'PYTHON_SYNTAX_ERROR', 'line': 2, 'message': 'SyntaxError', 'severity': 'ERROR'}]
+  degradation = {'degraded': True, 'diagnostics_ref': 0, 'method': 'regex-candidate', 'reason': 'PYTHON_SYNTAX_ERROR', 'resolution_status': 'UNKNOWN'}
+  parser = {'contract_version': 'usit-parser-result-v1', 'degradation': 'Syntax or encoding errors remain diagnostic UNKNOWN; no target code is executed.', 'level': 'PARTIAL_SEMANTIC', 'parser_name': 'python-ast-project', 'parser_version': 'stdlib-ast', 'supported': ['syntax symbols', 'explicit imports', 'conservative project-local calls'], 'unsupported': ['runtime mutation', 'reflection', 'decorator effects', 'star-import expansion', 'conditional import certainty']}

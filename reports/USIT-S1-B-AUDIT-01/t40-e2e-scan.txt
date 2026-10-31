@@ -1,0 +1,25 @@
+=== 场景 C：端到端扫描产物中的 analysis_degradation ===
+path='broken.py' lang='Python'
+   degradation={'degraded': True, 'diagnostics_ref': 0, 'method': 'regex-candidate', 'reason': 'PYTHON_SYNTAX_ERROR', 'resolution_status': 'UNKNOWN'}
+   diagnostics_ref=0 序列化后有效=True 指向code=PYTHON_SYNTAX_ERROR
+path='main.js' lang='JavaScript'
+   degradation={'degraded': True, 'diagnostics_ref': 0, 'method': 'regex-candidate', 'reason': 'SEMANTIC_PARSER_UNAVAILABLE', 'resolution_status': 'UNKNOWN'}
+   diagnostics_ref=0 序列化后有效=False 指向code=None
+path='notes.xyz' lang='Unknown'
+   degradation={'degraded': True, 'diagnostics_ref': None, 'method': 'discovery-only', 'reason': 'UNSUPPORTED_LANGUAGE_NO_SEMANTIC_PARSER', 'resolution_status': 'UNKNOWN'}
+   diagnostics_ref=None (无诊断，符合预期)
+path='ok.py' lang='Python'
+   degradation={'degraded': True, 'diagnostics_ref': 0, 'method': 'regex-candidate', 'reason': 'PYTHON_SYNTAX_ERROR', 'resolution_status': 'UNKNOWN'}
+   diagnostics_ref=0 序列化后有效=True 指向code=PYTHON_SYNTAX_ERROR
+=== 场景 D：序列化往返后索引有效性（已含于上方 JSON 读取） ===
+=== 场景 E：重复扫描确定性 ===
+   degradation 两次一致 = True
+=== 传播路径 B：产物中是否出现该字段 ===
+   scan_manifest.json 含字段 = True
+   knowledge_graph.json 含字段 = False
+   report.md 含 'degraded' = False
+   report.md 含 'analysis_degradation' = False
+=== 非成功状态是否误计成功 ===
+Traceback (most recent call last):
+  File "<stdin>", line 54, in <module>
+KeyError: 'summary'

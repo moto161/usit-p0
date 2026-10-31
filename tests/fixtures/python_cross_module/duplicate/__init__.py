@@ -1,0 +1,2 @@
+def work():
+    return "package"

@@ -1,0 +1,9 @@
+{
+    "name": "usit-p0-local-parser",
+    "version": "0.0.0",
+    "private": true,
+    "description": "Local parser runtime for USIT analysis",
+    "devDependencies": {
+        "typescript": "6.0.3"
+    }
+}

@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "jsx": "preserve",
+    "strict": true,
+    "noEmit": true,
+    "paths": {
+      "@app/*": ["src/modules/*"],
+      "@route/*": ["src/missing-routes/*", "src/routes/*"],
+      "@route/special/*": ["src/priority/*"]
+    }
+  },
+  "include": ["src/**/*"]
+}

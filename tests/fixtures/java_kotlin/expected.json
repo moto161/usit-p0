@@ -1,0 +1,15 @@
+{
+  "family": "Java/Kotlin",
+  "known_resolved_relations": [],
+  "must_remain_unknown": [
+    {"path":"main/java/demo/Main.java","callee":"same","line":6},
+    {"path":"main/java/demo/Main.java","callee":"call","line":7},
+    {"path":"main/kotlin/demo/Entry.kt","callee":"alias","line":5},
+    {"path":"main/kotlin/demo/Entry.kt","callee":"same","line":6},
+    {"path":"main/kotlin/demo/Entry.kt","callee":"dynamic","line":7},
+    {"path":"main/kotlin/demo/Entry.kt","callee":"delay","line":8}
+  ],
+  "diagnostics": [{"path":"main/java/demo/Broken.java","code":"SEMANTIC_PARSER_UNAVAILABLE"}],
+  "test_assets": [{"path":"test/java/demo/MainTest.java","execution_status":"NOT_RUN","association_status":"UNKNOWN"}],
+  "note": "Java/Kotlin semantic parsing is unavailable; all textual candidates remain UNKNOWN. Syntax diagnostics are NOT MEASURED."
+}

@@ -1,0 +1,19 @@
+EXPECTED_TYPESCRIPT_VERSION = 6.0.3
+verify_ts_lib_trust():
+{
+  "trusted": true,
+  "usit_root": "C:\\Users\\Administrator\\WorkBuddy\\2026-10-15-22-09-47\\usit_p0",
+  "ts_lib": "C:\\Users\\Administrator\\WorkBuddy\\2026-10-15-22-09-47\\usit_p0\\node_modules\\typescript",
+  "real_path": "C:\\Users\\Administrator\\WorkBuddy\\2026-10-15-22-09-47\\usit_p0\\node_modules\\typescript",
+  "version": "6.0.3",
+  "reason": null
+}
+parser_availability(fixture):
+{
+  "available": true,
+  "node": "C:\\Users\\Administrator\\.workbuddy\\binaries\\node\\versions\\22.22.2-6\\node.EXE",
+  "version": "6.0.3",
+  "ts_lib": "C:\\Users\\Administrator\\WorkBuddy\\2026-10-15-22-09-47\\usit_p0\\node_modules\\typescript",
+  "ts_lib_real_path": "C:\\Users\\Administrator\\WorkBuddy\\2026-10-15-22-09-47\\usit_p0\\node_modules\\typescript",
+  "parser_name": "typescript-compiler-api"
+}
