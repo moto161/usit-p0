@@ -246,7 +246,7 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
         return {
             "contract_version": "usit-parser-result-v1", "parser_name": PARSER_NAME,
             "parser_version": availability["version"], "available": True,
-            "availability": availability,
+            "availability": public_availability,
             "project_diagnostics": [{"code": code, "severity": "ERROR", "cancellation":
                 "killed_and_verified" if code == "ADAPTER_TIMEOUT" else "unverified"}],
             "files": {}, "records": [],
@@ -270,5 +270,5 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
             "project_diagnostics": [{"code": "ADAPTER_INVALID_JSON", "severity": "ERROR"}],
             "files": {}, "records": [],
         }
-    result["availability"] = availability
+    result["availability"] = public_availability
     return result
