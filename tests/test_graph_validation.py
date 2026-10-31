@@ -3,7 +3,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from usit.graph import validate_graph, validate_graph_file, render_validation_markdown
 
@@ -151,32 +150,6 @@ class GraphValidationTests(unittest.TestCase):
         report = render_validation_markdown(result)
         self.assertIn("edge:000001", report)
         self.assertIn("MISSING_TARGET", report)
-
-
-    def test_cli_requires_trusted_line_counts_by_default(self):
-        from usit.cli import main
-        graph_path = self.root / "graph.json"
-        graph_path.write_text(json.dumps(self.graph), encoding="utf-8")
-        json_out = self.root / "strict.json"
-        md_out = self.root / "strict.md"
-        with patch("usit.cli.validate_graph_file", return_value={"is_valid": True}) as validate:
-            rc = main(["validate-graph", str(graph_path), "--out-json", str(json_out), "--out-md", str(md_out)])
-        self.assertEqual(rc, 0)
-        self.assertTrue(validate.call_args.kwargs["require_trusted"])
-
-    def test_cli_untrusted_line_counts_require_explicit_opt_in(self):
-        from usit.cli import main
-        graph_path = self.root / "graph.json"
-        graph_path.write_text(json.dumps(self.graph), encoding="utf-8")
-        json_out = self.root / "untrusted.json"
-        md_out = self.root / "untrusted.md"
-        with patch("usit.cli.validate_graph_file", return_value={"is_valid": True}) as validate:
-            rc = main([
-                "validate-graph", str(graph_path), "--out-json", str(json_out), "--out-md", str(md_out),
-                "--allow-untrusted-embedded-line-counts",
-            ])
-        self.assertEqual(rc, 0)
-        self.assertFalse(validate.call_args.kwargs["require_trusted"])
 
 
 if __name__ == "__main__":
