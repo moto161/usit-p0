@@ -1,10 +1,6 @@
 name: USIT P0 tests
 
 on:
-  push:
-    branches:
-      - main
-      - "codex/**"
   pull_request:
     branches:
       - main
@@ -14,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: usit-p0-${{ github.ref }}
+  group: usit-p0-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
