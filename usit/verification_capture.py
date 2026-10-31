@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import stat
 import subprocess
 import threading
@@ -34,6 +35,9 @@ _REQUIRED_ARTIFACTS = frozenset({
 })
 _RUN_ID_RE = re.compile(r"^run_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{32}$")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
+MAX_COMMAND_TIMEOUT_SECONDS = 600
+MAX_CAPTURE_OUTPUT_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,8 @@ class CaptureResult:
     manifest_valid: bool
     evidence_complete: bool
     errors: tuple[str, ...] = field(default_factory=tuple)
+    captured_output_bytes: int = 0
+    output_limit_exceeded: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +71,8 @@ class CaptureResult:
             "manifest_valid": self.manifest_valid,
             "evidence_complete": self.evidence_complete,
             "errors": list(self.errors),
+            "captured_output_bytes": self.captured_output_bytes,
+            "output_limit_exceeded": self.output_limit_exceeded,
         }
 
 
@@ -167,6 +175,69 @@ def _snapshot(root: Path, relative_paths: Sequence[str]) -> tuple[list[dict[str,
             errors.append(f"{rel}: {type(exc).__name__}: {exc}")
     return entries, errors
 
+
+def _terminate_process_tree(process: subprocess.Popen) -> int:
+    """Terminate the command and descendants created in its isolated process group."""
+    if os.name == "nt":
+        try:
+            process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
+        except (OSError, ValueError):
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        try:
+            return process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            try:
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, shell=False, timeout=5, check=False)
+            except (OSError, subprocess.SubprocessError):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            return process.wait()
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        return process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return process.wait()
+
+
+def _drain_bounded(stream, sink, label: str, lock: threading.Lock, state: dict[str, int],
+                   limit_event: threading.Event, reader_errors: list[str]) -> None:
+    """Drain a child pipe while retaining no more than the shared output budget."""
+    try:
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                break
+            with lock:
+                remaining = max(0, MAX_CAPTURE_OUTPUT_BYTES - state["bytes"])
+                if remaining:
+                    sink.write(chunk[:remaining])
+                    state["bytes"] += min(len(chunk), remaining)
+                if len(chunk) > remaining:
+                    limit_event.set()
+        sink.flush()
+        os.fsync(sink.fileno())
+    except Exception as exc:
+        reader_errors.append(f"{label} capture failed: {type(exc).__name__}: {exc}")
+        limit_event.set()
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 def _write_exclusive(path: Path, payload: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
@@ -276,8 +347,10 @@ def capture_run(
     if (not files or any(not isinstance(item, str) for item in files)
             or len(set(files)) != len(files)):
         raise ValueError("files must contain at least one unique project-relative path")
-    if timeout is not None and timeout <= 0:
-        raise ValueError("timeout must be greater than zero")
+    if timeout is None:
+        timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
+    if timeout <= 0 or timeout > MAX_COMMAND_TIMEOUT_SECONDS:
+        raise ValueError(f"timeout must be between zero and {MAX_COMMAND_TIMEOUT_SECONDS} seconds")
     if poll_interval <= 0:
         raise ValueError("poll_interval must be greater than zero")
 
@@ -315,38 +388,64 @@ def capture_run(
                 status = "NOT_VERIFIED"
             else:
                 try:
-                    process = subprocess.Popen(
-                        list(command), cwd=work, stdin=subprocess.DEVNULL,
-                        stdout=out_stream, stderr=err_stream, shell=False,
-                        close_fds=True,
-                    )
+                    popen_kwargs = {
+                        "cwd": work, "stdin": subprocess.DEVNULL,
+                        "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
+                        "shell": False, "close_fds": True, "bufsize": 0,
+                    }
+                    if os.name == "nt":
+                        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    else:
+                        popen_kwargs["start_new_session"] = True
+                    process = subprocess.Popen(list(command), **popen_kwargs)
                     process_started = True
                 except OSError as exc:
                     errors.append(f"startup failed: {type(exc).__name__}: {exc}")
                     status = "INFRASTRUCTURE_ERROR"
                 if process_started:
-                    deadline = None if timeout is None else time.monotonic() + timeout
+                    output_state = {"bytes": 0}
+                    output_lock = threading.Lock()
+                    output_limit_event = threading.Event()
+                    reader_errors: list[str] = []
+                    out_thread = threading.Thread(target=_drain_bounded,
+                        args=(process.stdout, out_stream, "stdout", output_lock, output_state, output_limit_event, reader_errors), daemon=True)
+                    err_thread = threading.Thread(target=_drain_bounded,
+                        args=(process.stderr, err_stream, "stderr", output_lock, output_state, output_limit_event, reader_errors), daemon=True)
+                    out_thread.start()
+                    err_thread.start()
+                    deadline = time.monotonic() + timeout
                     try:
                         while process.poll() is None:
+                            if output_limit_event.is_set():
+                                output_limit_exceeded = True
+                                break
                             if interrupt_event is not None and interrupt_event.is_set():
                                 interrupted = True
                                 break
-                            if deadline is not None and time.monotonic() >= deadline:
+                            if time.monotonic() >= deadline:
                                 timed_out = True
                                 break
                             time.sleep(poll_interval)
                     except KeyboardInterrupt:
                         interrupted = True
-                    if interrupted or timed_out:
-                        process.terminate()
-                        try:
-                            exit_code = process.wait(timeout=1.0)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            exit_code = process.wait()
+                    if output_limit_event.is_set():
+                        output_limit_exceeded = True
+                    if interrupted or timed_out or output_limit_exceeded or reader_errors:
+                        exit_code = _terminate_process_tree(process)
                     else:
                         exit_code = process.wait()
-                    if interrupted:
+                    out_thread.join(timeout=10)
+                    err_thread.join(timeout=10)
+                    captured_output_bytes = output_state["bytes"]
+                    if out_thread.is_alive() or err_thread.is_alive():
+                        reader_errors.append("output reader did not reach EOF after process termination")
+                    errors.extend(reader_errors)
+                    if output_limit_exceeded:
+                        status = "FAIL"
+                        errors.append(f"command output exceeded the {MAX_CAPTURE_OUTPUT_BYTES}-byte capture limit")
+                    elif reader_errors:
+                        status = "INFRASTRUCTURE_ERROR"
+                    elif interrupted:
                         status = "INTERRUPTED"
                     elif timed_out:
                         status = "FAIL"
@@ -356,7 +455,6 @@ def capture_run(
                         errors.append(f"command returned non-zero exit code {exit_code}")
                     else:
                         status = "PASS"
-
         post, post_errors = _snapshot(project, files) if not pre_errors else ([], [])
         errors.extend(post_errors)
         diff: list[dict[str, Any]] = []
@@ -387,6 +485,8 @@ def capture_run(
             "exit_code": exit_code,
             "timed_out": timed_out,
             "interrupted": interrupted,
+            "captured_output_bytes": captured_output_bytes,
+            "output_limit_exceeded": output_limit_exceeded,
             # Snapshot/read completeness is known now; the caller receives the
             # final manifest-validation result in CaptureResult after hashing.
             "evidence_complete": not pre_errors and not post_errors,
@@ -415,7 +515,8 @@ def capture_run(
             status = "NOT_VERIFIED"
         return CaptureResult(run_id, status, exit_code, timed_out, interrupted,
                              str(evidence), str(manifest_path), str(report_path),
-                             manifest_valid, evidence_complete, tuple(errors))
+                             manifest_valid, evidence_complete, tuple(errors),
+                             captured_output_bytes, output_limit_exceeded)
     except (OSError, ValueError, TypeError) as exc:
         errors.append(f"evidence capture failed: {type(exc).__name__}: {exc}")
         # Do not fabricate a manifest or PASS when evidence writing is incomplete.
@@ -423,4 +524,5 @@ def capture_run(
                              interrupted, str(evidence),
                              str(manifest_path) if manifest_path.exists() else None,
                              str(report_path) if report_path.exists() else None,
-                             False, False, tuple(errors))
+                             False, False, tuple(errors),
+                             captured_output_bytes, output_limit_exceeded)
