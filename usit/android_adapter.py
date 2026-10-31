@@ -215,7 +215,7 @@ class AndroidProjectAdapter:
             # Degrade safely: keep a lossy copy for best-effort matching but flag it.
             text = raw.decode("utf-8", errors="replace")
             encoding_issue = True
-        return {"text": text, "read_ok": True, "encoding_issue": encoding_issue, "size": size, "error": None}
+        return {"text": text, "read_ok": True, "encoding_issue": encoding_issue, "size": len(raw), "error": None}
 
     def _rel(self, path: Path) -> str:
         return path.resolve().relative_to(self.root).as_posix()
