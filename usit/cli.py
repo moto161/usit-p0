@@ -62,7 +62,7 @@ def _write_exclusive_bytes(path: Path, payload: bytes) -> None:
 
 def _write_json_output(path: Path, value, *, overwrite: bool) -> None:
     """Write one JSON artifact without following an existing output symlink."""
-    payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\\n").encode("utf-8")
+    payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     if not overwrite:
         _write_exclusive_bytes(path, payload)
         return
