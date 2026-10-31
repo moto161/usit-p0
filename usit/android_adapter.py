@@ -151,10 +151,12 @@ class AndroidProjectAdapter:
             raise AdapterBlocked("FILE_BUDGET_EXCEEDED", f"Android inspection exceeded {MAX_FILES} discovered entries.")
 
     def _reject_reparse_path(self, path: Path) -> None:
-        try:
-            safety.reject_reparse_components(path)
-        except safety.ScanBlocked as exc:
-            raise AdapterBlocked(exc.code, f"Unsafe path component in {path}: {exc}") from exc
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current = current / part
+            if safety.is_reparse_point(current):
+                raise AdapterBlocked("REPARSE_POINT_REJECTED", f"{current} is a link/junction/reparse point.")
 
     def _count_entry(self, path: Path) -> None:
         self._check_budget()
