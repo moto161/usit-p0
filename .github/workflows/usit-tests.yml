@@ -36,7 +36,14 @@ jobs:
       - name: Install pinned parser dependency
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run focused security regressions
-        run: python -m unittest tests.test_security_hardening_regressions tests.test_p0713_android_adapter.CliIntegrationTests.test_inspect_android_writes_two_files_and_does_not_execute -v
+        run: >-
+          python -m unittest
+          tests.test_security_hardening_regressions
+          tests.test_business_semantics
+          tests.test_parser_contract.ParserContractTests.test_javascript_typescript_semantic_fixture_and_jvm_honest_fallback
+          tests.test_p079_stdlib_semantics
+          tests.test_p0713_android_adapter.CliIntegrationTests.test_inspect_android_writes_two_files_and_does_not_execute
+          -v
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Run built-in selftest
