@@ -256,7 +256,7 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
         return {
             "contract_version": "usit-parser-result-v1", "parser_name": PARSER_NAME,
             "parser_version": availability["version"], "available": True,
-            "availability": availability,
+            "availability": public_availability,
             "project_diagnostics": [{"code": "ADAPTER_FAILED", "severity": "ERROR", "message": "Node analyzer exited with code " + str(returncode)}],
             "stderr_excerpt": (completed.get("stderr") or "")[:500], "files": {}, "records": [],
         }
