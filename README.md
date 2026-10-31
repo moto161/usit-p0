@@ -45,6 +45,7 @@
 - 单独运行校验器时，默认在图谱旁生成报告；若提供 `--project-root`，报告路径必须在项目根目录之外。已有报告不会被覆盖，可通过 `--out-json` 和 `--out-md` 指定新路径。
 - `validate-graph` 默认不把图谱 JSON 内可编辑的 `source_line_counts` 当作可信证据；没有外部可信快照时，行号范围结论会标为 `UNKNOWN/UNVERIFIED`。只有显式传入 `--allow-untrusted-embedded-line-counts` 才启用较弱的内嵌提示校验。
 - `inspect-android --force` 必须在授权记录的 `allowed_actions` 中显式包含 `overwrite_existing_output`；Android 与业务语义适配器对遍历、文件数、单文件大小、累计读取字节和总时长执行失败关闭限制。超限不会继续输出貌似完整的分析结果。
+- `verification_capture.capture_run` 的命令超时默认/上限为 600 秒，stdout+stderr 合计最多保留 16 MiB；超限以 `FAIL` 记录，证据清单仍需完整校验。该模块仍要求调用方先验证真实授权；`approval_ref` 只是审计引用，不是授权凭证，当前不允许将其直接接入未设门禁的自动修复入口。
 - 构建识别基于标记文件；不提供完整调用图或编译器语义。
 - 增量只分类新增/修改/未变/删除；P0仍全量轻量分析。
 - 测试计划只生成建议，不执行测试，也不代表 PASS。
