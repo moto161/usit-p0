@@ -128,6 +128,23 @@ class VerificationCaptureBoundsTests(unittest.TestCase):
                             approval_ref="unit-test-approval", timeout=value,
                         )
 
+    def test_capture_bounds_command_arguments_and_approval_reference(self):
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            with self.assertRaises(ValueError):
+                capture.capture_run(
+                    ["python", "-c", "x" * (capture.MAX_COMMAND_ARG_BYTES + 1)],
+                    project_root=project, evidence_parent=parent,
+                    files=["stable.py"], approval_ref="unit-test-approval",
+                )
+            with self.assertRaises(ValueError):
+                capture.capture_run(
+                    ["python", "-c", "pass"], project_root=project,
+                    evidence_parent=parent, files=["stable.py"],
+                    approval_ref="a" * (capture.MAX_APPROVAL_REF_CHARS + 1),
+                )
+
     def test_capture_snapshot_per_file_limit_fails_closed(self):
         import sys
         from usit import verification_capture as capture
