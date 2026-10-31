@@ -599,6 +599,7 @@ class BusinessSemanticsAdapter:
         return gap
 
     def analyze(self) -> dict[str, Any]:
+        self._check_budget()
         docs = self._find_docs()
         route_files = self._find_route_files()
         code_files = self._find_code_files()
