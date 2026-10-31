@@ -257,5 +257,43 @@ class FieldGapLocatorTests(unittest.TestCase):
         self.assertEqual(result["field_gap_count"], 0)
 
 
+class ResourceSafetyTests(unittest.TestCase):
+    def test_repeated_file_reads_use_cached_verified_bytes(self):
+        p = SyntheticProject(self)
+        doc = p.root / "数据库设计文档.md"
+        _write(doc, DB_DOC)
+        adapter = BusinessSemanticsAdapter(p.root)
+        first = adapter._read_text(doc)
+        second = adapter._read_text(doc)
+        self.assertTrue(first["read_ok"])
+        self.assertEqual(first, second)
+        self.assertEqual(adapter._file_count, 1)
+
+    def test_oversized_business_input_blocks_instead_of_silent_skip(self):
+        p = SyntheticProject(self)
+        _write(p.root / "数据库设计文档.md", "x" * (1024 * 1024 + 1))
+        with self.assertRaises(SemanticsBlocked) as blocked:
+            BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(blocked.exception.code, "FILE_SIZE_LIMIT_EXCEEDED")
+
+    def test_business_scan_time_budget_fails_closed(self):
+        from unittest.mock import patch
+        p = SyntheticProject(self)
+        with patch("usit.business_semantics.MAX_SCAN_SECONDS", -1):
+            with self.assertRaises(SemanticsBlocked) as blocked:
+                BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(blocked.exception.code, "SCAN_TIME_BUDGET_EXCEEDED")
+
+    def test_business_discovery_budget_fails_closed(self):
+        from unittest.mock import patch
+        p = SyntheticProject(self)
+        p.route("server/routes/a.js", "router.get('/a', authRequired, () => {});")
+        p.route("server/routes/b.js", "router.get('/b', authRequired, () => {});")
+        with patch("usit.business_semantics.MAX_FILES", 1):
+            with self.assertRaises(SemanticsBlocked) as blocked:
+                BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(blocked.exception.code, "FILE_BUDGET_EXCEEDED")
+
+
 if __name__ == "__main__":
     unittest.main()
