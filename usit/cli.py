@@ -186,7 +186,7 @@ def main(argv=None):
             # (validate_graph_file supplies it), so this command never re-opens
             # the target project.  project_root is retained only for the
             # path-escape and existence guards, which read no content.
-            result=validate_graph_file(graph_path,project_root,json_out,md_out)
+            result=validate_graph_file(graph_path,project_root,json_out,md_out,require_trusted=not a.allow_untrusted_embedded_line_counts)
             print(json.dumps(result,ensure_ascii=False,indent=2))
             return 0 if result['is_valid'] else 1
         if a.cmd=='inspect-android':
