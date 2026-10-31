@@ -416,6 +416,52 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(c["execution_status"], "NOT_EXECUTED")
 
 
+    def test_force_requires_explicit_overwrite_authorization(self):
+        p = _SyntheticAndroidProject(self)
+        p.write("settings.gradle", "include ':app'\\n")
+        p.write("app/build.gradle", "android {}\\n")
+        out = p.base / "inspect-out"
+        out.mkdir()
+        marker = out / "preserve.txt"
+        marker.write_text("keep", encoding="utf-8")
+        auth = authorization_record(p.root, out, now=_now())
+        auth["allowed_actions"] = ["static_read_only_scan"]
+        auth_file = p.base / "auth-no-overwrite.json"
+        auth_file.write_text(json.dumps(auth), encoding="utf-8")
+        rc = __import__("usit.cli", fromlist=["main"]).main([
+            "inspect-android", str(p.root), "--out", str(out),
+            "--authorization-file", str(auth_file), "--force",
+        ])
+        self.assertEqual(rc, 2)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+        self.assertFalse((out / "android_profile.json").exists())
+
+    def test_force_replaces_output_symlink_without_following_target(self):
+        p = _SyntheticAndroidProject(self)
+        p.write("settings.gradle", "include ':app'\\n")
+        p.write("app/build.gradle", "android {}\\n")
+        p.write("app/src/main/AndroidManifest.xml", '<manifest package="com.safe"/>\\n')
+        out = p.base / "inspect-out"
+        out.mkdir()
+        outside = p.base / "outside.json"
+        outside.write_text("do-not-touch", encoding="utf-8")
+        link = out / "android_profile.json"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError, ValueError):
+            self.skipTest("OS denied symlink creation")
+        auth = authorization_record(p.root, out, now=_now())
+        auth_file = p.base / "auth.json"
+        auth_file.write_text(json.dumps(auth), encoding="utf-8")
+        rc = __import__("usit.cli", fromlist=["main"]).main([
+            "inspect-android", str(p.root), "--out", str(out),
+            "--authorization-file", str(auth_file), "--force",
+        ])
+        self.assertEqual(rc, 0)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(outside.read_text(encoding="utf-8"), "do-not-touch")
+
+
 class RegressionTests(unittest.TestCase):
     def test_usit_selftest_still_passes(self):
         from usit.cli import selftest
