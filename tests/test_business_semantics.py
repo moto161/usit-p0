@@ -294,6 +294,14 @@ class ResourceSafetyTests(unittest.TestCase):
                 BusinessSemanticsAdapter(p.root).analyze()
         self.assertEqual(blocked.exception.code, "FILE_BUDGET_EXCEEDED")
 
+    def test_skipped_dependency_directories_do_not_consume_scan_budget(self):
+        from unittest.mock import patch
+        p = SyntheticProject(self)
+        _write(p.root / "node_modules" / "large" / "index.js", "x" * 20)
+        with patch("usit.business_semantics.MAX_FILES", 1):
+            result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["entity_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
