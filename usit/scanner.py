@@ -103,7 +103,8 @@ def is_sensitive(rel: str) -> bool:
     return False
 
 def discover_files(root: Path, *, deadline: float | None = None, clock=time.monotonic,
-                   identities: dict[str, tuple[int, int]] | None = None) -> list[Path]:
+                   identities: dict[str, tuple[int, int]] | None = None,
+                   fingerprints: dict[str, tuple[int, int, int, int, int]] | None = None) -> list[Path]:
     """Bounded, deterministic discovery. Any unsafe path or budget ambiguity blocks the scan.
 
     P0.7.4: when ``identities`` is supplied it is filled with the ``(st_dev,
@@ -171,6 +172,15 @@ def discover_files(root: Path, *, deadline: float | None = None, clock=time.mono
             out.append(path)
             if identities is not None:
                 identities[rel]=safeio.identity_of(info)
+            if fingerprints is not None:
+                try:
+                    fingerprints[rel] = (
+                        int(info.st_dev), int(info.st_ino), int(info.st_size),
+                        int(info.st_mtime_ns), int(info.st_ctime_ns),
+                    )
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise ScanBlocked('FILE_FINGERPRINT_UNAVAILABLE',
+                                      'A discovered file lacks the metadata required for substitution detection.') from exc
     return sorted(out,key=lambda path:path.relative_to(root).as_posix().casefold())
 
 def lang_for(path: Path) -> str:
@@ -232,6 +242,7 @@ def _write_scan_status(directory: Path, exc: BaseException) -> None:
 
 
 def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int] | None = None,
+                    expected_fingerprint: tuple[int, int, int, int, int] | None = None,
                     identity_out: dict[str, Any] | None = None) -> bytes:
     """Open a discovered input file and read it without following an escape.
 
@@ -276,6 +287,18 @@ def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int
         raise ScanBlocked('FILE_READ_FAILED', f'Input read failed ({type(exc).__name__}).') from exc
     try:
         info = os.fstat(fd)
+        if expected_fingerprint is not None:
+            try:
+                actual_fingerprint = (
+                    int(info.st_dev), int(info.st_ino), int(info.st_size),
+                    int(info.st_mtime_ns), int(info.st_ctime_ns),
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ScanBlocked('FILE_FINGERPRINT_UNAVAILABLE',
+                                  'The opened file lacks metadata required for substitution detection.') from exc
+            if actual_fingerprint != tuple(expected_fingerprint):
+                raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                  'The opened file fingerprint differs from discovery; refusing to read it.')
         if identity_out is not None:
             # P0.7.10-ZRF: the identity of the descriptor the bytes will come
             # from, taken at the same fstat that authorises the read.  Defensive
@@ -288,6 +311,10 @@ def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int
                 mtime_ns = None
             identity_out['identity'] = DescriptorIdentity(
                 int(info.st_dev), int(info.st_ino), int(info.st_size), mtime_ns)
+            try:
+                identity_out['ctime_ns'] = int(info.st_ctime_ns)
+            except (AttributeError, TypeError, ValueError):
+                identity_out['ctime_ns'] = None
         if safeio.is_reparse(info):
             raise ScanBlocked('REPARSE_POINT_REJECTED', 'Input path is a symbolic link, junction or reparse point.')
         if getattr(info, 'st_nlink', 1) > 1:
@@ -778,12 +805,13 @@ def scan_project(project: str, out_dir: str, force: bool = False, *, authorizati
     # here propagated without any terminal status record, so a caller could not
     # tell a blocked scan from a crash.
     try:
-        identities={}
-        paths=discover_files(root,deadline=deadline,identities=identities); raw_by_path={}; total=0
+        identities={}; fingerprints={}
+        paths=discover_files(root,deadline=deadline,identities=identities,fingerprints=fingerprints); raw_by_path={}; total=0
         # P0.7.10-ZRF: descriptor identities, taken from the same fstat that
         # authorised each read, travel with the bytes so capture() never has to
         # re-derive an identity from the path (the P0.7.10-ZR R1/R3 binding gap).
         descriptor_ids: dict[str, DescriptorIdentity | None] = {}
+        descriptor_ctimes: dict[str, int | None] = {}
         for p in paths:
             if time.monotonic()>=deadline: raise ScanBlocked('TOTAL_SCAN_TIMEOUT','Total scan deadline expired while reading inputs.')
             # P0.7.4: read through the guarded, handle-bound opener. The identity
@@ -793,8 +821,9 @@ def scan_project(project: str, out_dir: str, force: bool = False, *, authorizati
             rel=p.relative_to(root).as_posix()
             box: dict[str, Any] = {}
             raw=open_input_file(p, MAX_FILE_BYTES, expected_identity=identities.get(rel),
-                                identity_out=box)
+                                expected_fingerprint=fingerprints.get(rel), identity_out=box)
             descriptor_ids[rel]=box.get('identity')
+            descriptor_ctimes[rel]=box.get('ctime_ns')
             if len(raw)>MAX_FILE_BYTES: raise ScanBlocked('MAX_FILE_SIZE_EXCEEDED','Input exceeded the per-file read limit.')
             total+=len(raw)
             if total>MAX_TOTAL_READ_BYTES: raise ScanBlocked('MAX_TOTAL_READ_BYTES_EXCEEDED','Cumulative input read budget exceeded.')
@@ -809,7 +838,8 @@ def scan_project(project: str, out_dir: str, force: bool = False, *, authorizati
             except OSError as exc: raise ScanBlocked('FILE_STAT_FAILED','Input changed or became inaccessible.') from exc
             if desc is not None:
                 if (int(current.st_dev),int(current.st_ino))!=(desc.dev,desc.ino) \
-                   or int(current.st_size)!=desc.size or int(current.st_mtime_ns)!=desc.mtime_ns:
+                   or int(current.st_size)!=desc.size or int(current.st_mtime_ns)!=desc.mtime_ns \
+                   or descriptor_ctimes.get(rel) is None or int(current.st_ctime_ns)!=descriptor_ctimes[rel]:
                     raise ScanBlocked('INPUT_CHANGED_DURING_SCAN','Input changed while being read.')
             elif current.st_size!=len(raw):
                 raise ScanBlocked('INPUT_CHANGED_DURING_SCAN','Input changed while being read.')
