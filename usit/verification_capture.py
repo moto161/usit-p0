@@ -140,7 +140,7 @@ def _safe_relative_file(root: Path, rel: str) -> Path:
     return path
 
 
-def _read_snapshot(path: Path, rel: str, remaining_total_bytes: int) -> dict[str, Any]:
+def _read_snapshot(root: Path, path: Path, rel: str, remaining_total_bytes: int) -> dict[str, Any]:
     try:
         before = os.lstat(path)
     except FileNotFoundError:
@@ -159,7 +159,14 @@ def _read_snapshot(path: Path, rel: str, remaining_total_bytes: int) -> dict[str
     size = 0
     try:
         opened = os.fstat(fd)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        resolved_after_open = path.resolve(strict=True)
+        if not _is_within(resolved_after_open, root) or resolved_after_open == root:
+            raise OSError(f"snapshot target escaped project root before read: {rel}")
+        path_after_open = os.lstat(path)
+        opened_identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        path_identity_after_open = (path_after_open.st_dev, path_after_open.st_ino, path_after_open.st_size, path_after_open.st_mtime_ns, path_after_open.st_ctime_ns)
+        if opened_identity != before_identity or opened_identity != path_identity_after_open:
             raise OSError(f"snapshot target changed before read: {rel}")
         while size <= MAX_SNAPSHOT_FILE_BYTES:
             block = os.read(fd, min(1024 * 1024, MAX_SNAPSHOT_FILE_BYTES + 1 - size))
@@ -192,7 +199,7 @@ def _snapshot(root: Path, relative_paths: Sequence[str]) -> tuple[list[dict[str,
     for rel in relative_paths:
         try:
             path = _safe_relative_file(root, rel)
-            item = _read_snapshot(path, rel, MAX_SNAPSHOT_TOTAL_BYTES - total_bytes)
+            item = _read_snapshot(root, path, rel, MAX_SNAPSHOT_TOTAL_BYTES - total_bytes)
             entries.append(item)
             if item["state"] == "PRESENT":
                 total_bytes += int(item["size"])
