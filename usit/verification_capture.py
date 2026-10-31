@@ -437,6 +437,8 @@ def capture_run(
                         exit_code = process.wait()
                     out_thread.join(timeout=10)
                     err_thread.join(timeout=10)
+                    if output_limit_event.is_set():
+                        output_limit_exceeded = True
                     captured_output_bytes = output_state["bytes"]
                     if out_thread.is_alive() or err_thread.is_alive():
                         reader_errors.append("output reader did not reach EOF after process termination")
