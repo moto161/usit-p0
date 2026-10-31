@@ -43,6 +43,8 @@
 - 其他语言的符号/调用仍是启发式候选；调用状态为 `UNKNOWN`，不宣称与 Python 具备相同解析精度。
 - `validate-graph` 校验 `usit-graph-v1` 结构、端点、证据、路径和调用解析状态，输出 JSON/Markdown 诊断；不自动修复或删除关系。旧版无 edge ID 的图谱保持兼容，报告中使用数组序号定位关系。
 - 单独运行校验器时，默认在图谱旁生成报告；若提供 `--project-root`，报告路径必须在项目根目录之外。已有报告不会被覆盖，可通过 `--out-json` 和 `--out-md` 指定新路径。
+- `validate-graph` 默认不把图谱 JSON 内可编辑的 `source_line_counts` 当作可信证据；没有外部可信快照时，行号范围结论会标为 `UNKNOWN/UNVERIFIED`。只有显式传入 `--allow-untrusted-embedded-line-counts` 才启用较弱的内嵌提示校验。
+- `inspect-android --force` 必须在授权记录的 `allowed_actions` 中显式包含 `overwrite_existing_output`；Android 与业务语义适配器对遍历、文件数、单文件大小、累计读取字节和总时长执行失败关闭限制。超限不会继续输出貌似完整的分析结果。
 - 构建识别基于标记文件；不提供完整调用图或编译器语义。
 - 增量只分类新增/修改/未变/删除；P0仍全量轻量分析。
 - 测试计划只生成建议，不执行测试，也不代表 PASS。
