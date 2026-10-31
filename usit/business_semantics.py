@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ CONF_CONFLICT = "CONFLICT"
 MAX_FILE_BYTES = safety.MAX_FILE_BYTES
 MAX_TOTAL_READ_BYTES = safety.MAX_TOTAL_READ_BYTES
 MAX_FILES = safety.MAX_FILES
+MAX_SCAN_SECONDS = safety.MAX_SCAN_SECONDS
 
 # Route-pattern matching for Node/Express style servers.
 _ROUTE_LINE = re.compile(
@@ -210,43 +212,86 @@ class BusinessSemanticsAdapter:
         self.root = safety.canonical_project(project_root)
         self._total_read_bytes = 0
         self._file_count = 0
+        self._started_at = time.monotonic()
+        self._discovered: set[str] = set()
+        self._read_cache: dict[str, dict[str, Any]] = {}
+
+    def _check_budget(self) -> None:
+        if time.monotonic() - self._started_at > MAX_SCAN_SECONDS:
+            raise SemanticsBlocked("SCAN_TIME_BUDGET_EXCEEDED", f"Business analysis exceeded {MAX_SCAN_SECONDS} seconds.")
+        if len(self._discovered) > MAX_FILES:
+            raise SemanticsBlocked("FILE_BUDGET_EXCEEDED", f"Business analysis exceeded {MAX_FILES} discovered entries.")
+
+    def _count_discovery(self, path: Path) -> None:
+        self._check_budget()
+        key = os.path.normcase(os.path.abspath(os.fspath(path)))
+        self._discovered.add(key)
+        if len(self._discovered) > MAX_FILES:
+            raise SemanticsBlocked("FILE_BUDGET_EXCEEDED", f"Business analysis exceeded {MAX_FILES} discovered entries.")
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current = current / part
+            if safety.is_reparse_point(current):
+                raise SemanticsBlocked("REPARSE_POINT_REJECTED", f"{current} is a link/junction/reparse point.")
 
     # ------------------------------------------------------------------ reading
     def _read_text(self, path: Path) -> dict[str, Any]:
-        if not path.exists():
-            return {"text": None, "read_ok": False, "error": "MISSING"}
-        if safety.is_reparse_point(path):
-            raise SemanticsBlocked("REPARSE_POINT_REJECTED", f"{path} is a link/junction/reparse point.")
-        if not path.is_file():
+        self._check_budget()
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current = current / part
+            if safety.is_reparse_point(current):
+                raise SemanticsBlocked("REPARSE_POINT_REJECTED", f"{current} is a link/junction/reparse point.")
+        if not path.exists() or not path.is_file():
             return {"text": None, "read_ok": False, "error": "MISSING"}
         try:
             resolved = path.resolve(strict=True)
         except OSError as exc:
-            return {"text": None, "read_ok": False, "error": f"RESOLVE_FAILED:{type(exc).__name__}"}
+            raise SemanticsBlocked("PATH_CHECK_FAILED", f"Could not resolve {path}: {type(exc).__name__}") from exc
         if resolved != self.root and self.root not in resolved.parents:
             raise SemanticsBlocked("PATH_TRAVERSAL_REJECTED", f"{path} is outside the authorised project root.")
-        size = resolved.stat().st_size
-        if size > MAX_FILE_BYTES:
-            return {"text": None, "read_ok": False, "too_large": True, "error": "TOO_LARGE"}
+        cache_key = os.path.normcase(os.fspath(resolved))
+        if cache_key in self._read_cache:
+            return dict(self._read_cache[cache_key])
         if self._file_count >= MAX_FILES:
-            return {"text": None, "read_ok": False, "error": "FILE_BUDGET_EXCEEDED"}
-        if self._total_read_bytes + size > MAX_TOTAL_READ_BYTES:
-            return {"text": None, "read_ok": False, "error": "BYTE_BUDGET_EXCEEDED"}
+            raise SemanticsBlocked("FILE_BUDGET_EXCEEDED", f"Business analysis exceeds {MAX_FILES} file reads.")
         try:
             fd = open_no_follow(resolved)
         except OSError as exc:
-            return {"text": None, "read_ok": False, "error": f"OPEN_FAILED:{type(exc).__name__}"}
+            raise SemanticsBlocked("SAFE_OPEN_FAILED", f"Could not safely open {path}: {type(exc).__name__}") from exc
         try:
-            raw = os.read(fd, MAX_FILE_BYTES)
+            before = os.fstat(fd)
+            if before.st_size > MAX_FILE_BYTES:
+                raise SemanticsBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeds {MAX_FILE_BYTES} bytes.")
+            if self._total_read_bytes + before.st_size > MAX_TOTAL_READ_BYTES:
+                raise SemanticsBlocked("BYTE_BUDGET_EXCEEDED", f"Business analysis exceeds {MAX_TOTAL_READ_BYTES} total bytes.")
+            chunks = []
+            remaining = MAX_FILE_BYTES + 1
+            while remaining > 0:
+                block = os.read(fd, min(65536, remaining))
+                if not block:
+                    break
+                chunks.append(block)
+                remaining -= len(block)
+            raw = b"".join(chunks)
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                raise SemanticsBlocked("FILE_CHANGED_DURING_READ", f"{path} changed while being read.")
+            if len(raw) != before.st_size or len(raw) > MAX_FILE_BYTES:
+                raise SemanticsBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeded its size budget during read.")
         finally:
             os.close(fd)
         self._file_count += 1
-        self._total_read_bytes += size
+        self._total_read_bytes += len(raw)
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             text = raw.decode("utf-8", errors="replace")
-        return {"text": text, "read_ok": True, "size": size, "error": None}
+        result = {"text": text, "read_ok": True, "size": len(raw), "error": None}
+        self._read_cache[cache_key] = result
+        return dict(result)
 
     def _rel(self, path: Path) -> str:
         return path.resolve().relative_to(self.root).as_posix()
@@ -255,6 +300,7 @@ class BusinessSemanticsAdapter:
     def _find_docs(self) -> list[Path]:
         out: list[Path] = []
         for p in self.root.rglob("*.md"):
+            self._count_discovery(p)
             if p.is_file() and not _is_skipped(p.relative_to(self.root)):
                 out.append(p)
         return out
@@ -262,6 +308,7 @@ class BusinessSemanticsAdapter:
     def _find_route_files(self) -> list[Path]:
         out: list[Path] = []
         for p in self.root.rglob("*"):
+            self._count_discovery(p)
             if not p.is_file():
                 continue
             rel = p.relative_to(self.root)
