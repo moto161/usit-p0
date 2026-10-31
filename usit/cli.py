@@ -105,8 +105,8 @@ def _inspect_android(a) -> int:
     out.mkdir(parents=True, exist_ok=True)
     profile = AndroidProjectAdapter(project).analyze().to_dict()
     plan = CommandPlanner(profile).to_dict()
-    (out / "android_profile.json").write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (out / "android_test_plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_json_output(out / "android_profile.json", profile, overwrite=a.force)
+    _write_json_output(out / "android_test_plan.json", plan, overwrite=a.force)
     summary = {
         "project_root": str(project),
         "detection_status": profile["detection_status"],
