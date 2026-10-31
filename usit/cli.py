@@ -39,42 +39,37 @@ def selftest() -> int:
     print(f"RESULT: {'PASS' if all(ok for _,ok in checks) else 'FAIL'} ({sum(ok for _,ok in checks)}/{len(checks)})")
     return 0 if all(ok for _,ok in checks) else 1
 
-def _write_json_output(path: Path, value, *, overwrite: bool) -> None:
-    """Write one JSON artifact without following an existing output symlink."""
-    payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    if not overwrite:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-        try:
-            view = memoryview(payload)
-            while view:
-                written = os.write(fd, view)
-                if written <= 0:
-                    raise OSError("short write while creating Android output")
-                view = view[written:]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        return
-
-    # Atomic replacement replaces a symlink itself rather than opening its target.
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+def _write_exclusive_bytes(path: Path, payload: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
     try:
         view = memoryview(payload)
         while view:
             written = os.write(fd, view)
             if written <= 0:
-                raise OSError("short write while staging Android output")
+                raise OSError("short write while creating Android output")
             view = view[written:]
         os.fsync(fd)
-    except Exception:
+    except BaseException:
+        os.close(fd)
         try:
-            temporary.unlink()
+            path.unlink()
         except OSError:
             pass
         raise
-    finally:
+    else:
         os.close(fd)
+
+
+def _write_json_output(path: Path, value, *, overwrite: bool) -> None:
+    """Write one JSON artifact without following an existing output symlink."""
+    payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\\n").encode("utf-8")
+    if not overwrite:
+        _write_exclusive_bytes(path, payload)
+        return
+
+    # Atomic replacement replaces a symlink itself rather than opening its target.
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    _write_exclusive_bytes(temporary, payload)
     try:
         os.replace(temporary, path)
     except Exception:
