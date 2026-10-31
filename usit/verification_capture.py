@@ -159,6 +159,7 @@ def _read_snapshot(root: Path, path: Path, rel: str, remaining_total_bytes: int)
     size = 0
     try:
         opened = os.fstat(fd)
+        _reject_reparse_components(path)
         resolved_after_open = path.resolve(strict=True)
         if not _is_within(resolved_after_open, root) or resolved_after_open == root:
             raise OSError(f"snapshot target escaped project root before read: {rel}")
