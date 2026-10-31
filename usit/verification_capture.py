@@ -42,6 +42,12 @@ MAX_CAPTURE_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_FILES = 5000
 MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024
 MAX_SNAPSHOT_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_VERIFIED_ARTIFACT_BYTES = 16 * 1024 * 1024
+MAX_COMMAND_ARGS = 128
+MAX_COMMAND_ARG_BYTES = 8192
+MAX_COMMAND_TOTAL_BYTES = 64 * 1024
+MAX_APPROVAL_REF_CHARS = 256
 
 
 @dataclass(frozen=True)
@@ -119,6 +125,8 @@ def _canonical_directory(value: str | os.PathLike[str], label: str) -> Path:
 def _safe_relative_file(root: Path, rel: str) -> Path:
     if not isinstance(rel, str) or not rel or "\\" in rel:
         raise ValueError("snapshot paths must be non-empty POSIX relative paths")
+    if len(rel.encode("utf-8")) > 1024:
+        raise ValueError("snapshot path exceeds the 1024-byte path limit")
     pure = PurePosixPath(rel)
     if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts):
         raise ValueError(f"snapshot path escapes or is not normalised: {rel!r}")
@@ -276,19 +284,54 @@ def _write_json_file(path: Path, data: Mapping[str, Any]) -> None:
     _write_exclusive(path, payload)
 
 
+def _read_verified_bytes(path: Path, max_bytes: int, label: str) -> bytes:
+    """Read a bounded regular file through a no-follow descriptor and verify identity."""
+    _reject_reparse_components(path)
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(f"{label} is not a regular file")
+    if before.st_size > max_bytes:
+        raise OSError(f"{label} exceeds the {max_bytes}-byte read limit")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        opened_identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+        if identity != opened_identity:
+            raise OSError(f"{label} changed before read")
+        chunks = []
+        size = 0
+        while size <= max_bytes:
+            block = os.read(fd, min(1024 * 1024, max_bytes + 1 - size))
+            if not block:
+                break
+            chunks.append(block)
+            size += len(block)
+            if size > max_bytes:
+                raise OSError(f"{label} exceeded its read limit during read")
+        after_fd = os.fstat(fd)
+    finally:
+        os.close(fd)
+    after_path = os.lstat(path)
+    after_identity = (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns, after_fd.st_ctime_ns)
+    path_identity = (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns, after_path.st_ctime_ns)
+    raw = b"".join(chunks)
+    if identity != after_identity or after_identity != path_identity or len(raw) != after_fd.st_size:
+        raise OSError(f"{label} changed during read")
+    return raw
+
+
 def _artifact_record(root: Path, name: str) -> dict[str, Any]:
     path = root / name
     _reject_reparse_components(path)
     resolved = path.resolve(strict=True)
-    if not _is_within(resolved, root) or not resolved.is_file():
+    if not _is_within(resolved, root):
         raise OSError(f"invalid evidence artifact: {name}")
-    digest = hashlib.sha256()
-    size = 0
-    with resolved.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-            size += len(block)
-    return {"path": name, "size": size, "sha256": digest.hexdigest()}
+    raw = _read_verified_bytes(resolved, MAX_VERIFIED_ARTIFACT_BYTES, f"evidence artifact {name}")
+    return {"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
 
 
 def verify_manifest(evidence_dir: str | os.PathLike[str]) -> dict[str, Any]:
@@ -298,13 +341,13 @@ def verify_manifest(evidence_dir: str | os.PathLike[str]) -> dict[str, Any]:
     try:
         root = _canonical_directory(evidence_dir, "evidence directory")
         manifest_path = root / _MANIFEST_NAME
-        _reject_reparse_components(manifest_path)
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw_manifest = _read_verified_bytes(manifest_path, MAX_MANIFEST_BYTES, "evidence manifest")
+        manifest = json.loads(raw_manifest.decode("utf-8"))
         if manifest.get("schema_version") != 1 or not _RUN_ID_RE.fullmatch(str(manifest.get("run_id", ""))):
             raise ValueError("unsupported or invalid manifest identity")
         artifacts = manifest.get("artifacts")
-        if not isinstance(artifacts, list) or not artifacts:
-            raise ValueError("manifest artifacts must be a non-empty list")
+        if not isinstance(artifacts, list) or not artifacts or len(artifacts) > 32:
+            raise ValueError("manifest artifacts must contain between 1 and 32 entries")
         seen: set[str] = set()
         for record in artifacts:
             name = record.get("path") if isinstance(record, dict) else None
@@ -359,8 +402,8 @@ def capture_run(
     """
     if isinstance(command, (str, bytes)) or not command or not all(isinstance(x, str) and x for x in command):
         raise ValueError("command must be a non-empty sequence of non-empty strings")
-    if not isinstance(approval_ref, str) or not approval_ref.strip():
-        raise ValueError("a caller-validated approval_ref is required")
+    if not isinstance(approval_ref, str) or not approval_ref.strip() or len(approval_ref) > MAX_APPROVAL_REF_CHARS:
+        raise ValueError(f"a caller-validated approval_ref of at most {MAX_APPROVAL_REF_CHARS} characters is required")
     if (not files or any(not isinstance(item, str) for item in files)
             or len(set(files)) != len(files)):
         raise ValueError("files must contain at least one unique project-relative path")
@@ -368,6 +411,8 @@ def capture_run(
         raise ValueError(f"files exceeds the {MAX_SNAPSHOT_FILES}-entry snapshot limit")
     if timeout is None:
         timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
+    if len(command) > MAX_COMMAND_ARGS or any(len(item.encode("utf-8")) > MAX_COMMAND_ARG_BYTES for item in command) or sum(len(item.encode("utf-8")) for item in command) > MAX_COMMAND_TOTAL_BYTES:
+        raise ValueError("command arguments exceed the configured count or byte limits")
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
             or not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_COMMAND_TIMEOUT_SECONDS):
         raise ValueError(f"timeout must be finite and between zero and {MAX_COMMAND_TIMEOUT_SECONDS} seconds")
