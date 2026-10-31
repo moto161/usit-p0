@@ -150,11 +150,16 @@ class AndroidProjectAdapter:
         if self._entry_count >= MAX_FILES:
             raise AdapterBlocked("FILE_BUDGET_EXCEEDED", f"Android inspection exceeded {MAX_FILES} discovered entries.")
 
+    def _reject_reparse_path(self, path: Path) -> None:
+        try:
+            safety.reject_reparse_components(path)
+        except safety.ScanBlocked as exc:
+            raise AdapterBlocked(exc.code, f"Unsafe path component in {path}: {exc}") from exc
+
     def _count_entry(self, path: Path) -> None:
         self._check_budget()
         self._entry_count += 1
-        if safety.is_reparse_point(path):
-            raise AdapterBlocked("REPARSE_POINT_REJECTED", f"{path} is a link/junction/reparse point.")
+        self._reject_reparse_path(path)
 
     # ------------------------------------------------------------------
     # Safe, no-follow reading
@@ -168,8 +173,7 @@ class AndroidProjectAdapter:
         """
         self._check_budget()
         # Check the directory entry itself before exists()/is_file(), including dangling links.
-        if safety.is_reparse_point(path):
-            raise AdapterBlocked("REPARSE_POINT_REJECTED", f"{path} is a link/junction/reparse point.")
+        self._reject_reparse_path(path)
         if not path.exists() or not path.is_file():
             return {"text": None, "read_ok": False, "error": "MISSING"}
         try:
