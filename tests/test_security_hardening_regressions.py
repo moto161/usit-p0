@@ -59,5 +59,61 @@ class AndroidOutputWriterTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
 
+class VerificationCaptureBoundsTests(unittest.TestCase):
+    def _project_and_parent(self, td: str):
+        base = Path(td)
+        project = base / "project"
+        parent = base / "evidence"
+        project.mkdir()
+        parent.mkdir()
+        (project / "stable.py").write_text("VALUE = 1\n", encoding="utf-8")
+        return project, parent
+
+    def test_capture_uses_a_finite_default_timeout(self):
+        import sys
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            with patch.object(capture, "DEFAULT_COMMAND_TIMEOUT_SECONDS", 0.1):
+                result = capture.capture_run(
+                    [sys.executable, "-c", "import time; time.sleep(3)"],
+                    project_root=project, evidence_parent=parent,
+                    files=["stable.py"], approval_ref="unit-test-approval",
+                )
+            self.assertTrue(result.timed_out)
+            self.assertEqual(result.status, "FAIL")
+            self.assertLessEqual(result.captured_output_bytes, capture.MAX_CAPTURE_OUTPUT_BYTES)
+
+    def test_capture_bounds_combined_stdout_and_stderr(self):
+        import sys
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            with patch.object(capture, "MAX_CAPTURE_OUTPUT_BYTES", 64):
+                result = capture.capture_run(
+                    [sys.executable, "-c", "import sys; sys.stdout.write('x'*10000); sys.stderr.write('y'*10000)"],
+                    project_root=project, evidence_parent=parent,
+                    files=["stable.py"], approval_ref="unit-test-approval",
+                )
+            self.assertEqual(result.status, "FAIL")
+            self.assertTrue(result.output_limit_exceeded)
+            self.assertLessEqual(result.captured_output_bytes, 64)
+            self.assertTrue(result.manifest_valid)
+            evidence = Path(result.evidence_dir)
+            self.assertLessEqual((evidence / "stdout.log").stat().st_size + (evidence / "stderr.log").stat().st_size, 64)
+
+    def test_capture_rejects_unbounded_timeout_values(self):
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            with self.assertRaises(ValueError):
+                capture.capture_run(
+                    ["python", "-c", "pass"], project_root=project,
+                    evidence_parent=parent, files=["stable.py"],
+                    approval_ref="unit-test-approval",
+                    timeout=capture.MAX_COMMAND_TIMEOUT_SECONDS + 1,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
