@@ -47,7 +47,7 @@ class AndroidOutputWriterTests(unittest.TestCase):
             _write_json_output(path, {"ok": True, "items": [1, 2]}, overwrite=False)
             raw = path.read_bytes()
             self.assertEqual(json.loads(raw.decode("utf-8")), {"ok": True, "items": [1, 2]})
-            self.assertTrue(raw.endswith(b"\\n"))
+            self.assertTrue(raw.endswith(b"\n"))
 
     def test_failed_exclusive_write_removes_partial_artifact(self):
         from usit.cli import _write_exclusive_bytes
