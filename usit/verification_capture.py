@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -367,10 +368,12 @@ def capture_run(
         raise ValueError(f"files exceeds the {MAX_SNAPSHOT_FILES}-entry snapshot limit")
     if timeout is None:
         timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
-    if timeout <= 0 or timeout > MAX_COMMAND_TIMEOUT_SECONDS:
-        raise ValueError(f"timeout must be between zero and {MAX_COMMAND_TIMEOUT_SECONDS} seconds")
-    if poll_interval <= 0:
-        raise ValueError("poll_interval must be greater than zero")
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_COMMAND_TIMEOUT_SECONDS):
+        raise ValueError(f"timeout must be finite and between zero and {MAX_COMMAND_TIMEOUT_SECONDS} seconds")
+    if (isinstance(poll_interval, bool) or not isinstance(poll_interval, (int, float))
+            or not math.isfinite(poll_interval) or poll_interval <= 0):
+        raise ValueError("poll_interval must be finite and greater than zero")
 
     project = _canonical_directory(project_root, "project root")
     parent = _canonical_directory(evidence_parent, "evidence parent")
