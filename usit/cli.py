@@ -135,6 +135,7 @@ def main(argv=None):
     v.add_argument('--project-root',help='Optional project root for file/line evidence checks')
     v.add_argument('--out-json',help='Machine-readable validation report (must not already exist)')
     v.add_argument('--out-md',help='Human-readable validation report (must not already exist)')
+    v.add_argument('--allow-untrusted-embedded-line-counts', action='store_true', help='Explicitly allow line-range checks to rely on editable source_line_counts embedded in the graph (not a trust anchor)')
     # P0.7.13-F1: read-only Android structural inspection + command-candidate
     # generation.  The name "inspect" is deliberate — this command NEVER executes
     # Gradle, ADB, or any test/build command; it only reads project files and
