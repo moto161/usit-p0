@@ -189,6 +189,21 @@ class VerificationCaptureBoundsTests(unittest.TestCase):
                         approval_ref="unit-test-approval",
                     )
 
+    def test_manifest_rejects_non_object_json_root(self):
+        import sys
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            result = capture.capture_run(
+                [sys.executable, "-c", "pass"], project_root=project,
+                evidence_parent=parent, files=["stable.py"],
+                approval_ref="unit-test-approval",
+            )
+            Path(result.manifest_path).write_text("[]", encoding="utf-8")
+            verified = capture.verify_manifest(result.evidence_dir)
+            self.assertFalse(verified["valid"])
+            self.assertTrue(any("root must be an object" in item for item in verified["errors"]))
+
 
 if __name__ == "__main__":
     unittest.main()
