@@ -252,8 +252,8 @@ class SafeDegradationTests(unittest.TestCase):
 
     def test_oversized_file_blocks_android_analysis(self):
         p = _SyntheticAndroidProject(self)
-        p.write("settings.gradle", "include ':app'\\n")
-        big = "x = 1\\n" * 200000  # ~2 MiB, exceeds MAX_FILE_BYTES (1 MiB)
+        p.write("settings.gradle", "include ':app'\n")
+        big = "x = 1\n" * 200000  # ~2 MiB, exceeds MAX_FILE_BYTES (1 MiB)
         p.write("app/build.gradle", big)
         with self.assertRaises(AdapterBlocked) as blocked:
             p.profile()
@@ -261,7 +261,7 @@ class SafeDegradationTests(unittest.TestCase):
 
     def test_android_scan_time_budget_fails_closed(self):
         p = _SyntheticAndroidProject(self)
-        p.write("settings.gradle", "include ':app'\\n")
+        p.write("settings.gradle", "include ':app'\n")
         with patch.object(adapter, "MAX_SCAN_SECONDS", -1):
             with self.assertRaises(AdapterBlocked) as blocked:
                 p.profile()
@@ -269,7 +269,7 @@ class SafeDegradationTests(unittest.TestCase):
 
     def test_android_entry_budget_fails_closed(self):
         p = _SyntheticAndroidProject(self)
-        p.write("settings.gradle", "include ':app'\\n")
+        p.write("settings.gradle", "include ':app'\n")
         obj = AndroidProjectAdapter(p.root)
         obj._entry_count = adapter.MAX_FILES
         with self.assertRaises(AdapterBlocked) as blocked:
