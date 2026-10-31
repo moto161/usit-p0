@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,7 @@ CONF_CONFLICT = "CONFLICT"
 MAX_FILE_BYTES = safety.MAX_FILE_BYTES
 MAX_TOTAL_READ_BYTES = safety.MAX_TOTAL_READ_BYTES
 MAX_FILES = safety.MAX_FILES
+MAX_SCAN_SECONDS = safety.MAX_SCAN_SECONDS
 
 ANDROID_ROOT_FILES = (
     "settings.gradle", "settings.gradle.kts",
@@ -139,6 +141,20 @@ class AndroidProjectAdapter:
         self.root = safety.canonical_project(project_root)
         self._total_read_bytes = 0
         self._file_count = 0
+        self._entry_count = 0
+        self._started_at = time.monotonic()
+
+    def _check_budget(self) -> None:
+        if time.monotonic() - self._started_at > MAX_SCAN_SECONDS:
+            raise AdapterBlocked("SCAN_TIME_BUDGET_EXCEEDED", f"Android inspection exceeded {MAX_SCAN_SECONDS} seconds.")
+        if self._entry_count >= MAX_FILES:
+            raise AdapterBlocked("FILE_BUDGET_EXCEEDED", f"Android inspection exceeded {MAX_FILES} discovered entries.")
+
+    def _count_entry(self, path: Path) -> None:
+        self._check_budget()
+        self._entry_count += 1
+        if safety.is_reparse_point(path):
+            raise AdapterBlocked("REPARSE_POINT_REJECTED", f"{path} is a link/junction/reparse point.")
 
     # ------------------------------------------------------------------
     # Safe, no-follow reading
@@ -150,38 +166,48 @@ class AndroidProjectAdapter:
         reparse point, missing file, over-size file, or decode problem the call
         degrades safely and records the reason instead of raising or guessing.
         """
-        if not path.exists():
-            return {"text": None, "read_ok": False, "error": "MISSING"}
-        # Reject reparse points (symlinks/junctions) before any other check so a
-        # directory junction that resolves outside the root is also fail-closed.
+        self._check_budget()
+        # Check the directory entry itself before exists()/is_file(), including dangling links.
         if safety.is_reparse_point(path):
             raise AdapterBlocked("REPARSE_POINT_REJECTED", f"{path} is a link/junction/reparse point.")
-        if not path.is_file():
+        if not path.exists() or not path.is_file():
             return {"text": None, "read_ok": False, "error": "MISSING"}
         try:
             resolved = path.resolve(strict=True)
         except OSError as exc:
-            return {"text": None, "read_ok": False, "error": f"RESOLVE_FAILED:{type(exc).__name__}"}
-        # Fail closed: reject any path that is not the root itself or inside it.
+            raise AdapterBlocked("PATH_CHECK_FAILED", f"Could not resolve {path}: {type(exc).__name__}") from exc
         if resolved != self.root and self.root not in resolved.parents:
             raise AdapterBlocked("PATH_TRAVERSAL_REJECTED", f"{path} is outside the authorised project root.")
-        size = resolved.stat().st_size
-        if size > MAX_FILE_BYTES:
-            return {"text": None, "read_ok": False, "too_large": True, "size": size, "error": "TOO_LARGE"}
         if self._file_count >= MAX_FILES:
-            return {"text": None, "read_ok": False, "error": "FILE_BUDGET_EXCEEDED"}
-        if self._total_read_bytes + size > MAX_TOTAL_READ_BYTES:
-            return {"text": None, "read_ok": False, "error": "BYTE_BUDGET_EXCEEDED"}
+            raise AdapterBlocked("FILE_BUDGET_EXCEEDED", f"Android inspection exceeds {MAX_FILES} file reads.")
         try:
             fd = open_no_follow(resolved)
         except OSError as exc:
-            return {"text": None, "read_ok": False, "error": f"OPEN_FAILED:{type(exc).__name__}"}
+            raise AdapterBlocked("SAFE_OPEN_FAILED", f"Could not safely open {path}: {type(exc).__name__}") from exc
         try:
-            raw = os.read(fd, MAX_FILE_BYTES)
+            before = os.fstat(fd)
+            if not os.path.isfile(resolved) or before.st_size > MAX_FILE_BYTES:
+                raise AdapterBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeds the {MAX_FILE_BYTES}-byte file limit.")
+            if self._total_read_bytes + before.st_size > MAX_TOTAL_READ_BYTES:
+                raise AdapterBlocked("BYTE_BUDGET_EXCEEDED", f"Android inspection exceeds {MAX_TOTAL_READ_BYTES} total bytes.")
+            chunks = []
+            remaining = MAX_FILE_BYTES + 1
+            while remaining > 0:
+                block = os.read(fd, min(65536, remaining))
+                if not block:
+                    break
+                chunks.append(block)
+                remaining -= len(block)
+            raw = b"".join(chunks)
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                raise AdapterBlocked("FILE_CHANGED_DURING_READ", f"{path} changed while being read.")
+            if len(raw) != before.st_size or len(raw) > MAX_FILE_BYTES:
+                raise AdapterBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeded its size budget during read.")
         finally:
             os.close(fd)
         self._file_count += 1
-        self._total_read_bytes += size
+        self._total_read_bytes += len(raw)
         try:
             text = raw.decode("utf-8")
             encoding_issue = False
@@ -200,6 +226,7 @@ class AndroidProjectAdapter:
     def _detect_root_signals(self, profile: AndroidProjectProfile) -> dict[str, Path]:
         found: dict[str, Path] = {}
         for name in ANDROID_ROOT_FILES:
+            self._check_budget()
             p = self.root / name
             if p.is_file():
                 found[name] = p
@@ -222,6 +249,7 @@ class AndroidProjectAdapter:
     def _find_manifest(self) -> Path | None:
         candidates = [self.root / MANIFEST_NAME, self.root / "app" / MANIFEST_NAME]
         for sub in self.root.iterdir():
+            self._count_entry(sub)
             if sub.is_dir():
                 cand = sub / "src" / "main" / MANIFEST_NAME
                 if cand.is_file():
@@ -267,6 +295,7 @@ class AndroidProjectAdapter:
         if not dirs:
             # Fallback: any directory containing a Gradle build file is a module.
             for sub in self.root.iterdir():
+                self._count_entry(sub)
                 if sub.is_dir() and (
                     (sub / "build.gradle").is_file() or (sub / "build.gradle.kts").is_file()
                 ):
@@ -305,6 +334,7 @@ class AndroidProjectAdapter:
             if set_name not in ("test", "androidTest"):
                 continue
             for src in base.rglob("*"):
+                self._count_entry(src)
                 if src.is_file() and src.suffix in (".kt", ".java"):
                     data = self._read_text(src)
                     markers: list[str] = []
