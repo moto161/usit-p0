@@ -352,6 +352,8 @@ def verify_manifest(evidence_dir: str | os.PathLike[str]) -> dict[str, Any]:
         manifest_path = root / _MANIFEST_NAME
         raw_manifest = _read_verified_bytes(manifest_path, MAX_MANIFEST_BYTES, "evidence manifest")
         manifest = json.loads(raw_manifest.decode("utf-8"))
+        if not isinstance(manifest, dict):
+            raise ValueError("evidence manifest root must be an object")
         if manifest.get("schema_version") != 1 or not _RUN_ID_RE.fullmatch(str(manifest.get("run_id", ""))):
             raise ValueError("unsupported or invalid manifest identity")
         artifacts = manifest.get("artifacts")
