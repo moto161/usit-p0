@@ -190,5 +190,24 @@ class VerificationCaptureBoundsTests(unittest.TestCase):
                     )
 
 
+class ParserFixtureDiagnosticTests(unittest.TestCase):
+    def test_js_fixture_failure_diagnostics_are_reported(self):
+        from usit.benchmark import run_fixture_benchmark
+        result = run_fixture_benchmark()
+        js = next(item for item in result["languages"] if item["language"] == "JavaScript/TypeScript")
+        if js["status"] != "PASS":
+            print(json.dumps({
+                "unexpected_calls": js.get("unexpected_calls"),
+                "false_resolved_nonresolved": js.get("false_resolved_nonresolved"),
+                "resolved_false_positive_examples": js.get("resolved_false_positive_examples"),
+                "resolved_false_negative_examples": js.get("resolved_false_negative_examples"),
+                "parse_error_checks": js.get("parse_error_checks"),
+                "actual_status_counts": js.get("actual_status_counts"),
+                "expected_status_counts": js.get("expected_status_counts"),
+                "unmatched": [row for row in js.get("relation_results", []) if not row.get("matched")],
+            }, ensure_ascii=False, indent=2))
+        self.assertEqual(js["status"], "PASS", "see diagnostic payload above")
+
+
 if __name__ == "__main__":
     unittest.main()
