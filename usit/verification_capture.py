@@ -232,7 +232,6 @@ def _drain_bounded(stream, sink, label: str, lock: threading.Lock, state: dict[s
         os.fsync(sink.fileno())
     except Exception as exc:
         reader_errors.append(f"{label} capture failed: {type(exc).__name__}: {exc}")
-        limit_event.set()
     finally:
         try:
             stream.close()
@@ -380,6 +379,8 @@ def capture_run(
     evidence_complete = False
     manifest_valid = False
     process_started = False
+    captured_output_bytes = 0
+    output_limit_exceeded = False
     try:
         _write_json_file(evidence / "pre_snapshot.json", {"run_id": run_id, "captured_at": started, "files": pre, "errors": pre_errors})
         with stdout_path.open("xb") as out_stream, stderr_path.open("xb") as err_stream:
