@@ -6,6 +6,9 @@ import unittest
 from pathlib import Path
 
 from usit.ai_evidence_binding import verify_evidence_bindings
+from usit.scan_attestation import create_scan_attestation, public_key_id
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 class AIEvidenceBindingTests(unittest.TestCase):
@@ -22,6 +25,17 @@ class AIEvidenceBindingTests(unittest.TestCase):
         )
         source_bytes = source.read_bytes()
         report_bytes = report.read_bytes()
+        self.attestation_private = Ed25519PrivateKey.generate()
+        self.attestation_public = self.attestation_private.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        self.attestation_key_id = public_key_id(self.attestation_public)
+        self.attestation_private_pem = self.attestation_private.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
         self.ledger = {
             "schema": "usit-ai-claim-ledger-v1",
             "evidence_catalog": [
@@ -111,6 +125,112 @@ class AIEvidenceBindingTests(unittest.TestCase):
         result = verify_evidence_bindings(self.ledger, self.root)
         self.assertEqual(result["evidence_bindings"][0]["snapshot_binding_status"],
                          "MANIFEST_MISSING")
+
+    def _attach_scan_attestation(self, *, manifest_path="scan_manifest.json",
+                                 attestation_path="scan_attestation.json"):
+        entry = self.ledger["evidence_catalog"][0]
+        manifest_file = self.root / manifest_path
+        manifest_bytes = manifest_file.read_bytes()
+        entry["snapshot_attestation_path"] = attestation_path
+        (self.root / attestation_path).write_bytes(create_scan_attestation(
+            manifest_bytes, self.attestation_private_pem,
+            snapshot_id="snapshot-" + manifest_path,
+            created_at="2026-11-01T12:00:00Z",
+            scanner_version="0.1.0", source_revision="fixture-revision",
+            manifest_path=manifest_path,
+        ))
+
+    def test_legacy_source_without_attestation_remains_compatible(self):
+        self._attach_scan_manifest()
+        result = verify_evidence_bindings(self.ledger, self.root)
+        binding = result["evidence_bindings"][0]
+        self.assertEqual(binding["attestation_status"], "ATTESTATION_NOT_PROVIDED")
+        self.assertEqual(result["claims"][0]["snapshot_provenance_status"], "NOT_PROVIDED")
+        self.assertEqual(result["overall_truth_status"], "NOT_ESTABLISHED")
+
+    def test_trusted_scan_attestation_is_bound_to_source_evidence(self):
+        self._attach_scan_manifest()
+        self._attach_scan_attestation()
+        result = verify_evidence_bindings(
+            self.ledger, self.root, trusted_public_keys={self.attestation_key_id: self.attestation_public}
+        )
+        binding = result["evidence_bindings"][0]
+        self.assertEqual(binding["attestation_status"], "ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY")
+        self.assertEqual(result["claims"][0]["snapshot_provenance_status"],
+                         "ALL_SOURCE_ATTESTATIONS_TRUSTED")
+        self.assertEqual(result["claims"][0]["snapshot_provenance"][0]["snapshot_id"],
+                         "snapshot-scan_manifest.json")
+        self.assertEqual(result["claims"][0]["truth_status"], "NOT_ESTABLISHED")
+
+    def test_valid_attestation_without_independent_trust_is_untrusted(self):
+        self._attach_scan_manifest()
+        self._attach_scan_attestation()
+        result = verify_evidence_bindings(self.ledger, self.root)
+        self.assertEqual(result["evidence_bindings"][0]["attestation_status"],
+                         "ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY")
+        self.assertEqual(result["claims"][0]["snapshot_provenance_status"], "CHECK_REQUIRED")
+
+    def test_attestation_detects_manifest_bytes_changed_after_signing(self):
+        self._attach_scan_manifest()
+        self._attach_scan_attestation()
+        manifest = self.root / "scan_manifest.json"
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+        entry = self.ledger["evidence_catalog"][0]
+        entry["snapshot_manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        result = verify_evidence_bindings(
+            self.ledger, self.root, trusted_public_keys={self.attestation_key_id: self.attestation_public}
+        )
+        self.assertEqual(result["evidence_bindings"][0]["attestation_status"],
+                         "ATTESTATION_MANIFEST_MISMATCH")
+
+    def test_tampered_attestation_signature_is_rejected(self):
+        self._attach_scan_manifest()
+        self._attach_scan_attestation()
+        sidecar = self.root / "scan_attestation.json"
+        value = __import__("json").loads(sidecar.read_bytes())
+        value["signature"] = "A" * 88
+        sidecar.write_text(__import__("json").dumps(value), encoding="utf-8")
+        result = verify_evidence_bindings(
+            self.ledger, self.root, trusted_public_keys={self.attestation_key_id: self.attestation_public}
+        )
+        self.assertEqual(result["evidence_bindings"][0]["attestation_status"],
+                         "ATTESTATION_SIGNATURE_INVALID")
+
+    def test_multiple_snapshot_provenance_records_are_not_collapsed(self):
+        self._attach_scan_manifest()
+        self._attach_scan_attestation()
+        second_manifest = {
+            "schema_version": "usit-manifest-v1",
+            "project_root": "fixture-project-2",
+            "files": [{"path": "src/photo.py",
+                       "sha256": self.ledger["evidence_catalog"][0]["source_sha256"]}],
+        }
+        second_raw = __import__("json").dumps(second_manifest, sort_keys=True).encode("utf-8")
+        (self.root / "scan_manifest_two.json").write_bytes(second_raw)
+        second_entry = dict(self.ledger["evidence_catalog"][0])
+        second_entry.update(
+            evidence_id="src-second-snapshot",
+            snapshot_manifest_path="scan_manifest_two.json",
+            snapshot_manifest_sha256=hashlib.sha256(second_raw).hexdigest(),
+            snapshot_attestation_path="scan_attestation_two.json",
+        )
+        (self.root / "scan_attestation_two.json").write_bytes(create_scan_attestation(
+            second_raw, self.attestation_private_pem,
+            snapshot_id="snapshot-two", created_at="2026-11-01T12:01:00Z",
+            scanner_version="0.1.0", source_revision="fixture-revision",
+            manifest_path="scan_manifest_two.json",
+        ))
+        self.ledger["evidence_catalog"].append(second_entry)
+        self.ledger["claims"][0]["evidence_refs"].append("src-second-snapshot")
+        result = verify_evidence_bindings(
+            self.ledger, self.root, trusted_public_keys={self.attestation_key_id: self.attestation_public}
+        )
+        provenance = result["claims"][0]["snapshot_provenance"]
+        self.assertEqual(len(provenance), 2)
+        self.assertEqual({x["manifest_path"] for x in provenance},
+                         {"scan_manifest.json", "scan_manifest_two.json"})
+        self.assertEqual({x["snapshot_id"] for x in provenance},
+                         {"snapshot-scan_manifest.json", "snapshot-two"})
 
     def test_hash_mismatch_is_stale(self):
         self.ledger["evidence_catalog"][0]["source_sha256"] = "0" * 64
