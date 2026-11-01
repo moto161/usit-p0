@@ -159,6 +159,29 @@ def create_scan_attestation(
     return _canonical_json(attestation)
 
 
+def load_trusted_public_key(path: str) -> bytes:
+    """Load an externally provisioned raw-32-byte or PEM Ed25519 public key."""
+    from pathlib import Path
+
+    key_path = Path(path).expanduser()
+    if key_path.is_symlink():
+        raise ValueError("trusted public key path must not be a symbolic link")
+    resolved = key_path.resolve(strict=True)
+    if not resolved.is_file() or resolved.stat().st_size > 16 * 1024:
+        raise ValueError("trusted public key must be a regular file no larger than 16 KiB")
+    raw = resolved.read_bytes()
+    if len(raw) == 32:
+        public = Ed25519PublicKey.from_public_bytes(raw)
+    else:
+        try:
+            public = serialization.load_pem_public_key(raw)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("trusted key must be raw Ed25519 public bytes or PEM") from exc
+        if not isinstance(public, Ed25519PublicKey):
+            raise ValueError("trusted public key algorithm must be Ed25519")
+    return _public_bytes(public)
+
+
 def verify_scan_attestation(
     manifest_bytes: bytes,
     attestation_bytes: bytes,
