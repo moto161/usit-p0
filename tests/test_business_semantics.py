@@ -127,6 +127,19 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(by_method["PUT"]["handler_reference"], "photosController.updatePhoto")
         self.assertEqual(by_method["PATCH"]["handler_reference"], "")
 
+    def test_extracts_named_and_member_route_handlers_but_not_inline_callbacks(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.js", (
+            "router.post('/photos', authRequired, uploadPhoto);\\n"
+            "router.put('/photos/:id', photosController.updatePhoto);\\n"
+            "router.patch('/photos/:id', async (req, res) => {});\\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        by_method = {item["method"]: item for item in result["endpoints"]}
+        self.assertEqual(by_method["POST"]["handler_reference"], "uploadPhoto")
+        self.assertEqual(by_method["PUT"]["handler_reference"], "photosController.updatePhoto")
+        self.assertEqual(by_method["PATCH"]["handler_reference"], "")
+
     def test_public_login_is_not_flagged(self):
         p = SyntheticProject(self)
         p.route("server/routes/auth.js", (
