@@ -172,19 +172,25 @@ class BusinessGraphProjectionTests(unittest.TestCase):
 
     def test_handler_call_chain_stops_at_configured_depth(self):
         source = graph()
-        symbols = [f"symbol:module_{index}.py#step_{index}:{index + 1}"
-                   for index in range(10)]
+        handler = "symbol:server/routes/photos.js#uploadPhoto:35"
+        symbols = [handler] + [
+            f"symbol:module_{index}.py#step_{index}:{index + 1}"
+            for index in range(9)
+        ]
         for index, symbol in enumerate(symbols):
+            path = "server/routes/photos.js" if index == 0 else f"module_{index}.py"
+            name = "uploadPhoto" if index == 0 else f"step_{index - 1}"
             source["nodes"].append({
-                "id": symbol, "type": "function", "label": f"step_{index}",
-                "evidence": {"path": f"module_{index}.py", "line": index + 1},
+                "id": symbol, "type": "function", "label": name,
+                "evidence": {"path": path, "line": 35 if index == 0 else index},
             })
         for index in range(len(symbols) - 1):
+            path = "server/routes/photos.js" if index == 0 else f"module_{index}.py"
             source["edges"].append({
-                "source": "file:module.py", "target": symbols[index + 1],
+                "source": "file:" + path, "target": symbols[index + 1],
                 "type": "calls", "caller_symbol_id": symbols[index],
                 "resolution_status": "RESOLVED", "resolved": True,
-                "evidence": {"path": f"module_{index}.py", "line": index + 20},
+                "evidence": {"path": path, "line": index + 40},
                 "method": "typescript-compiler-api", "confidence": "high",
             })
         result = project_business_graph(source, {"endpoints": [{
