@@ -292,3 +292,14 @@ python -m usit assess-quality --semantics .\\business_semantics.json --graph .\\
 ```
 
 Optional evidence inputs may be omitted. Missing evidence remains `NOT_MEASURED`; an empty denominator yields `percent=null`, not a fabricated score. A test pass ratio is not a business-correctness score. The report remains bounded by the coverage and limitations of its source artifacts.
+
+
+### S2.19-B — Markdown 质量报告
+
+The same assessment can optionally produce a human-readable Markdown report alongside the machine-readable JSON artifact:
+
+```powershell
+python -m usit assess-quality --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --gap-backlog .\\verification-gap-backlog.json --out .\\project-quality-assessment.json --out-md .\\project-quality-assessment.md
+```
+
+Both output paths must be distinct, non-symlink paths that do not already exist. The Markdown report is a presentation of the JSON assessment, not an independent verification result.
