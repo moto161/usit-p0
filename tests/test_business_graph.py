@@ -205,6 +205,13 @@ class BusinessGraphProjectionTests(unittest.TestCase):
 
     def test_database_access_links_exact_owner_and_documented_table(self):
         source = graph()
+        source["nodes"].extend([
+            {"id": "file:server/repos/photo_repo.py", "type": "file",
+             "label": "server/repos/photo_repo.py",
+             "evidence": {"path": "server/repos/photo_repo.py"}},
+            {"id": "external:db.execute", "type": "external", "label": "execute",
+             "evidence": {"note": "external database client"}},
+        ])
         source["nodes"].append({
             "id": "file:docs/schema.md", "type": "file", "label": "docs/schema.md",
             "evidence": {"path": "docs/schema.md"},
