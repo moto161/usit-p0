@@ -303,7 +303,7 @@ def main(argv=None):
             result=build_business_traceability(sem_doc,graph_doc,mapping_doc,
                 plan_pair[1],matrix_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             summary={"schema_version":result["schema_version"],
                      "feature_count":result["feature_count"],
                      "business_function_view_count":result["business_function_view_count"],
