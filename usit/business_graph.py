@@ -464,6 +464,103 @@ def project_business_graph(graph: Mapping[str, Any],
                 })
                 database_table_links += 1
 
+    # S2.9: project line-anchored identity/resource data-flow evidence.
+    # A record is linked to a DB access only on an exact same-file, same-line
+    # match. No cross-line taint propagation or ownership inference is performed.
+    identity_records = semantics.get("identity_evidence", [])
+    if not isinstance(identity_records, list):
+        raise ValueError("semantics.identity_evidence must be a list")
+    identity_linked = 0
+    identity_unlinked = 0
+    identity_nodes: list[dict[str, Any]] = []
+    identity_by_database_id: dict[str, list[dict[str, Any]]] = {}
+    database_nodes_by_location: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for item in nodes:
+        if item.get("business_kind") != "database_access":
+            continue
+        evidence = item.get("evidence") or {}
+        if isinstance(evidence.get("path"), str) and isinstance(evidence.get("line"), int):
+            database_nodes_by_location.setdefault((evidence["path"], evidence["line"]), []).append(item)
+    for raw in identity_records:
+        if not isinstance(raw, Mapping):
+            continue
+        path = _source_path(raw)
+        line = _source_line(raw)
+        if not path or line is None or path not in file_ids:
+            identity_unlinked += 1
+            unlinked.append({"kind": "identity_evidence", "reason": "INVALID_OR_MISSING_SOURCE"})
+            continue
+        details = raw.get("details") if isinstance(raw.get("details"), Mapping) else {}
+        identity_id = raw.get("evidence_id")
+        if not isinstance(identity_id, str) or not identity_id:
+            identity_id = _stable_id("identity-evidence", {
+                "path": path, "line": line, "kind": raw.get("kind"), "details": dict(details),
+            })
+        identity_node = {
+            "id": identity_id, "type": "candidate",
+            "label": f"Identity evidence {raw.get('kind') or 'UNKNOWN'} @ {path}:{line}",
+            "business_kind": "identity_evidence",
+            "business_details": {
+                "kind": raw.get("kind") or "UNKNOWN",
+                "details": dict(details),
+                "scope": raw.get("scope") or "UNKNOWN",
+                "owner_symbol_id": None,
+                "owner_resolution_status": "UNKNOWN",
+            },
+            "evidence": {"path": path, "line": line, "confidence": "STATIC_INFERENCE"},
+            "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+        }
+        if identity_id not in existing_ids:
+            nodes.append(identity_node)
+            existing_ids.add(identity_id)
+            edges.append({
+                "source": file_ids[path], "target": identity_id, "type": "references",
+                "evidence": {"path": path, "line": line, "identity_kind": raw.get("kind")},
+                "method": "identity-evidence-exact-source-line", "confidence": "low",
+                "candidate": True, "verified": False, "verification_status": "NOT_VERIFIED",
+            })
+        identity_nodes.append(identity_node)
+        matching_db = database_nodes_by_location.get((path, line), [])
+        for db_node in matching_db:
+            db_id = db_node.get("id")
+            if isinstance(db_id, str):
+                identity_by_database_id.setdefault(db_id, []).append({
+                    "identity_evidence_id": identity_id,
+                    "kind": raw.get("kind") or "UNKNOWN",
+                    "path": path, "line": line,
+                    "details": dict(details),
+                    "scope": raw.get("scope") or "UNKNOWN",
+                    "confidence": "STATIC_INFERENCE",
+                    "verification_status": "NOT_VERIFIED",
+                })
+                db_details = db_node.get("business_details")
+                if isinstance(db_details, dict):
+                    refs = db_details.setdefault("identity_evidence_ids", [])
+                    if identity_id not in refs:
+                        refs.append(identity_id)
+        identity_linked += 1
+
+    # Attach exact same-line identity evidence to endpoints only through a DB
+    # access already present in their resolved bounded call-chain association.
+    for endpoint_node in nodes:
+        association = endpoint_node.get("handler_association")
+        if not isinstance(association, dict):
+            continue
+        db_ids = {
+            item.get("database_access_id")
+            for item in association.get("database_access_evidence", [])
+            if isinstance(item, Mapping) and isinstance(item.get("database_access_id"), str)
+        }
+        related_identity = [
+            record
+            for db_id in sorted(db_ids)
+            for record in identity_by_database_id.get(db_id, [])
+        ]
+        related_identity.sort(key=lambda item: (
+            item["path"], item["line"], item["kind"], item["identity_evidence_id"]
+        ))
+        association["identity_dataflow_evidence"] = related_identity
+
     # S2.7: project explicit authorization guard/check evidence.
     authorization_records = semantics.get("authorization_checks", [])
     if not isinstance(authorization_records, list):
@@ -615,6 +712,8 @@ def project_business_graph(graph: Mapping[str, Any],
         "database_access_records": database_access_linked,
         "database_access_unowned": database_access_unowned,
         "database_access_table_links": database_table_links,
+        "identity_evidence_records": identity_linked,
+        "identity_evidence_unlinked": identity_unlinked,
         "authorization_check_records": authorization_linked,
         "authorization_check_unowned": authorization_unowned,
         "limitations": [
@@ -625,6 +724,7 @@ def project_business_graph(graph: Mapping[str, Any],
             "调用链仅沿唯一 RESOLVED 的图谱符号边进行有界静态展开；循环会标记，深度/数量上限会截断，不证明运行时执行。",
             "数据库访问只识别单行直接 SQL 字符串字面量；owner 必须由同路径同调用行的 caller_symbol_id 唯一绑定。动态/拼接/多行 SQL 不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
             "权限证据仅识别有限的 route middleware 名称、显式权限调用名和简单 role/owner 条件；函数权限调用只有在同文件同调用行的唯一 caller_symbol_id 存在时才归属函数。未检测到权限线索不证明缺少授权，检测到线索也不证明运行时执行或检查正确。",
+            "身份/资源数据流仅识别有限同一源码行模式；只有身份线索与数据库调用位于同文件同一行时才附着到数据库访问，再经已解析 endpoint 调用链关联。未做跨行变量/参数/返回值传播、别名解析、ORM 映射或控制流分析；同一行模式不证明运行时身份可信或资源授权正确。",
         ],
     }
     return result
