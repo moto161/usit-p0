@@ -18,6 +18,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Run business semantics and test-planner tests
-        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner -v
+        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli -v
       - name: Run USIT self-test
         run: python -m usit selftest
