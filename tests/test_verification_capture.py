@@ -81,6 +81,24 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertIsNotNone(result.exit_code)
         self.assertTrue(result.manifest_valid)
 
+    def test_timeout_terminates_descendant_that_inherits_capture_pipes(self):
+        marker = self.base / "orphan-child-survived.txt"
+        child_code = (
+            "import time; time.sleep(1.2); "
+            f"open({str(marker)!r}, 'w', encoding='utf-8').write('survived')"
+        )
+        parent_code = (
+            "import subprocess, sys, time; "
+            f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+            "time.sleep(10)"
+        )
+        result = self.run_capture(parent_code, timeout=0.3, poll_interval=0.01)
+        self.assertTrue(result.timed_out)
+        self.assertIn(result.status, ("FAIL", "INFRASTRUCTURE_ERROR"))
+        time.sleep(1.6)
+        self.assertFalse(marker.exists(), "timeout left a descendant process running")
+        self.assertTrue(result.manifest_valid)
+
     def test_interruption_terminates_child_and_records_real_returncode(self):
         event = threading.Event()
         timer = threading.Timer(0.15, event.set)
