@@ -360,7 +360,7 @@ class VerifyCurrentContentTests(unittest.TestCase):
     # ---- ZP-2: read-count behaviour -----------------------------------
     def test_zp2_read_counts(self):
         # Static guarantee: production code never invokes the new method.
-        scanner_src = (Path(__file__).resolve().parent.parent / "usit" / "scanner.py").read_text()
+        scanner_src = (Path(__file__).resolve().parent.parent / "usit" / "scanner.py").read_text(encoding="utf-8")
         graph_src = (Path(__file__).resolve().parent.parent / "usit" / "graph.py").read_text()
         self.assertNotIn("verify_current_content", scanner_src)
         self.assertNotIn("verify_current_content", graph_src)
