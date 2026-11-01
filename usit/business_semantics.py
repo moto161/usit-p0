@@ -487,7 +487,9 @@ class BusinessSemanticsAdapter:
     def _extract_doc_endpoints(self, doc_path: Path, text: str) -> list[dict[str, str]]:
         out: list[dict[str, str]] = []
         for m in re.finditer(r"\b(GET|POST|PUT|DELETE|PATCH)\s+(/api/[\w/:{}_.-]+)", text):
-            out.append({"method": m.group(1).upper(), "path": m.group(2), "source": self._rel(doc_path)})
+            out.append({"method": m.group(1).upper(), "path": m.group(2),
+                        "source": self._rel(doc_path),
+                        "line": text.count("\\n", 0, m.start()) + 1})
         return out
 
     def _extract_code_endpoints(self, route_path: Path, text: str) -> list[Endpoint]:
@@ -629,6 +631,66 @@ class BusinessSemanticsAdapter:
                 continue
             endpoints.extend(self._extract_code_endpoints(rf, data["text"]))
 
+        # S2.11: exact documented API contract ↔ code route reconciliation.
+        # No path normalization or name-based guessing: only exact method/path pairs match.
+        endpoint_contract_alignment: list[dict[str, Any]] = []
+        matched_code_keys: set[tuple[str, str, str, int]] = set()
+        for documented in doc_endpoints:
+            matches = [
+                ep for ep in endpoints
+                if ep.method == documented["method"] and ep.path == documented["path"]
+            ]
+            if len(matches) == 1:
+                status = "EXACT_MATCH"
+            elif len(matches) > 1:
+                status = "MULTIPLE_CODE_MATCHES"
+            else:
+                status = "DOCUMENTED_NOT_FOUND_IN_CODE"
+            code_evidence = [
+                {"method": ep.method, "path": ep.path, "source": ep.source,
+                 "line": ep.line, "confidence": "STATIC_INFERENCE"}
+                for ep in matches
+            ]
+            for ep in matches:
+                matched_code_keys.add((ep.method, ep.path, ep.source, ep.line))
+            endpoint_contract_alignment.append({
+                "status": status,
+                "method": documented["method"], "path": documented["path"],
+                "document_evidence": {"source": documented["source"], "line": documented.get("line")},
+                "code_evidence": code_evidence,
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "limitations": [
+                    "仅按 HTTP method 与 path 精确匹配；未做 base path、router mount、版本前缀或动态路由展开。",
+                    "文档缺失不证明接口不应存在；代码未匹配也不证明功能未实现。",
+                ],
+            })
+        for ep in endpoints:
+            key = (ep.method, ep.path, ep.source, ep.line)
+            if key in matched_code_keys:
+                continue
+            endpoint_contract_alignment.append({
+                "status": "CODE_ENDPOINT_NOT_DOCUMENTED",
+                "method": ep.method, "path": ep.path,
+                "document_evidence": None,
+                "code_evidence": [{
+                    "method": ep.method, "path": ep.path,
+                    "source": ep.source, "line": ep.line,
+                    "confidence": "STATIC_INFERENCE",
+                }],
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "limitations": [
+                    "需求/API 文档可能不完整或存放在未识别文件中；未文档化不等于未授权或错误。",
+                    "仅按 HTTP method 与 path 精确匹配；未展开 router mount、动态路由或 API gateway。",
+                ],
+            })
+        endpoint_contract_alignment.sort(key=lambda item: (
+            item["method"], item["path"], item["status"],
+            str((item.get("document_evidence") or {}).get("source") or ""),
+            int((item.get("document_evidence") or {}).get("line") or 0),
+        ))
+
         # (1) Endpoints the code exposes with NO auth at all — but only flag the
         #     ones that are not public-by-design (login/register/health/...).
         for ep in endpoints:
@@ -725,6 +787,8 @@ class BusinessSemanticsAdapter:
             ],
             "doc_endpoint_count": len(doc_endpoints),
             "endpoint_count": len(endpoints),
+            "endpoint_contract_alignment_count": len(endpoint_contract_alignment),
+            "endpoint_contract_alignment": endpoint_contract_alignment,
             "endpoints": [
                 {"method": ep.method, "path": ep.path, "code_auth": ep.code_auth,
                  "authorization_status": "DETECTED" if ep.code_auth else "NOT_DETECTED_STATIC_SCAN",
