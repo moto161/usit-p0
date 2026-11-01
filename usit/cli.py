@@ -235,7 +235,7 @@ def main(argv=None):
             if output.exists(): raise ValueError('benchmark output already exists; choose a new path to avoid overwriting')
             output.parent.mkdir(parents=True,exist_ok=True)
             result=run_fixture_benchmark()
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             print(json.dumps({'result_path':str(output),'languages':result['languages']},ensure_ascii=False,indent=2))
             return 0 if all(x['false_resolved_nonresolved_count']==0 for x in result['languages']) else 1
         if a.cmd=='benchmark-associations':
