@@ -154,7 +154,7 @@ class BusinessTraceabilityTests(unittest.TestCase):
             input_hashes=self.hashes)
         report["rows"][0]["feature_name"] = "A|B"
         markdown = render_business_traceability_markdown(report)
-        self.assertIn("A\\\\|B", markdown)
+        self.assertIn(r"A\|B", markdown)
         with self.assertRaisesRegex(ValueError, "usit-business-traceability-matrix-v1"):
             render_business_traceability_markdown({"schema_version": "wrong"})
 
