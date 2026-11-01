@@ -16,6 +16,7 @@ from .test_result_importer import ingest_junit_results
 from .coverage_result_importer import ingest_coverage_results
 from .business_evidence_verifier import verify_business_function_evidence
 from .verification_gap_analyzer import build_verification_gap_backlog
+from .project_quality_assessment import assess_project_quality
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -209,6 +210,13 @@ def main(argv=None):
     ga.add_argument('--test-plan',help='Optional business_test_plan.json')
     ga.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
     ga.add_argument('--out',required=True,help='New JSON gap backlog path; existing files are never overwritten')
+    qa=sub.add_parser('assess-quality',help='Summarize multidimensional project quality from evidence artifacts; no aggregate score')
+    qa.add_argument('--semantics',required=True,help='business_semantics.json')
+    qa.add_argument('--graph',required=True,help='business_knowledge_graph.json')
+    qa.add_argument('--test-plan',help='Optional business_test_plan.json')
+    qa.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
+    qa.add_argument('--gap-backlog',help='Optional analyze-gaps output JSON')
+    qa.add_argument('--out',required=True,help='New JSON assessment path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
         if a.cmd=='selftest': return selftest()
@@ -258,6 +266,38 @@ def main(argv=None):
             return _inspect_android(a)
         if a.cmd=='plan-business-tests':
             return _plan_business_tests(a)
+        if a.cmd=='assess-quality':
+            import hashlib
+            def read_quality_json(path, limit):
+                source=Path(path).expanduser()
+                if source.is_symlink(): raise ValueError("input must not be a symbolic link")
+                resolved=source.resolve(strict=True)
+                if not resolved.is_file(): raise ValueError("input must be a regular file")
+                raw=resolved.read_bytes()
+                if len(raw)>limit: raise ValueError("quality assessment input exceeds size limit")
+                return raw,json.loads(raw)
+            sem_bytes,sem_doc=read_quality_json(a.semantics,20*1024*1024)
+            graph_bytes,graph_doc=read_quality_json(a.graph,50*1024*1024)
+            plan_pair=read_quality_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
+            matrix_pair=read_quality_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
+            gaps_pair=read_quality_json(a.gap_backlog,50*1024*1024) if a.gap_backlog else (None,None)
+            output=Path(a.out).expanduser()
+            if output.is_symlink(): raise ValueError("output must not be a symbolic link")
+            output=output.resolve()
+            if output.exists(): raise ValueError("quality assessment output already exists; choose a new path to preserve prior evidence")
+            hashes={"business_semantics_sha256":hashlib.sha256(sem_bytes).hexdigest(),
+                    "business_graph_sha256":hashlib.sha256(graph_bytes).hexdigest()}
+            if plan_pair[0] is not None: hashes["test_plan_sha256"]=hashlib.sha256(plan_pair[0]).hexdigest()
+            if matrix_pair[0] is not None: hashes["evidence_matrix_sha256"]=hashlib.sha256(matrix_pair[0]).hexdigest()
+            if gaps_pair[0] is not None: hashes["gap_backlog_sha256"]=hashlib.sha256(gaps_pair[0]).hexdigest()
+            result=assess_project_quality(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],gaps_pair[1],hashes)
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            summary={"schema_version":result["schema_version"],"assessment_mode":result["assessment_mode"],
+                     "inventory":result["inventory"],"dimensions":result["dimensions"],
+                     "evidence_integrity":result["evidence_integrity"],"result_path":str(output)}
+            print(json.dumps(summary,ensure_ascii=False,indent=2))
+            return 0
         if a.cmd=='analyze-gaps':
             import hashlib
             def read_gap_json(path, limit):
