@@ -392,6 +392,8 @@ def main(argv=None):
             result=assess_project_quality(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],gaps_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+            if markdown_output is not None:
+                markdown_output.parent.mkdir(parents=True,exist_ok=True)
                 markdown_output.write_text(render_project_quality_markdown(result),encoding='utf-8')
             summary={"schema_version":result["schema_version"],"assessment_mode":result["assessment_mode"],
                      "inventory":result["inventory"],"dimensions":result["dimensions"],
