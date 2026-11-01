@@ -17,6 +17,7 @@ from .coverage_result_importer import ingest_coverage_results
 from .business_evidence_verifier import verify_business_function_evidence
 from .verification_gap_analyzer import build_verification_gap_backlog
 from .project_quality_assessment import assess_project_quality
+from .project_quality_report import render_project_quality_markdown
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -217,6 +218,7 @@ def main(argv=None):
     qa.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
     qa.add_argument('--gap-backlog',help='Optional analyze-gaps output JSON')
     qa.add_argument('--out',required=True,help='New JSON assessment path; existing files are never overwritten')
+    qa.add_argument('--out-md',help='Optional new Markdown report path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
         if a.cmd=='selftest': return selftest()
@@ -285,6 +287,13 @@ def main(argv=None):
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
             if output.exists(): raise ValueError("quality assessment output already exists; choose a new path to preserve prior evidence")
+            markdown_output=None
+            if a.out_md:
+                markdown_output=Path(a.out_md).expanduser()
+                if markdown_output.is_symlink(): raise ValueError("Markdown output must not be a symbolic link")
+                markdown_output=markdown_output.resolve()
+                if markdown_output==output: raise ValueError("JSON and Markdown output paths must be distinct")
+                if markdown_output.exists(): raise ValueError("Markdown output already exists; choose a new path to preserve prior evidence")
             hashes={"business_semantics_sha256":hashlib.sha256(sem_bytes).hexdigest(),
                     "business_graph_sha256":hashlib.sha256(graph_bytes).hexdigest()}
             if plan_pair[0] is not None: hashes["test_plan_sha256"]=hashlib.sha256(plan_pair[0]).hexdigest()
@@ -293,9 +302,13 @@ def main(argv=None):
             result=assess_project_quality(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],gaps_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+            if markdown_output is not None:
+                markdown_output.parent.mkdir(parents=True,exist_ok=True)
+                markdown_output.write_text(render_project_quality_markdown(result),encoding='utf-8')
             summary={"schema_version":result["schema_version"],"assessment_mode":result["assessment_mode"],
                      "inventory":result["inventory"],"dimensions":result["dimensions"],
-                     "evidence_integrity":result["evidence_integrity"],"result_path":str(output)}
+                     "evidence_integrity":result["evidence_integrity"],"result_path":str(output),
+                     "markdown_result_path":str(markdown_output) if markdown_output else None}
             print(json.dumps(summary,ensure_ascii=False,indent=2))
             return 0
         if a.cmd=='analyze-gaps':
