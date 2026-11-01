@@ -80,9 +80,22 @@ def project_business_graph(graph: Mapping[str, Any],
         if isinstance(path, str) and path:
             file_ids[path] = node["id"]
 
+    # Only exact, unique function/method declarations in the route's own file
+    # are eligible. Imported/member handlers remain UNKNOWN in this slice.
+    symbols_by_file_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for node in nodes:
+        if node.get("type") not in {"function", "method"}:
+            continue
+        evidence = node.get("evidence")
+        path = evidence.get("path") if isinstance(evidence, Mapping) else None
+        label = node.get("label")
+        if isinstance(path, str) and isinstance(label, str) and path and label:
+            symbols_by_file_name.setdefault((path, label), []).append(node)
+
     linked_counts = {"features": 0, "entities": 0, "endpoints": 0}
     linked = 0
     unlinked: list[dict[str, str]] = []
+    handler_counts = {"RESOLVED": 0, "AMBIGUOUS": 0, "UNKNOWN": 0, "NOT_ANALYZED": 0}
     for kind in _ALLOWED_BUSINESS:
         records = semantics.get(kind, [])
         if not isinstance(records, list):
@@ -147,6 +160,66 @@ def project_business_graph(graph: Mapping[str, Any],
                 linked += 1
             linked_counts[kind] += 1
 
+            if kind == "endpoints":
+                endpoint_node = next((item for item in nodes if item.get("id") == node_id), None)
+                handler_ref = raw.get("handler_reference")
+                if not isinstance(handler_ref, str) or not handler_ref.strip():
+                    handler_counts["NOT_ANALYZED"] += 1
+                    if endpoint_node is not None:
+                        endpoint_node["handler_association"] = {
+                            "reference": None, "resolution_status": "UNKNOWN",
+                            "reason": "HANDLER_REFERENCE_NOT_EXTRACTED",
+                        }
+                    continue
+                handler_ref = handler_ref.strip()
+                if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", handler_ref):
+                    handler_counts["UNKNOWN"] += 1
+                    if endpoint_node is not None:
+                        endpoint_node["handler_association"] = {
+                            "reference": handler_ref, "resolution_status": "UNKNOWN",
+                            "reason": "COMPLEX_OR_MEMBER_HANDLER_NOT_RESOLVED",
+                        }
+                    continue
+                matches = symbols_by_file_name.get((path, handler_ref), [])
+                if len(matches) == 1:
+                    target = matches[0]
+                    handler_counts["RESOLVED"] += 1
+                    if endpoint_node is not None:
+                        target_evidence = target.get("evidence") or {}
+                        endpoint_node["handler_association"] = {
+                            "reference": handler_ref, "resolution_status": "RESOLVED",
+                            "target_symbol_id": target["id"],
+                            "target_path": target_evidence.get("path"),
+                            "target_line": target_evidence.get("line"),
+                            "confidence": "STATIC_INFERENCE",
+                        }
+                    relation = {
+                        "source": node_id, "target": target["id"], "type": "references",
+                        "evidence": {"path": path, **({"line": line} if line else {})},
+                        "method": "route-handler-static-symbol-match",
+                        "confidence": "medium", "candidate": True, "verified": False,
+                        "resolution_status": "RESOLVED",
+                        "verification_status": "NOT_VERIFIED",
+                    }
+                    if not any(e.get("source") == node_id and e.get("target") == target["id"]
+                               and e.get("method") == relation["method"] for e in edges):
+                        edges.append(relation)
+                elif len(matches) > 1:
+                    handler_counts["AMBIGUOUS"] += 1
+                    if endpoint_node is not None:
+                        endpoint_node["handler_association"] = {
+                            "reference": handler_ref, "resolution_status": "AMBIGUOUS",
+                            "candidate_targets": sorted(item["id"] for item in matches),
+                            "reason": "MULTIPLE_SAME_FILE_SYMBOLS",
+                        }
+                else:
+                    handler_counts["UNKNOWN"] += 1
+                    if endpoint_node is not None:
+                        endpoint_node["handler_association"] = {
+                            "reference": handler_ref, "resolution_status": "UNKNOWN",
+                            "reason": "NO_UNIQUE_SAME_FILE_SYMBOL",
+                        }
+
     result["nodes"] = nodes
     result["edges"] = edges
     result["business_understanding"] = {
@@ -155,8 +228,10 @@ def project_business_graph(graph: Mapping[str, Any],
         "linked_record_counts": linked_counts,
         "linked_records": linked,
         "unlinked_records": unlinked,
+        "route_handler_associations": handler_counts,
         "limitations": [
-            "仅建立业务记录与其精确来源文件之间的证据关联。",
+            "业务记录只与精确来源文件关联；命名路由 handler 仅在同一文件且唯一符号匹配时建立候选引用。",
+            "跨文件导入、对象成员、内联回调、多行路由注册和动态 handler 暂不解析，保留 UNKNOWN/NOT_ANALYZED。",
             "未建立功能到接口、接口到数据实体、角色到权限的推断关系。",
             "candidate/verified=false 表示未验证，不代表运行时可达或功能已实现。",
         ],
