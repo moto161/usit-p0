@@ -297,6 +297,25 @@ class AIEvidenceBindingTests(unittest.TestCase):
                          "ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY")
         self.assertEqual(report["claims"][0]["truth_status"], "NOT_ESTABLISHED")
 
+    def test_cli_rejects_untrusted_snapshot_attestation(self):
+        self._attach_scan_manifest()
+        self._attach_scan_attestation()
+        ledger_path = self.root / "ledger-untrusted.json"
+        ledger_path.write_text(json.dumps(self.ledger), encoding="utf-8")
+        output = self.root / "binding-untrusted-report.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main([
+                "verify-evidence-bindings", "--input", str(ledger_path),
+                "--evidence-root", str(self.root), "--out", str(output),
+            ])
+        self.assertEqual(code, 2)
+        report = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(report["evidence_bindings"][0]["binding_status"],
+                         "ARTIFACT_HASH_MATCH_AND_LOCATOR_VALID")
+        self.assertEqual(report["evidence_bindings"][0]["attestation_status"],
+                         "ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY")
+        self.assertEqual(report["claims"][0]["truth_status"], "NOT_ESTABLISHED")
+
     def test_hash_mismatch_is_stale(self):
         self.ledger["evidence_catalog"][0]["source_sha256"] = "0" * 64
         result = verify_evidence_bindings(self.ledger, self.root)
