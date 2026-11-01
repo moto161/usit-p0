@@ -136,11 +136,11 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
 
     def test_javascript_anonymous_callback_does_not_inherit_outer_owner(self):
         (self.root / "callback.js").write_text(
-            "function helper() {}\\n"
-            "function run() {\\n"
-            "  router.get('/x', (req, res) => { helper(); });\\n"
-            "  helper();\\n"
-            "}\\n",
+            "function helper() {}\n"
+            "function run() {\n"
+            "  router.get('/x', (req, res) => { helper(); });\n"
+            "  helper();\n"
+            "}\n",
             encoding="utf-8",
         )
         out = self.root.parent / "callback-scan-output"
