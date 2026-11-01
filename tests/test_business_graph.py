@@ -203,6 +203,69 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(len(association["call_chain_evidence"][0]["steps"]), 8)
         self.assertTrue(association["call_chain_evidence"][0]["depth_limit_reached"])
 
+    def test_database_access_links_exact_owner_and_documented_table(self):
+        source = graph()
+        source["nodes"].append({
+            "id": "file:docs/schema.md", "type": "file", "label": "docs/schema.md",
+            "evidence": {"path": "docs/schema.md"},
+        })
+        handler = "symbol:server/routes/photos.js#listPhotos:10"
+        repository = "symbol:server/repos/photo_repo.py#load:4"
+        source["nodes"].extend([
+            {"id": handler, "type": "function", "label": "listPhotos",
+             "evidence": {"path": "server/routes/photos.js", "line": 10}},
+            {"id": repository, "type": "function", "label": "load",
+             "evidence": {"path": "server/repos/photo_repo.py", "line": 4}},
+        ])
+        source["edges"].extend([
+            {"source": "file:server/routes/photos.js", "target": repository,
+             "type": "calls", "caller_symbol_id": handler, "resolution_status": "RESOLVED",
+             "evidence": {"path": "server/routes/photos.js", "line": 15}},
+            {"source": "file:server/repos/photo_repo.py", "target": "external:db.execute",
+             "type": "calls", "caller_symbol_id": repository, "resolution_status": "EXTERNAL",
+             "evidence": {"path": "server/repos/photo_repo.py", "line": 22}},
+        ])
+        semantics = {
+            "entities": [{"name": "photos", "source": "docs/schema.md",
+                          "fields": [{"name": "id"}, {"name": "owner_id"}]}],
+            "endpoints": [{"method": "GET", "path": "/photos",
+                           "source": "server/routes/photos.js:5", "line": 5,
+                           "handler_reference": "listPhotos"}],
+            "database_accesses": [{
+                "source": "server/repos/photo_repo.py", "line": 22,
+                "callee": "db.execute", "operation": "SELECT", "tables": ["photos"],
+                "columns": ["id", "owner_id"], "parse_status": "RESOLVED",
+                "parser": "python-ast-single-line",
+            }],
+        }
+        result = project_business_graph(source, semantics)
+        access = next(n for n in result["nodes"] if n.get("business_kind") == "database_access")
+        self.assertEqual(access["business_details"]["owner_symbol_id"], repository)
+        self.assertEqual(access["business_details"]["owner_resolution_status"], "RESOLVED")
+        self.assertTrue(any(e.get("method") == "database-access-to-documented-entity"
+                            for e in result["edges"]))
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        evidence = endpoint["handler_association"]["database_access_evidence"]
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["tables"], ["photos"])
+        self.assertEqual(evidence[0]["verification_status"], "NOT_VERIFIED")
+
+    def test_database_access_without_unique_caller_is_not_attached_to_function(self):
+        source = graph()
+        source["nodes"].append({
+            "id": "file:server/repos/photo_repo.py", "type": "file",
+            "label": "server/repos/photo_repo.py",
+            "evidence": {"path": "server/repos/photo_repo.py"},
+        })
+        result = project_business_graph(source, {"database_accesses": [{
+            "source": "server/repos/photo_repo.py", "line": 9,
+            "callee": "db.execute", "operation": "UNKNOWN", "tables": [],
+            "columns": [], "parse_status": "UNKNOWN",
+        }]})
+        access = next(n for n in result["nodes"] if n.get("business_kind") == "database_access")
+        self.assertIsNone(access["business_details"]["owner_symbol_id"])
+        self.assertEqual(access["business_details"]["owner_resolution_status"], "UNKNOWN")
+
     def test_duplicate_same_file_handler_symbols_remain_ambiguous(self):
         source = graph()
         for line in (30, 45):
