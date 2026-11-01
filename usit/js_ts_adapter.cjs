@@ -787,6 +787,49 @@ function main(input) {
     for (const statement of sourceFile.statements) visit(statement, null, null);
     row.imports = imports;
     row.calls = calls;
+    row.route_handlers = [];
+    function collectRouteHandlers(node) {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+          && ["get", "post", "put", "patch", "delete", "options", "head", "all"].includes(node.expression.name.text.toLowerCase())
+          && node.arguments.length >= 2 && ts.isStringLiteralLike(node.arguments[0])) {
+        const handlerNode = node.arguments[node.arguments.length - 1];
+        const handlerReference = handlerNode.getText(sourceFile);
+        const position = loc(sourceFile, node);
+        const methodName = node.expression.name.text.toUpperCase();
+        const handlerSymbol = checker.getSymbolAtLocation(handlerNode);
+        const resolved = symbolAfterAliases(handlerSymbol);
+        const targets = declarationTargets(resolved);
+        const unique = new Map(targets.map((target) => [target.id, target]));
+        const recordRow = {
+          method: methodName, path: node.arguments[0].text,
+          line: position.line, column: position.column,
+          handler_reference: handlerReference,
+          resolution_status: "UNKNOWN", candidate_targets: [],
+          evidence_chain: [{ kind: "route_registration", file: entry.rel, line: position.line, column: position.column }]
+        };
+        if (unique.size === 1) {
+          const target = Array.from(unique.values())[0];
+          if (target.entry && !/\\.d\\.(?:ts|mts|cts)$/i.test(target.full)) {
+            recordRow.resolution_status = "RESOLVED";
+            recordRow.target = {
+              id: "symbol:" + target.entry + "#" + target.name + ":" + target.line,
+              path: target.entry, name: target.name, line: target.line
+            };
+            recordRow.evidence_chain.push({
+              kind: "handler_definition", file: target.entry, line: target.line, name: target.name
+            });
+          } else {
+            recordRow.resolution_status = "EXTERNAL";
+          }
+        } else if (unique.size > 1) {
+          recordRow.resolution_status = "AMBIGUOUS";
+          recordRow.candidate_targets = Array.from(unique.keys()).sort();
+        }
+        row.route_handlers.push(recordRow);
+      }
+      ts.forEachChild(node, collectRouteHandlers);
+    }
+    collectRouteHandlers(sourceFile);
     const importBindings = new Map();
     for (const item of imports) for (const binding of item.bindings || []) importBindings.set(binding.local, { module: item.module, line: item.line, imported: binding.imported, kind: binding.kind });
 

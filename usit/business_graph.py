@@ -183,6 +183,47 @@ def project_business_graph(graph: Mapping[str, Any],
                         }
                     continue
                 matches = symbols_by_file_name.get((path, handler_ref), [])
+                route_line = line
+                imported_matches = [
+                    edge for edge in edges
+                    if edge.get("type") == "references"
+                    and edge.get("method") == "typescript-route-handler-binding"
+                    and (edge.get("evidence") or {}).get("path") == path
+                    and (edge.get("evidence") or {}).get("line") == route_line
+                    and (edge.get("evidence") or {}).get("handler_reference") == handler_ref
+                ]
+                if not matches and len(imported_matches) == 1:
+                    imported_edge = imported_matches[0]
+                    imported_status = imported_edge.get("resolution_status", "UNKNOWN")
+                    imported_target = imported_edge.get("target")
+                    if imported_status == "RESOLVED" and imported_target in {n.get("id") for n in nodes}:
+                        matches = [next(n for n in nodes if n.get("id") == imported_target)]
+                    elif imported_status == "AMBIGUOUS":
+                        handler_counts["AMBIGUOUS"] += 1
+                        if endpoint_node is not None:
+                            endpoint_node["handler_association"] = {
+                                "reference": handler_ref, "resolution_status": "AMBIGUOUS",
+                                "candidate_targets": imported_edge.get("candidate_targets", []),
+                                "reason": "TYPESCRIPT_SYMBOL_HAS_MULTIPLE_DECLARATIONS",
+                            }
+                        continue
+                    else:
+                        handler_counts["UNKNOWN"] += 1
+                        if endpoint_node is not None:
+                            endpoint_node["handler_association"] = {
+                                "reference": handler_ref, "resolution_status": imported_status,
+                                "reason": "TYPESCRIPT_IMPORT_BINDING_NOT_UNIQUELY_RESOLVED",
+                                "evidence": imported_edge.get("evidence_chain", []),
+                            }
+                        continue
+                elif not matches and len(imported_matches) > 1:
+                    handler_counts["AMBIGUOUS"] += 1
+                    if endpoint_node is not None:
+                        endpoint_node["handler_association"] = {
+                            "reference": handler_ref, "resolution_status": "AMBIGUOUS",
+                            "reason": "MULTIPLE_ROUTE_HANDLER_BINDING_RECORDS",
+                        }
+                    continue
                 if len(matches) == 1:
                     target = matches[0]
                     handler_counts["RESOLVED"] += 1
@@ -256,8 +297,8 @@ def project_business_graph(graph: Mapping[str, Any],
         "route_handler_associations": handler_counts,
         "handler_downstream_call_evidence": handler_downstream_calls,
         "limitations": [
-            "业务记录只与精确来源文件关联；命名路由 handler 仅在同一文件且唯一符号匹配时建立候选引用。",
-            "跨文件导入、对象成员、内联回调、多行路由注册和动态 handler 暂不解析，保留 UNKNOWN/NOT_ANALYZED。",
+            "业务记录只与精确来源文件关联；命名路由 handler 可通过同文件唯一符号或 TypeScript Compiler API 的导入符号证据建立候选引用。",
+            "跨文件 handler 仅在编译器符号解析唯一且目标符号存在于当前图谱时关联；动态、外部、歧义或缺少符号证据时保留原状态，不按名称猜测。",
             "未建立功能到接口、接口到数据实体、角色到权限的推断关系。",
             "candidate/verified=false 表示未验证，不代表运行时可达或功能已实现。",
         ],

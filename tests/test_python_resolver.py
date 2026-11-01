@@ -122,6 +122,53 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(helper["caller_symbol_id"], "symbol:sample.js#run:2")
 
 
+    def test_typescript_imported_express_handler_resolves_to_exported_symbol(self):
+        (self.root / "routes.js").write_text(
+            "const router = require('express').Router();\\n"
+            "const { uploadPhoto: upload } = require('./controllers/photos');\\n"
+            "router.post('/photos', upload);\\n",
+            encoding="utf-8",
+        )
+        (self.root / "controllers").mkdir(exist_ok=True)
+        (self.root / "controllers" / "photos.js").write_text(
+            "exports.uploadPhoto = function uploadPhoto(req, res) { return savePhoto(); };\\n"
+            "function savePhoto() {}\\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "imported-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "typescript-route-handler-binding"
+                       and edge.get("route_path") == "/photos")
+        self.assertEqual(binding["resolution_status"], "RESOLVED")
+        self.assertEqual(binding["target"], "symbol:controllers/photos.js#uploadPhoto:1")
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "routes.js:3",
+            "line": 3, "handler_reference": "upload",
+        }]})
+        endpoint = next(node for node in projected["nodes"] if node.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "RESOLVED")
+        self.assertEqual(endpoint["handler_association"]["target_symbol_id"],
+                         "symbol:controllers/photos.js#uploadPhoto:1")
+
+    def test_typescript_dynamic_or_unresolved_route_handler_is_not_guessed(self):
+        (self.root / "routes.js").write_text(
+            "const router = require('express').Router();\\n"
+            "const handler = registry[name];\\n"
+            "router.get('/dynamic', handler);\\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "dynamic-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "typescript-route-handler-binding"
+                       and edge.get("route_path") == "/dynamic")
+        self.assertNotEqual(binding["resolution_status"], "RESOLVED")
+        self.assertFalse(binding["resolved"])
+
     def test_python_lambda_calls_do_not_inherit_outer_function_owner(self):
         source = "def run():\n    callback = lambda: helper()\n    helper()\n"
         (self.root / "lambda_scope.py").write_text(source, encoding="utf-8")

@@ -1027,6 +1027,10 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
         categories[r['category']]=categories.get(r['category'],0)+1
     markers=build_markers(root,paths)
     nodes=[]; edges=[]
+    all_symbol_ids = {
+        'symbol:' + row['path'] + '#' + symbol['name'] + ':' + str(symbol['line'])
+        for row in rows for symbol in row.get('symbols', [])
+    }
     for f in rows:
         fid='file:'+f['path']; nodes.append({'id':fid,'type':'file','label':f['path'],'category':f['category'],'language':f['language'],'module':f.get('module'),'evidence':{'path':f['path']}})
         defined_ids={}
@@ -1044,6 +1048,35 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             did='dependency:'+dep['name']
             if not any(n['id']==did for n in nodes): nodes.append({'id':did,'type':'dependency','label':dep['name'],'evidence':{'path':f['path'],'line':dep['line']}})
             edges.append(_edge(fid,did,'imports',{'path':f['path'],'line':dep['line'],'excerpt':dep.get('evidence','')},method=dep.get('method','regex'),confidence='medium'))
+        for route_handler in f.get('route_handlers', []):
+            state = route_handler.get('resolution_status', 'UNKNOWN')
+            target = route_handler.get('target') or {}
+            extras = {
+                'resolution_status': state,
+                'handler_reference': route_handler.get('handler_reference', ''),
+                'route_method': route_handler.get('method', ''),
+                'route_path': route_handler.get('path', ''),
+                'evidence_chain': route_handler.get('evidence_chain', []),
+                'candidate': True,
+                'verified': False,
+                'verification_status': 'NOT_VERIFIED',
+            }
+            if state == 'RESOLVED' and target.get('id') in all_symbol_ids:
+                extras['resolved'] = True
+                edges.append(_edge(fid, target['id'], 'references',
+                    {'path': f['path'], 'line': route_handler.get('line'),
+                     'column': route_handler.get('column'),
+                     'handler_reference': route_handler.get('handler_reference')},
+                    method='typescript-route-handler-binding', confidence='high', **extras))
+            else:
+                extras['resolved'] = False
+                if route_handler.get('candidate_targets'):
+                    extras['candidate_targets'] = route_handler['candidate_targets']
+                edges.append(_edge(fid, 'unresolved-route-handler:' + f['path'] + ':' +
+                    str(route_handler.get('line')) + ':' + str(route_handler.get('handler_reference')),
+                    'references', {'path': f['path'], 'line': route_handler.get('line'),
+                    'handler_reference': route_handler.get('handler_reference')},
+                    method='typescript-route-handler-binding', confidence='low', **extras))
         for c in f['calls']:
             state=c.get('resolution_status','UNKNOWN')
             target=c.get('target') or {}
