@@ -515,9 +515,7 @@ def project_business_graph(graph: Mapping[str, Any],
         for auth_node in authorization_nodes:
             details = auth_node.get("business_details", {})
             auth_evidence = auth_node.get("evidence", {})
-            if auth_evidence.get("path") != endpoint_path:
-                continue
-            if details.get("kind") == "route_middleware":
+            if details.get("kind") == "route_middleware" and auth_evidence.get("path") == endpoint_path:
                 route_guards.append({"authorization_check_id": auth_node["id"],
                                      "path": endpoint_path, "line": auth_evidence.get("line"),
                                      "guard_names": details.get("guard_names", []),
