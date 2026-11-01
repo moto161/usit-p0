@@ -142,6 +142,15 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertEqual(result["unlinked_security_test_candidate_ids"], ["sec-unlinked"])
         self.assertNotIn("sec-unlinked", [item for row in result["rows"] for item in row["test_candidate_ids"]])
 
+    def test_security_candidate_with_unknown_function_id_is_reported_unlinked(self):
+        security_plan = {"schema_version": "usit-security-test-candidates-v1",
+            "source_business_graph_sha256": self.graph_hash,
+            "candidates": [{"test_id": "sec-unknown-function", "business_function_id": "bf-missing"}]}
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            security_test_plan=security_plan, input_hashes=self.hashes)
+        self.assertEqual(result["unlinked_security_test_candidate_ids"], ["sec-unknown-function"])
+        self.assertNotIn("sec-unknown-function", [item for row in result["rows"] for item in row["test_candidate_ids"]])
+
     def test_no_mapping_never_uses_feature_name_or_module_to_guess(self):
         result = build_business_traceability(self.semantics, self.graph,
             {"schema_version": "usit-feature-function-mapping-v1", "source_graph_sha256": self.graph_hash, "mappings": []},
