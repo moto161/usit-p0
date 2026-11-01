@@ -341,9 +341,10 @@ class AndroidProjectAdapter:
             # Fallback: any directory containing a Gradle build file is a module.
             for sub in self.root.iterdir():
                 self._count_entry(sub)
-                if sub.is_dir() and (
-                    (sub / "build.gradle").is_file() or (sub / "build.gradle.kts").is_file()
-                ):
+                build_candidates = (sub / "build.gradle", sub / "build.gradle.kts")
+                for candidate in build_candidates:
+                    self._validate_project_path(candidate)
+                if sub.is_dir() and any(candidate.is_file() for candidate in build_candidates):
                     dirs.append(sub)
         # De-duplicate while preserving order.
         seen: set[Path] = set()
