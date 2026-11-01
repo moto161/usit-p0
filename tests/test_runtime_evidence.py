@@ -119,13 +119,13 @@ class RuntimeEvidenceTests(unittest.TestCase):
             bad_path = base / "bad-events.json"
             bad_doc = json.loads(json.dumps(self.doc))
             bad_doc["source_graph_sha256"] = "f" * 64
-            bad_path.write_text(json.dumps(bad_doc), encoding="utf-8")
+            bad_path.write_text(json.dumps(bad_doc, ensure_ascii=False), encoding="utf-8")
             bad_out = base / "bad-report.json"
             with redirect_stdout(StringIO()):
                 bad_code = main(["validate-runtime-evidence", "--events", str(bad_path),
                                  "--graph", str(graph_path), "--out", str(bad_out)])
             self.assertEqual(bad_code, 1)
-            self.assertEqual(json.loads(bad_out.read_text())["assessment_status"], "EVIDENCE_CONFLICT")
+            self.assertEqual(json.loads(bad_out.read_text(encoding="utf-8"))["assessment_status"], "EVIDENCE_CONFLICT")
             with redirect_stdout(StringIO()):
                 overwrite_code = main(["validate-runtime-evidence", "--events", str(event_path),
                                        "--graph", str(graph_path), "--out", str(out_path)])
