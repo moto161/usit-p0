@@ -158,6 +158,37 @@ class BusinessTraceabilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "usit-business-traceability-matrix-v1"):
             render_business_traceability_markdown({"schema_version": "wrong"})
 
+    def test_runtime_observation_is_separate_from_test_execution_and_requires_explicit_function_id(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash, "runtime_evidence_sha256": "b" * 64},
+            "business_function_ids_observed": ["bf-list"],
+            "correlations": [{"correlation_id": "corr-1", "business_function_ids": ["bf-list"],
+                "runtime_observation_status": "RUNTIME_OBSERVED"}],
+        }
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            input_hashes=self.hashes, runtime_evidence_validation=runtime)
+        linked = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        unreviewed = next(row for row in result["rows"] if row["feature_name"] == "删除照片")
+        self.assertEqual(linked["stage_status"]["runtime_observation"], "RUNTIME_OBSERVED")
+        self.assertEqual(linked["stage_status"]["test_execution"], "NOT_MEASURED")
+        self.assertEqual(linked["traceability_status"], "TRACEABLE_WITH_RUNTIME_OBSERVATION")
+        self.assertEqual(linked["runtime_observation"]["correlation_ids"], ["corr-1"])
+        self.assertEqual(unreviewed["stage_status"]["runtime_observation"], "NOT_OBSERVED")
+        self.assertIsNone(unreviewed["business_function_id"])
+
+    def test_runtime_evidence_graph_hash_mismatch_is_rejected(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "source_hashes": {"business_graph_sha256": "0" * 64},
+            "business_function_ids_observed": [],
+            "correlations": [],
+        }
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            build_business_traceability(self.semantics, self.graph, self.mapping,
+                input_hashes=self.hashes, runtime_evidence_validation=runtime)
+
     def test_rejects_invalid_runtime_evidence_shape(self):
         evidence = {"schema_version": "usit-business-evidence-verification-v1",
             "business_function_evidence": [{"business_function_id": "bf-list"}, {"business_function_id": "bf-list"}]}
