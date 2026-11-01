@@ -71,5 +71,56 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(original["edges"], [])
 
 
+    def test_resolves_unique_same_file_named_handler_as_candidate_reference(self):
+        source = graph()
+        source["nodes"].append({
+            "id": "symbol:server/routes/photos.js#uploadPhoto:35",
+            "type": "function", "label": "uploadPhoto",
+            "evidence": {"path": "server/routes/photos.js", "line": 35},
+        })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "RESOLVED")
+        relation = next(e for e in result["edges"] if e.get("method") == "route-handler-static-symbol-match")
+        self.assertEqual(relation["target"], "symbol:server/routes/photos.js#uploadPhoto:35")
+        self.assertIs(relation["verified"], False)
+        self.assertIs(relation["candidate"], True)
+
+    def test_duplicate_same_file_handler_symbols_remain_ambiguous(self):
+        source = graph()
+        for line in (30, 45):
+            source["nodes"].append({
+                "id": f"symbol:server/routes/photos.js#uploadPhoto:{line}",
+                "type": "function", "label": "uploadPhoto",
+                "evidence": {"path": "server/routes/photos.js", "line": line},
+            })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "AMBIGUOUS")
+        self.assertEqual(len(endpoint["handler_association"]["candidate_targets"]), 2)
+        self.assertFalse(any(e.get("method") == "route-handler-static-symbol-match" for e in result["edges"]))
+
+    def test_member_handler_is_not_guessed(self):
+        source = graph()
+        source["nodes"].append({
+            "id": "symbol:server/controllers/photos.js#uploadPhoto:12",
+            "type": "function", "label": "uploadPhoto",
+            "evidence": {"path": "server/controllers/photos.js", "line": 12},
+        })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "photosController.uploadPhoto",
+        }]})
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "UNKNOWN")
+        self.assertFalse(any(e.get("method") == "route-handler-static-symbol-match" for e in result["edges"]))
+
+
 if __name__ == "__main__":
     unittest.main()
