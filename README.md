@@ -154,3 +154,10 @@ Important: `DETECTED` means only that a recognized source pattern was found. `NO
 扫描器通过 TypeScript Compiler API 识别有限 JSX/TSX 事件属性（`onClick`、`onSubmit`、`onChange`、`onPress`、`onTap`、`onLongPress`），并在事件属性绑定到唯一命名函数/方法时建立带文件/行号的候选引用。业务理解摘要输出 `frontend_interaction_bindings`。内联回调、动态表达式、歧义符号和外部目标不会被伪装成已解析 handler。
 
 本切片只建立“UI 事件属性 → handler 符号”入口证据，尚未建立 handler → API client → 后端 endpoint → 数据库的完整业务链；不覆盖 Vue/Angular/XML/Jetpack Compose 等其他 UI 语法，不证明事件在运行时触发或页面可达。所有记录保持 `STATIC_INFERENCE` / `NOT_VERIFIED`。
+
+
+## S2.13-B — 前端 API 调用与后端接口候选关联
+
+TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调用形态提取 HTTP 方法、URL 字面量、调用文件/行号及所属函数符号。只有明确的绝对路径字面量（以 `/` 开头且不含查询/片段/模板变量）才参与精确匹配；动态 URL 保留为未解析候选。与代码端点仅按大写 HTTP 方法 + 原始路径完全相等关联，不做路径归一化或猜测。
+
+当 JSX 事件绑定唯一指向 handler，且通过唯一已解析函数调用边可达某 API 调用点时，业务摘要输出 `frontend_business_chains`。这是静态候选链，不证明 UI 运行时触发、网络请求成功、后端实际路由生效或业务结果正确；深度上限 8、访问符号上限 100。当前只覆盖有限 TS/JS 调用形态，不代表对所有前端框架/客户端封装的支持。
