@@ -303,6 +303,31 @@ class PathSafetyTests(unittest.TestCase):
             adapter_obj._read_text(link)
         self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
 
+    def test_gradle_module_path_traversal_is_rejected_before_probe(self):
+        p = _SyntheticAndroidProject(self)
+        outside = p.base / "outside"
+        outside.mkdir()
+        (outside / "build.gradle").write_text("android {}\n", encoding="utf-8")
+        adapter_obj = AndroidProjectAdapter(p.root)
+        for module_path in (":../outside", ":..:outside", ":nested/../../outside", r":nested\..\outside"):
+            with self.subTest(module_path=module_path):
+                with self.assertRaises(AdapterBlocked) as blocked:
+                    adapter_obj._module_dir(module_path)
+                self.assertEqual(blocked.exception.code, "INVALID_MODULE_PATH")
+
+    def test_root_gradle_file_symlink_is_rejected_before_stat_probe(self):
+        p = _SyntheticAndroidProject(self)
+        outside = p.base / "outside-settings.gradle"
+        outside.write_text("include ':app'\n", encoding="utf-8")
+        link = p.root / "settings.gradle"
+        if not _make_symlink(link, outside):
+            CAPABILITY_LOG["android_root_file_symlink"] = "NOT TESTED - OS denied symlink creation"
+            self.skipTest("OS denied symlink creation")
+        adapter_obj = AndroidProjectAdapter(p.root)
+        with self.assertRaises(AdapterBlocked) as blocked:
+            adapter_obj._detect_root_signals(adapter.AndroidProjectProfile())
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
+
     def test_symlinked_project_root_is_rejected(self):
         p = _SyntheticAndroidProject(self)
         real = p.base / "real"
