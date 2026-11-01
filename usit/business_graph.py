@@ -839,11 +839,18 @@ def project_business_graph(graph: Mapping[str, Any],
         }
 
     endpoint_execution_paths = _build_endpoint_execution_paths(nodes)
+    endpoint_contract_alignment = semantics.get("endpoint_contract_alignment", [])
+    if not isinstance(endpoint_contract_alignment, list):
+        raise ValueError("semantics.endpoint_contract_alignment must be a list")
     result["nodes"] = nodes
     result["edges"] = edges
     result["business_understanding"] = {
         "endpoint_execution_paths": endpoint_execution_paths,
         "endpoint_execution_path_count": len(endpoint_execution_paths),
+        "endpoint_contract_alignment_count": len(endpoint_contract_alignment),
+        "endpoint_contract_alignment": [
+            dict(item) for item in endpoint_contract_alignment if isinstance(item, Mapping)
+        ],
         "schema_version": _SCHEMA,
         "status": "PARTIAL_EVIDENCE_LINKS",
         "linked_record_counts": linked_counts,
