@@ -291,10 +291,10 @@ The analyzer consumes only explicit `business_function_id` associations. It does
 Example:
 
 ```powershell
-python -m usit analyze-gaps --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --out .\\verification-gap-backlog.json
+python -m usit analyze-gaps --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --traceability .\\business-traceability-matrix.json --out .\\verification-gap-backlog.json
 ```
 
-The test plan and evidence matrix are optional. The output records SHA-256 hashes of every supplied input. P0/P1/P2 are triage priorities, not severity determinations. Requirements and acceptance criteria still require owner review.
+The test plan, evidence matrix and traceability matrix are optional. When `--traceability` is supplied, only rows marked `APPROVED_LINK` with an exact feature identity and a business_function_id present in the supplied graph can close a requirement traceability gap. The traceability matrix must carry the SHA-256 of the exact graph bytes supplied to `analyze-gaps`; stale or mismatched matrices are rejected. Unreviewed, rejected, targetless or ambiguous mappings do not close gaps. The output records SHA-256 hashes of every supplied input. P0/P1/P2 are triage priorities, not severity determinations. Requirements and acceptance criteria still require owner review.
 
 
 ## S2.19 — 多维度项目质量评估
