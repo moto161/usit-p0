@@ -201,6 +201,7 @@ def verify_scan_attestation(
         "key_id": None,
         "snapshot_id": None,
         "manifest_sha256": None,
+        "manifest_path": None,
         "signature_valid": False,
         "trusted_key": False,
         "freshness": "NOT_ASSESSED",
@@ -260,7 +261,7 @@ def verify_scan_attestation(
         return result
 
     result.update(key_id=key_id, snapshot_id=snapshot_id,
-                  manifest_sha256=manifest["sha256"])
+                  manifest_sha256=manifest["sha256"], manifest_path=manifest["path"])
     actual_manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
     if actual_manifest_sha != manifest["sha256"]:
         result.update(status="ATTESTATION_MANIFEST_MISMATCH",
