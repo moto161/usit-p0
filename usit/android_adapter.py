@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -203,8 +204,14 @@ class AndroidProjectAdapter:
             raise AdapterBlocked("SAFE_OPEN_FAILED", f"Could not safely open {path}: {type(exc).__name__}") from exc
         try:
             before = os.fstat(fd)
-            if not os.path.isfile(resolved) or before.st_size > MAX_FILE_BYTES:
-                raise AdapterBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeds the {MAX_FILE_BYTES}-byte file limit.")
+            if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_FILE_BYTES:
+                raise AdapterBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeds the {MAX_FILE_BYTES}-byte regular-file limit.")
+            self._validate_project_path(path)
+            path_before = os.stat(resolved, follow_symlinks=False)
+            identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            if identity != (path_before.st_dev, path_before.st_ino, path_before.st_size,
+                            path_before.st_mtime_ns, path_before.st_ctime_ns):
+                raise AdapterBlocked("FILE_CHANGED_DURING_OPEN", f"{path} changed while being opened.")
             if self._total_read_bytes + before.st_size > MAX_TOTAL_READ_BYTES:
                 raise AdapterBlocked("BYTE_BUDGET_EXCEEDED", f"Android inspection exceeds {MAX_TOTAL_READ_BYTES} total bytes.")
             chunks = []
