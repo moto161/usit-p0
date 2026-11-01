@@ -888,7 +888,11 @@ def project_business_graph(graph: Mapping[str, Any],
                 "api_call_node_id": edge.get("target"), "method": method or None, "path": path,
                 "source_file": evidence.get("path"), "line": evidence.get("line"),
                 "caller_symbol_id": edge.get("caller_symbol_id"),
-                "resolution_status": "NO_MATCH" if not matches else "AMBIGUOUS",
+                "resolution_status": (
+                    edge.get("resolution_status")
+                    if edge.get("resolution_status") != "LITERAL_METHOD_PATH"
+                    else ("NO_MATCH" if not matches else "AMBIGUOUS")
+                ),
                 "candidate_endpoint_ids": sorted(item.get("id") for item in matches),
                 "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
             })
@@ -922,6 +926,8 @@ def project_business_graph(graph: Mapping[str, Any],
             if depth < 8:
                 queue.extend((target, depth + 1) for target in sorted(calls_by_caller.get(symbol_id, [])))
         for link in found:
+            if link.get("resolution_status") != "EXACT_MATCH":
+                continue
             frontend_business_chains.append({
                 "source_file": binding.get("source_file"), "event_line": binding.get("line"),
                 "event_name": binding.get("event_name"), "handler_symbol_id": start,
