@@ -21,6 +21,7 @@ from .project_quality_report import render_project_quality_markdown
 from .business_traceability import build_business_traceability
 from .traceability_template import create_feature_mapping_template
 from .business_traceability_report import render_business_traceability_markdown
+from .runtime_evidence import validate_runtime_evidence_files
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -234,6 +235,10 @@ def main(argv=None):
     tt.add_argument('--semantics',required=True,help='business_semantics.json')
     tt.add_argument('--graph',required=True,help='business_knowledge_graph.json')
     tt.add_argument('--out',required=True,help='New mapping template JSON path; existing files are never overwritten')
+    re=sub.add_parser('validate-runtime-evidence',help='Validate already captured privacy-minimised runtime events; does not connect to or execute the target app')
+    re.add_argument('--events',required=True,help='Existing usit-runtime-evidence-v1 JSON event file')
+    re.add_argument('--graph',required=True,help='Exact business_knowledge_graph.json used by the event capture session')
+    re.add_argument('--out',required=True,help='New validation report path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
         if a.cmd=='selftest': return selftest()
@@ -430,6 +435,18 @@ def main(argv=None):
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
             return 0
+        if a.cmd=='validate-runtime-evidence':
+            output=Path(a.out).expanduser()
+            if output.is_symlink(): raise ValueError("runtime validation output must not be a symbolic link")
+            output=output.resolve()
+            if output.exists(): raise ValueError("runtime validation output already exists; choose a new path to preserve prior evidence")
+            result=validate_runtime_evidence_files(a.events,a.graph)
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            summary={key:result[key] for key in ("schema_version","assessment_status","event_count","correlation_count","business_function_observation_count","evidence_conflict_count")}
+            summary["result_path"]=str(output)
+            print(json.dumps(summary,ensure_ascii=False,indent=2))
+            return 0 if result["evidence_conflict_count"]==0 else 1
         if a.cmd=='verify-evidence':
             import hashlib
             def read_evidence_json(path, limit):
