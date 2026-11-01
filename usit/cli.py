@@ -292,7 +292,7 @@ def main(argv=None):
             if gaps_pair[0] is not None: hashes["gap_backlog_sha256"]=hashlib.sha256(gaps_pair[0]).hexdigest()
             result=assess_project_quality(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],gaps_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             summary={"schema_version":result["schema_version"],"assessment_mode":result["assessment_mode"],
                      "inventory":result["inventory"],"dimensions":result["dimensions"],
                      "evidence_integrity":result["evidence_integrity"],"result_path":str(output)}
