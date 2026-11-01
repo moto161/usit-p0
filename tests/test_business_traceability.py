@@ -158,6 +158,42 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertEqual(mapped_row["stage_status"]["test_execution"], "INVALID")
         self.assertEqual(result["invalid_runtime_status_function_ids"], ["bf-list"])
 
+    def test_incomplete_test_report_is_distinguished_from_verified_execution(self):
+        evidence = {
+            "schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{
+                "business_function_id": "bf-list",
+                "test_execution_status": "UNKNOWN",
+                "code_coverage_status": "NOT_MEASURED",
+                "verification_conclusion": "TEST_EVIDENCE_INCONCLUSIVE",
+                "evidence_conflict": False,
+                "test_execution_detail": {
+                    "execution_status_reason": "MAPPED_TEST_CASES_MISSING_FROM_REPORT",
+                    "expected_mapped_test_case_count": 2,
+                    "reported_mapped_test_case_count": 1,
+                    "mapped_case_completeness": "INCOMPLETE",
+                    "mapped_cases_missing_from_report": [
+                        "tests.PhotoTests::test_upload_permissions"
+                    ],
+                    "mapped_test_cases": [{
+                        "test_case_id": "tests.PhotoTests::test_upload",
+                        "status": "PASSED",
+                    }],
+                },
+            }],
+        }
+        report = build_business_traceability(
+            self.semantics, self.graph, self.mapping,
+            evidence_matrix=evidence, input_hashes=self.hashes,
+        )
+        linked = next(row for row in report["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(linked["stage_status"]["test_execution"], "UNKNOWN")
+        self.assertEqual(linked["stage_status"]["test_evidence_integrity"], "INCOMPLETE")
+        self.assertEqual(linked["traceability_status"], "TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE")
+        markdown = render_business_traceability_markdown(report)
+        self.assertIn("tests.PhotoTests::test_upload", markdown)
+        self.assertIn("tests.PhotoTests::test_upload_permissions", markdown)
+
     def test_testcase_evidence_and_integrity_conflicts_reach_traceability_report(self):
         evidence = {
             "schema_version": "usit-business-evidence-verification-v1",
