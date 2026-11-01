@@ -67,9 +67,9 @@ class TestResultImporterTests(unittest.TestCase):
             ]
             report, mapping, graph = self._inputs(
                 base,
-                `<testsuite>
+                """<testsuite>
                   <testcase classname="tests.PhotoTests" name="test_upload"/>
-                </testsuite>`,
+                </testsuite>""",
                 expected,
             )
             result = ingest_junit_results(report, mapping, graph)
