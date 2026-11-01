@@ -207,6 +207,7 @@ def project_business_graph(graph: Mapping[str, Any],
                 label = f"{method} {endpoint}".strip()
                 details = {"method": method, "endpoint": endpoint,
                            "code_auth": raw.get("code_auth") or "UNKNOWN",
+                           "authorization_status": raw.get("authorization_status") or "UNKNOWN",
                            "handler_reference": raw.get("handler_reference") or ""}
             if not label:
                 unlinked.append({"kind": kind, "reason": "EMPTY_LABEL", "path": path})
@@ -492,6 +493,54 @@ def project_business_graph(graph: Mapping[str, Any],
         related.sort(key=lambda item: (item["path"] or "", item["line"] or 0, item["database_access_id"]))
         association["database_access_evidence"] = related
 
+    # Route middleware evidence is file/line anchored; function-level guard
+    # calls are attached only when their exact caller symbol is reachable.
+    for endpoint_node in nodes:
+        if endpoint_node.get("business_kind") != "endpoint":
+            continue
+        endpoint_evidence = endpoint_node.get("evidence") or {}
+        endpoint_path = endpoint_evidence.get("path")
+        association = endpoint_node.get("handler_association")
+        reachable_symbols = set()
+        if isinstance(association, dict) and association.get("resolution_status") == "RESOLVED":
+            reachable_symbols.add(association.get("target_symbol_id"))
+            for chain in association.get("call_chain_evidence", []):
+                for step in chain.get("steps", []):
+                    if isinstance(step.get("caller_symbol_id"), str):
+                        reachable_symbols.add(step["caller_symbol_id"])
+                    if isinstance(step.get("target_id"), str):
+                        reachable_symbols.add(step["target_id"])
+        route_guards = []
+        function_guards = []
+        for auth_node in authorization_nodes:
+            details = auth_node.get("business_details", {})
+            auth_evidence = auth_node.get("evidence", {})
+            if auth_evidence.get("path") != endpoint_path:
+                continue
+            if details.get("kind") == "route_middleware":
+                route_guards.append({"authorization_check_id": auth_node["id"],
+                                     "path": endpoint_path, "line": auth_evidence.get("line"),
+                                     "guard_names": details.get("guard_names", []),
+                                     "verification_status": "NOT_VERIFIED"})
+            elif details.get("owner_symbol_id") in reachable_symbols and details.get("owner_symbol_id"):
+                function_guards.append({"authorization_check_id": auth_node["id"],
+                                        "owner_symbol_id": details.get("owner_symbol_id"),
+                                        "path": endpoint_path, "line": auth_evidence.get("line"),
+                                        "guard_names": details.get("guard_names", []),
+                                        "role_value": details.get("role_value"),
+                                        "verification_status": "NOT_VERIFIED"})
+        route_guards.sort(key=lambda item: (item["line"] or 0, item["authorization_check_id"]))
+        function_guards.sort(key=lambda item: (item["line"] or 0, item["authorization_check_id"]))
+        endpoint_node["authorization_evidence"] = {
+            "status": "DETECTED" if route_guards or function_guards else "NOT_DETECTED_STATIC_SCAN",
+            "route_middleware": route_guards,
+            "reachable_function_checks": function_guards,
+            "limitations": [
+                "检测到 guard 标识或权限条件仅代表静态代码线索，不证明该检查在所有请求路径上执行或正确拒绝未授权请求。",
+                "未检测到不等于缺少权限控制；动态注册、封装、中间件顺序、框架插件及跨语言边界可能未覆盖。",
+            ],
+        }
+
     result["nodes"] = nodes
     result["edges"] = edges
     result["business_understanding"] = {
@@ -507,6 +556,8 @@ def project_business_graph(graph: Mapping[str, Any],
         "database_access_records": database_access_linked,
         "database_access_unowned": database_access_unowned,
         "database_access_table_links": database_table_links,
+        "authorization_check_records": authorization_linked,
+        "authorization_check_unowned": authorization_unowned,
         "limitations": [
             "业务记录只与精确来源文件关联；命名路由 handler 可通过同文件唯一符号或 TypeScript Compiler API 的导入符号证据建立候选引用。",
             "跨文件 handler 仅在编译器符号解析唯一且目标符号存在于当前图谱时关联；动态、外部、歧义或缺少符号证据时保留原状态，不按名称猜测。",
@@ -514,6 +565,7 @@ def project_business_graph(graph: Mapping[str, Any],
             "candidate/verified=false 表示未验证，不代表运行时可达或功能已实现。",
             "调用链仅沿唯一 RESOLVED 的图谱符号边进行有界静态展开；循环会标记，深度/数量上限会截断，不证明运行时执行。",
             "数据库访问只识别单行直接 SQL 字符串字面量；owner 必须由同路径同调用行的 caller_symbol_id 唯一绑定。动态/拼接/多行 SQL 不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
+            "权限证据仅识别有限的 route middleware 名称、显式权限调用名和简单 role/owner 条件；函数权限调用只有在同文件同调用行的唯一 caller_symbol_id 存在时才归属函数。未检测到权限线索不证明缺少授权，检测到线索也不证明运行时执行或检查正确。",
         ],
     }
     return result
