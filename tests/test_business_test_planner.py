@@ -108,6 +108,46 @@ class BusinessTestPlannerTests(unittest.TestCase):
         self.assertEqual(candidate["category"], "api_contract_review")
         self.assertFalse(any(x.get("evidence_kind") == "resolved_handler" for x in candidate["evidence_refs"]))
 
+    def test_exact_frontend_backend_chain_generates_evidence_linked_flow_candidate(self):
+        semantics = {"features": [], "entities": [], "endpoints": [], "discrepancies": []}
+        graph = {"business_understanding": {
+            "endpoint_execution_paths": [{
+                "endpoint_id": "endpoint-1", "method": "GET", "endpoint": "/api/photos",
+                "source": {"path": "server/routes.ts", "line": 8},
+                "handler": {"path": "server/photos.ts", "line": 12, "symbol_id": "sym-handler"},
+                "call_chain": [{"call_site": {"path": "server/photos.ts", "line": 15}, "target_id": "sym-db"}],
+                "database_accesses": [{"database_access_id": "db-1", "path": "server/db.ts", "line": 4}],
+                "authorization": {"evidence": [{"authorization_check_id": "auth-1", "path": "server/routes.ts", "line": 7}]},
+                "identity_resource_flow": [{"identity_evidence_id": "identity-1", "path": "server/db.ts", "line": 4}],
+                "stage_status": {"handler": "RESOLVED", "calls": "RESOLVED_STATIC_CHAIN", "database": "LINKED"},
+            }],
+            "frontend_business_chains": [{
+                "source_file": "web/PhotoPage.tsx", "event_line": 4, "event_name": "onClick",
+                "handler_symbol_id": "sym-ui", "endpoint_node_id": "endpoint-1",
+                "api_call_node_id": "api-call-1", "method": "GET", "path": "/api/photos",
+                "api_call_file": "web/photos.ts", "api_call_line": 20,
+                "resolution_status": "EXACT_MATCH",
+            }],
+        }}
+        result = plan_business_tests(semantics, graph)
+        candidate = next(x for x in result["candidates"] if x["category"] == "frontend_backend_flow")
+        self.assertEqual(candidate["execution_status"], "NOT_EXECUTED")
+        self.assertEqual(candidate["design_status"], "CANDIDATE_NEEDS_REQUIREMENTS")
+        kinds = {item.get("evidence_kind") for item in candidate["evidence_refs"]}
+        self.assertTrue({"frontend_event", "frontend_api_call", "backend_route", "backend_handler",
+                         "backend_call_chain", "database_access", "authorization",
+                         "identity_resource"}.issubset(kinds))
+        self.assertTrue(any("真实页面" in step for step in candidate["steps"]))
+
+    def test_unverified_or_ambiguous_frontend_chain_does_not_generate_flow_candidate(self):
+        semantics = {"features": [], "entities": [], "endpoints": [], "discrepancies": []}
+        graph = {"business_understanding": {"frontend_business_chains": [
+            {"method": "GET", "path": "/api/photos", "resolution_status": "NO_MATCH"},
+            {"method": "GET", "path": "/api/photos", "resolution_status": "AMBIGUOUS"},
+        ]}}
+        result = plan_business_tests(semantics, graph)
+        self.assertFalse(any(x["category"] == "frontend_backend_flow" for x in result["candidates"]))
+
     def test_non_list_collection_is_rejected(self):
         with self.assertRaises(ValueError):
             plan_business_tests({"features": {}, "entities": [], "endpoints": [], "discrepancies": []})
