@@ -161,6 +161,9 @@ def build_business_traceability(
             runtime.get("evidence_conflict")
             or runtime.get("verification_conclusion") == "EVIDENCE_CONFLICT"
         ))
+        test_execution_detail = runtime.get("test_execution_detail") if isinstance(runtime, dict) else None
+        test_execution_detail = test_execution_detail if isinstance(test_execution_detail, dict) else {}
+        case_completeness = test_execution_detail.get("mapped_case_completeness", "NOT_PROVIDED")
         runtime_status = runtime.get("test_execution_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
         coverage_status = runtime.get("code_coverage_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
         runtime_observation_status = "EVIDENCE_CONFLICT" if runtime_global_conflict else ("RUNTIME_OBSERVED" if fid in runtime_observed_ids else ("NOT_OBSERVED" if runtime_evidence_validation else "NOT_MEASURED"))
@@ -183,15 +186,18 @@ def build_business_traceability(
             "test_execution": runtime_status,
             "test_evidence_integrity": (
                 "EVIDENCE_CONFLICT" if test_evidence_conflict else
-                "NO_CONFLICT_REPORTED" if runtime else "NOT_MEASURED"
+                case_completeness if case_completeness in {
+                    "COMPLETE", "INCOMPLETE", "NO_EXPECTED_MAPPED_CASES"
+                } else "NOT_MEASURED"
             ),
             "code_coverage": coverage_status,
             "runtime_observation": runtime_observation_status,
         }
         row_status = "EVIDENCE_CONFLICT" if view and (runtime_global_conflict or test_evidence_conflict) else (
             "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} else (
+            "TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE" if view and runtime and stages["test_execution"] == "UNKNOWN" else (
             "TRACEABLE_WITH_RUNTIME_OBSERVATION" if view and runtime_observation_status == "RUNTIME_OBSERVED" else (
-            "TRACEABLE_TO_STATIC_FUNCTION_VIEW" if view else linkage)))
+            "TRACEABLE_TO_STATIC_FUNCTION_VIEW" if view else linkage))))
         status_counts[row_status] += 1
         refs = []
         if isinstance(feature.get("source"), str):
