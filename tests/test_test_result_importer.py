@@ -99,5 +99,27 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(upload["mapped_cases_missing_from_report"], ["tests.PhotoTests::test_upload"])
 
 
+    def test_cli_writes_result_file_without_running_tests(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from usit.cli import main
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(base, """<testsuite>
+              <testcase classname="tests.PhotoTests" name="test_upload"/>
+            </testsuite>""")
+            output = base / "out" / "results.json"
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                code = main(["ingest-test-results", "--junit", str(report),
+                             "--mapping", str(mapping), "--graph", str(graph),
+                             "--out", str(output)])
+            self.assertEqual(code, 0)
+            self.assertTrue(output.is_file())
+            summary = json.loads(stdout.getvalue())
+            self.assertEqual(summary["test_case_count"], 1)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["business_function_status_counts"],
+                             {"NOT_EXECUTED": 2, "PASSED": 1})
+
 if __name__ == "__main__":
     unittest.main()
