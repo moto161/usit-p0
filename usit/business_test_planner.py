@@ -336,6 +336,94 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
             ],
         ))
 
+    # S2.13-C: synthesize a reviewable test candidate only for a resolved UI → API → endpoint chain.
+    frontend_chains = understanding.get("frontend_business_chains", []) if isinstance(understanding, Mapping) else []
+    if not isinstance(frontend_chains, list):
+        warnings.append("business_graph.frontend_business_chains is malformed; frontend flow candidates omitted")
+        frontend_chains = []
+    for chain in frontend_chains:
+        if not isinstance(chain, Mapping) or chain.get("resolution_status") != "EXACT_MATCH":
+            continue
+        method = _text(chain.get("method")).upper()
+        endpoint_path = _text(chain.get("path"))
+        endpoint_id = _text(chain.get("endpoint_node_id"))
+        if not method or not endpoint_path or not endpoint_id:
+            warnings.append("frontend business chain missing exact endpoint identity; candidate omitted")
+            continue
+        matching_paths = [
+            item for item in execution_paths
+            if isinstance(item, Mapping) and _text(item.get("endpoint_id")) == endpoint_id
+            and _text(item.get("method")).upper() == method
+            and _text(item.get("endpoint")) == endpoint_path
+        ]
+        if len(matching_paths) != 1:
+            warnings.append(f"frontend chain {method} {endpoint_path} has no unique endpoint execution path")
+            continue
+        flow = matching_paths[0]
+        refs: list[dict[str, Any]] = []
+        for source, line, kind in (
+            (chain.get("source_file"), chain.get("event_line"), "frontend_event"),
+            (chain.get("api_call_file"), chain.get("api_call_line"), "frontend_api_call"),
+        ):
+            ref = _source_ref(source, line, evidence_kind=kind)
+            if ref:
+                refs.append(ref)
+        source = flow.get("source")
+        if isinstance(source, Mapping):
+            ref = _source_ref(source.get("path"), source.get("line"), evidence_kind="backend_route")
+            if ref:
+                refs.append(ref)
+        handler = flow.get("handler")
+        if isinstance(handler, Mapping):
+            ref = _source_ref(handler.get("path"), handler.get("line"),
+                              evidence_kind="backend_handler", symbol_id=handler.get("symbol_id"))
+            if ref:
+                refs.append(ref)
+        for key, kind in (("call_chain", "backend_call_chain"),
+                          ("database_accesses", "database_access"),
+                          ("authorization", "authorization"),
+                          ("identity_resource_flow", "identity_resource")):
+            values = flow.get(key)
+            if key == "authorization" and isinstance(values, Mapping):
+                values = values.get("evidence", [])
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, Mapping):
+                    continue
+                location = item.get("call_site") if key == "call_chain" else item
+                location = location if isinstance(location, Mapping) else {}
+                ref = _source_ref(
+                    location.get("path"), location.get("line"), evidence_kind=kind,
+                    evidence_id=(item.get("database_access_id") or item.get("authorization_check_id")
+                                 or item.get("identity_evidence_id") or item.get("target_id")),
+                )
+                if ref:
+                    refs.append(ref)
+        unique_refs = {
+            json.dumps(item, sort_keys=True, ensure_ascii=False): item for item in refs
+        }
+        refs = [unique_refs[key] for key in sorted(unique_refs)]
+        stage_status = flow.get("stage_status") if isinstance(flow.get("stage_status"), Mapping) else {}
+        candidates.append(_candidate(
+            "frontend_backend_flow", f"{chain.get('event_name') or 'UI event'} → {method} {endpoint_path}",
+            f"验证前端交互是否按已确认需求正确触发并完成后端接口流程：{method} {endpoint_path}",
+            refs,
+            [
+                "在授权的隔离环境中由真实页面触发对应 UI 事件，记录页面、账号、输入和事件结果",
+                "核对前端实际发出的 HTTP method/path 与静态候选链一致，并记录请求/响应及关联日志",
+                "核对后端路由、Handler 和调用链的实际执行情况，记录分支、异常与服务端证据",
+                "若存在数据库访问、授权或身份/资源线索，分别核验数据副作用、角色边界及资源归属；不得仅凭静态线索判定正确",
+                "将 UI 展示状态、接口响应和持久化结果与经批准的业务验收标准逐项比较",
+            ],
+            [
+                "UI → API → endpoint 关系来自有限静态符号调用与精确 method/path 匹配，不证明页面运行时可达、事件实际触发或网络请求成功。",
+                f"后端阶段状态：{json.dumps(dict(stage_status), ensure_ascii=False, sort_keys=True)}；各阶段均需运行时验证。",
+                "静态数据库/授权/身份线索仅用于确定测试检查点，不证明实际读写、权限正确性或资源隔离。",
+                "缺少需求、角色矩阵、请求/响应契约或测试数据时，预期结果必须由负责人确认。",
+            ],
+        ))
+
     if len(candidates) > _PLAN_LIMIT:
         raise ValueError(f"candidate limit exceeded: {len(candidates)} > {_PLAN_LIMIT}")
 
