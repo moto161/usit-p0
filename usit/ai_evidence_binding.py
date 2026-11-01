@@ -297,7 +297,8 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
         attestation_states = [x["attestation_status"] for x in provenance]
         if not attestation_states:
             provenance_status = "NOT_APPLICABLE"
-        elif all(x == "ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY" for x in attestation_states):
+        elif (all(x == "ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY" for x in attestation_states)
+              and all(x == "MATCHED_SCAN_MANIFEST_ENTRY" for x in source_snapshot_states)):
             provenance_status = "ALL_SOURCE_ATTESTATIONS_TRUSTED"
         elif all(x == "ATTESTATION_NOT_PROVIDED" for x in attestation_states):
             provenance_status = "NOT_PROVIDED"
