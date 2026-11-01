@@ -343,3 +343,14 @@ python -m usit trace-business --semantics .\\business_semantics.json --graph .\\
 ```
 
 The test plan and runtime evidence are optional. Missing evidence remains `NOT_MEASURED`; a static relationship remains `STATIC_INFERENCE / NOT_VERIFIED`. This command reads artifacts only and does not run target-project code, tests, builds, database operations or network requests.
+
+
+### S2.20-B — 生成待审阅映射模板
+
+为避免用户手工计算图谱 SHA-256 并逐项复制需求标识，先生成空白审阅模板：
+
+```powershell
+python -m usit init-traceability-template --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --out .\\feature-function-mapping.json
+```
+
+命令为每项需求生成精确的 `feature_name + source_path + source_line` 标识，自动绑定当前图谱的 SHA-256。所有条目初始为 `NEEDS_REVIEW`，`business_function_id` 为空，审阅者/时间/理由也留空；这份模板**不能直接用于建立链接**。必须由实际审阅者逐项填写并保存后，再运行 `trace-business`。模板输出路径不得已存在。
