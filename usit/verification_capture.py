@@ -38,6 +38,7 @@ _RUN_ID_RE = re.compile(r"^run_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{32}$")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 MAX_COMMAND_TIMEOUT_SECONDS = 600
+MAX_POLL_INTERVAL_SECONDS = 1.0
 MAX_CAPTURE_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_FILES = 5000
 MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024
@@ -428,8 +429,9 @@ def capture_run(
             or not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_COMMAND_TIMEOUT_SECONDS):
         raise ValueError(f"timeout must be finite and between zero and {MAX_COMMAND_TIMEOUT_SECONDS} seconds")
     if (isinstance(poll_interval, bool) or not isinstance(poll_interval, (int, float))
-            or not math.isfinite(poll_interval) or poll_interval <= 0):
-        raise ValueError("poll_interval must be finite and greater than zero")
+            or not math.isfinite(poll_interval) or poll_interval <= 0
+            or poll_interval > MAX_POLL_INTERVAL_SECONDS):
+        raise ValueError(f"poll_interval must be finite and between zero and {MAX_POLL_INTERVAL_SECONDS} seconds")
 
     project = _canonical_directory(project_root, "project root")
     parent = _canonical_directory(evidence_parent, "evidence parent")
