@@ -11,6 +11,7 @@ from .command_planner import CommandPlanner
 from .business_semantics import analyze_business
 from .business_test_planner import plan_business_tests
 from .business_graph import project_business_graph
+from .security_test_planner import plan_security_tests
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -87,6 +88,7 @@ def _plan_business_tests(a) -> int:
     semantics = analyze_business(project)
     plan = plan_business_tests(semantics)
     business_graph = None
+    security_plan = None
     graph_path = None
     if a.graph:
         supplied_graph = Path(a.graph).expanduser()
@@ -101,6 +103,7 @@ def _plan_business_tests(a) -> int:
             raise ValueError("graph input must be outside the output directory")
         source_graph = json.loads(graph_path.read_text(encoding="utf-8"))
         business_graph = project_business_graph(source_graph, semantics)
+        security_plan = plan_security_tests(business_graph)
     out.mkdir(parents=True, exist_ok=False)
     (out / "business_semantics.json").write_text(
         json.dumps(semantics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -113,6 +116,11 @@ def _plan_business_tests(a) -> int:
             json.dumps(business_graph, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+    if security_plan is not None:
+        (out / "security_test_candidates.json").write_text(
+            json.dumps(security_plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     summary = {
         "project_root": str(project),
         "entity_count": semantics["entity_count"],
@@ -120,6 +128,9 @@ def _plan_business_tests(a) -> int:
         "endpoint_count": semantics["endpoint_count"],
         "discrepancy_count": semantics["discrepancy_count"],
         "test_candidate_count": plan["candidate_count"],
+        "security_test_candidate_count": (
+            security_plan["candidate_count"] if security_plan is not None else None
+        ),
         "business_graph_linked_records": (
             business_graph.get("business_understanding", {}).get("linked_records", 0)
             if business_graph is not None else None
@@ -134,8 +145,9 @@ def _plan_business_tests(a) -> int:
             str(out / "business_semantics.json"),
             str(out / "business_test_plan.json"),
             *([str(out / "business_knowledge_graph.json")] if business_graph is not None else []),
+            *([str(out / "security_test_candidates.json")] if security_plan is not None else []),
         ],
-        "note": "Static business understanding and candidate design only; graph links require exact source-file matches. No build, test, database or network operation was executed.",
+        "note": "Static business understanding and security test-candidate design only; candidates require requirements review and separate authorization. No build, test, database or network operation was executed.",
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
