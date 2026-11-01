@@ -65,7 +65,7 @@ class ProjectQualityAssessmentTests(unittest.TestCase):
             "business_function_evidence":[
                 {"business_function_id":"bf-upload","test_execution_status":"MAGIC","code_coverage_status":"COVERED"},
                 {"business_function_id":"bf-share","test_execution_status":"PASSED","code_coverage_status":"INVALID"}]}
-        result=assess_project_quality(self.semantics,self.graph,None,matrix)
+        result=assess_project_quality(self.semantics,self.graph,None,matrix,input_hashes={"business_graph_sha256":"f"*64})
         integrity=result["evidence_integrity"]
         self.assertEqual(integrity["invalid_runtime_status_business_function_ids"],["bf-share","bf-upload"])
         self.assertEqual(integrity["source_hash_conflicts"][0]["artifact"],"evidence_matrix")
