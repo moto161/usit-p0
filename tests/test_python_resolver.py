@@ -153,6 +153,49 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(endpoint["handler_association"]["target_symbol_id"],
                          "symbol:controllers/photos.js#uploadPhoto:1")
 
+    def test_typescript_namespace_handler_resolves_through_reexport_with_full_evidence(self):
+        (self.root / "routes.js").write_text(
+            "const router = require('express').Router();\n"
+            "import * as photos from './controllers/index.js';\n"
+            "router.post('/photos', photos.uploadPhoto);\n",
+            encoding="utf-8",
+        )
+        controllers = self.root / "controllers"
+        controllers.mkdir(exist_ok=True)
+        (controllers / "index.js").write_text(
+            "export { uploadPhoto } from './photos.js';\n",
+            encoding="utf-8",
+        )
+        (controllers / "photos.js").write_text(
+            "export function uploadPhoto(req, res) { return savePhoto(); }\n"
+            "function savePhoto() {}\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "namespace-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "typescript-route-handler-binding"
+                       and edge.get("route_path") == "/photos")
+        self.assertEqual(binding["resolution_status"], "RESOLVED")
+        self.assertEqual(binding["target"], "symbol:controllers/photos.js#uploadPhoto:1")
+        chain = binding["evidence_chain"]
+        self.assertTrue(any(item.get("kind") == "handler_import"
+                            and item.get("file") == "routes.js" for item in chain))
+        self.assertTrue(any(item.get("kind") == "reexport"
+                            and item.get("file") == "controllers/index.js" for item in chain))
+        self.assertTrue(any(item.get("kind") == "handler_definition"
+                            and item.get("file") == "controllers/photos.js" for item in chain))
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "routes.js:3",
+            "line": 3, "handler_reference": "photos.uploadPhoto",
+        }]})
+        endpoint = next(node for node in projected["nodes"] if node.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "RESOLVED")
+        self.assertEqual(endpoint["handler_association"]["target_symbol_id"],
+                         "symbol:controllers/photos.js#uploadPhoto:1")
+
     def test_typescript_dynamic_or_unresolved_route_handler_is_not_guessed(self):
         (self.root / "routes.js").write_text(
             "const router = require('express').Router();\\n"

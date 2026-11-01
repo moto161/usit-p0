@@ -800,6 +800,11 @@ function main(input) {
         const resolved = symbolAfterAliases(handlerSymbol);
         const targets = declarationTargets(resolved);
         const unique = new Map(targets.map((target) => [target.id, target]));
+        const importRoot = ts.isIdentifier(handlerNode) ? handlerNode
+          : (ts.isPropertyAccessExpression(handlerNode) && ts.isIdentifier(handlerNode.expression)
+            ? handlerNode.expression : null);
+        const importEvidence = importRoot
+          ? findImportEvidence(sourceFile, importRoot.text, importRoot) : null;
         const recordRow = {
           method: methodName, path: node.arguments[0].text,
           line: position.line, column: position.column,
@@ -815,6 +820,13 @@ function main(input) {
               id: "symbol:" + target.entry + "#" + target.name + ":" + target.line,
               path: target.entry, name: target.name, line: target.line
             };
+            if (importEvidence) {
+              recordRow.evidence_chain.push({
+                kind: "handler_import", file: entry.rel, line: importEvidence.line,
+                module: importEvidence.module, imported_as: importRoot.text,
+              });
+            }
+            recordRow.evidence_chain.push(...reexportEvidence([target]));
             recordRow.evidence_chain.push({
               kind: "handler_definition", file: target.entry, line: target.line, name: target.name
             });
