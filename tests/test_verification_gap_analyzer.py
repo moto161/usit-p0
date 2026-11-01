@@ -114,6 +114,22 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
                 traceability_matrix=traceability,
             )
 
+    def test_approved_traceability_to_unknown_function_is_rejected(self):
+        traceability = {
+            "schema_version": "usit-business-traceability-matrix-v1",
+            "source_graph_sha256": "a" * 64,
+            "rows": [{
+                "feature_name": "照片上传", "feature_source": "docs/PRD.md",
+                "feature_line": 8, "mapping_decision": "APPROVED_LINK",
+                "business_function_id": "bf-does-not-exist",
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "unknown business_function_id"):
+            build_verification_gap_backlog(
+                self.semantics, self.graph, input_hashes={"business_graph_sha256": "a" * 64},
+                traceability_matrix=traceability,
+            )
+
     def test_unapproved_or_targetless_traceability_does_not_close_requirement_gap(self):
         graph_hash = "a" * 64
         for decision, function_id in (("NEEDS_REVIEW", None), ("APPROVED_LINK", None)):
