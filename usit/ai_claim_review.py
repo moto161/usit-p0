@@ -166,11 +166,14 @@ def review_claim_ledger(ledger: dict[str, Any], ledger_sha256: str | None = None
             review_status = "REVIEWED_SUPPORT_CANDIDATE"
         elif decision == "SUPPORTS_CLAIM":
             review_status = "NEEDS_MORE_EVIDENCE"
-        elif decision == "CONTRADICTS_CLAIM":
+        elif decision == "CONTRADICTS_CLAIM" and review_refs:
             review_status = "REVIEWED_CONTRADICTION_CANDIDATE"
-        elif decision == "CONFLICTING_EVIDENCE":
+        elif decision == "CONFLICTING_EVIDENCE" and review_refs:
             review_status = "REVIEWED_CONFLICT"
         else:
+            # A reviewer decision without any evidence reference is an
+            # assertion only; it must not become a contradiction/conflict
+            # candidate in the evidence-fusion report.
             review_status = "NEEDS_MORE_EVIDENCE"
 
         item = {
