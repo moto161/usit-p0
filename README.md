@@ -77,6 +77,6 @@ The business graph records a named route callback when it is a simple identifier
 Duplicate same-file symbol names are marked `AMBIGUOUS`. Missing declarations, imported/member handlers, inline callbacks, multiline registrations and dynamic expressions remain `UNKNOWN` or `NOT_ANALYZED`; USIT does not guess across files or match globally by name. This slice does not yet prove authorization-to-handler flow, handler-to-database flow, or runtime reachability.
 
 
-## S2.2 — Function-level call edges (partial)
+## S2.2 — Function-owned call evidence (partial)
 
-For Python AST calls and TypeScript Compiler API calls, USIT records the enclosing named function/method identity. When the caller symbol is present in the same scan graph, the calls edge originates from that symbol node instead of the file node. Calls outside a named function, anonymous callbacks without a symbol, and other languages without equivalent scope evidence retain file-level edges. This improves static call-chain traceability; it does not prove runtime execution order or data flow.
+For Python AST calls and TypeScript Compiler API calls, USIT records the enclosing named function/method identity as caller metadata on each call edge (caller_symbol_id and caller_location). The edge source remains the containing file node because the current usit-graph-v1 validator requires all relationship sources to be file nodes. Calls outside a named function, anonymous callbacks without a symbol, and other languages without equivalent scope evidence retain file-only attribution. This enables precise call-site grouping without changing graph-v1 semantics; it does not prove runtime execution order or data flow.
