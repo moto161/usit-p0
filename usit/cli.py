@@ -270,7 +270,7 @@ def main(argv=None):
             if output.exists(): raise ValueError("evidence output already exists; choose a new path to preserve prior evidence")
             result=verify_business_function_evidence(graph_doc,test_doc,coverage_doc,hashlib.sha256(graph_bytes).hexdigest())
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","business_function_count","verification_conclusion_counts","evidence_conflict_count")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
