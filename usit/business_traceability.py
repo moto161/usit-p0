@@ -18,6 +18,7 @@ def build_business_traceability(
     evidence_matrix: dict[str, Any] | None = None,
     input_hashes: dict[str, str] | None = None,
     runtime_evidence_validation: dict[str, Any] | None = None,
+    security_test_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(semantics, dict) or not isinstance(semantics.get("features", []), list):
         raise ValueError("semantics.features must be a list")
@@ -36,6 +37,13 @@ def build_business_traceability(
         raise ValueError("mapping manifest source_graph_sha256 does not match the supplied graph bytes")
     if test_plan is not None and (not isinstance(test_plan, dict) or test_plan.get("schema_version") != "usit-business-test-plan-v1"):
         raise ValueError("test plan must use usit-business-test-plan-v1")
+    if security_test_plan is not None and (
+        not isinstance(security_test_plan, dict)
+        or security_test_plan.get("schema_version") != "usit-security-test-candidates-v1"
+    ):
+        raise ValueError("security test plan must use usit-security-test-candidates-v1")
+    if security_test_plan is not None and not isinstance(security_test_plan.get("candidates", []), list):
+        raise ValueError("security test plan candidates must be a list")
     if evidence_matrix is not None and (not isinstance(evidence_matrix, dict) or evidence_matrix.get("schema_version") != "usit-business-evidence-verification-v1"):
         raise ValueError("evidence matrix must use usit-business-evidence-verification-v1")
     if evidence_matrix is not None and evidence_matrix.get("business_graph_sha256") not in {None, graph_hash}:
@@ -113,6 +121,16 @@ def build_business_traceability(
     for candidate in candidates:
         if isinstance(candidate, dict) and isinstance(candidate.get("business_function_id"), str):
             candidates_by_function.setdefault(candidate["business_function_id"], []).append(candidate)
+    security_candidates = security_test_plan.get("candidates", []) if security_test_plan else []
+    unlinked_security_candidate_ids: list[str] = []
+    for candidate in security_candidates:
+        if not isinstance(candidate, dict):
+            raise ValueError("security test plan contains a malformed candidate")
+        function_id = candidate.get("business_function_id")
+        if isinstance(function_id, str) and function_id:
+            candidates_by_function.setdefault(function_id, []).append(candidate)
+        elif candidate.get("test_id") is not None:
+            unlinked_security_candidate_ids.append(str(candidate.get("test_id")))
 
     rows = evidence_matrix.get("business_function_evidence", []) if evidence_matrix else []
     if not isinstance(rows, list):
@@ -248,6 +266,11 @@ def build_business_traceability(
                     "evidence_requirements": item.get("evidence_requirements", []),
                     "evidence_refs": item.get("evidence_refs", []),
                     "limitations": item.get("limitations", []),
+                    "basis": item.get("basis", "STATIC_INFERENCE"),
+                    "call_chain_evidence": item.get("call_chain_evidence", []),
+                    "authorization_evidence": item.get("authorization_evidence", {}),
+                    "database_access_evidence": item.get("database_access_evidence", []),
+                    "identity_dataflow_evidence": item.get("identity_dataflow_evidence", []),
                 }
                 for item in sorted(candidate_items, key=lambda value: str(value.get("test_id", "")))
             ],
@@ -275,6 +298,7 @@ def build_business_traceability(
         "unmapped_feature_count": sum(1 for row in result_rows if row["mapping_decision"] == "NOT_MAPPED"),
         "unlinked_runtime_function_ids": sorted(set(runtime_by_function) - set(functions)),
         "unlinked_test_design_function_ids": sorted(set(candidates_by_function) - set(functions)),
+        "unlinked_security_test_candidate_ids": sorted(unlinked_security_candidate_ids),
         "invalid_runtime_status_function_ids": sorted(fid for fid, row in runtime_by_function.items()
             if row.get("test_execution_status", "NOT_MEASURED") not in {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"}
             or row.get("code_coverage_status", "NOT_MEASURED") not in {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}),
