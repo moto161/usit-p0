@@ -42,6 +42,10 @@ def _candidate(kind: str, target: str, purpose: str, evidence: list[dict[str, An
         "kind": kind, "target": target, "purpose": purpose,
         "evidence": evidence, "steps": steps,
     }
+    expected_placeholder = (
+        "由需求负责人依据已批准的验收标准填写；当前静态证据不足以确定，"
+        "不得将此占位内容作为 PASS 判据。"
+    )
     return {
         "test_id": _stable_id(kind, identity),
         "category": kind,
@@ -55,10 +59,21 @@ def _candidate(kind: str, target: str, purpose: str, evidence: list[dict[str, An
             "明确的需求/验收标准及测试账号、测试数据",
         ],
         "steps": steps,
-        "expected_result": (
-            "必须与经确认的需求/验收标准一致；当前静态证据不足以确定具体结果，"
-            "不得据此判定 PASS。"
-        ),
+        "actions": [
+            {"step": index, "action": action, "expected_result": expected_placeholder,
+             "evidence_to_collect": ["执行日志", "实际输入/输出", "相关运行时证据"]}
+            for index, action in enumerate(steps, start=1)
+        ],
+        "expected_result": expected_placeholder,
+        "expected_results_status": "OWNER_CONFIRMATION_REQUIRED",
+        "evidence_requirements": [
+            {"evidence_type": item.get("evidence_kind", "SOURCE_REFERENCE"),
+             "source_path": item.get("path"), "line": item.get("line")}
+            for item in evidence
+        ] + [
+            {"evidence_type": "RUNTIME_TEST_RESULT", "requirement": "保存原始测试报告及 testcase ID"},
+            {"evidence_type": "BUSINESS_ORACLE", "requirement": "保存与已批准验收标准逐项比较的结果"},
+        ],
         "design_status": "CANDIDATE_NEEDS_REQUIREMENTS",
         "execution_status": "NOT_EXECUTED",
         "limitations": limitations,
@@ -261,9 +276,31 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
                     "MULTIPLE_CODE_MATCHES 只表示静态匹配到多个路由，不代表运行时冲突或缺陷。",
                     "静态执行路径仅在唯一精确 endpoint 关联时附加；未唯一关联时不拼接图谱证据。",
                 ]
-            candidates.append(_candidate(
+            candidate = _candidate(
                 category, f"{method} {endpoint_path}", purpose, refs, steps, limitations,
-            ))
+            )
+            if status == "EXACT_MATCH":
+                matching_views = [
+                    item for item in function_views
+                    if _text(item.get("method")).upper() == method
+                    and _text(item.get("endpoint")) == endpoint_path
+                    and _text(item.get("business_function_id"))
+                ]
+                if len(matching_views) == 1:
+                    candidate["business_function_id"] = matching_views[0]["business_function_id"]
+                    candidate["function_coverage_linkage"] = "TEST_DESIGN_CANDIDATE_LINKED"
+                    candidate["test_execution_coverage"] = "NOT_MEASURED"
+                elif len(matching_views) > 1:
+                    warnings.append(
+                        f"API contract {method} {endpoint_path} matches multiple business function views; "
+                        "test candidate remains unlinked"
+                    )
+                else:
+                    warnings.append(
+                        f"API contract {method} {endpoint_path} has no unique business function view; "
+                        "test candidate remains unlinked"
+                    )
+            candidates.append(candidate)
 
     for entity in semantics.get("entities", []):
         if not isinstance(entity, Mapping):
