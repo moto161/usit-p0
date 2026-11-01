@@ -1,0 +1,73 @@
+from __future__ import annotations
+import hashlib
+import json
+import unittest
+from usit.business_evidence_verifier import verify_business_function_evidence
+
+
+class BusinessEvidenceVerifierTests(unittest.TestCase):
+    def setUp(self):
+        self.graph={"schema_version":"usit-graph-v1","business_understanding":{
+            "business_function_views":[
+                {"business_function_id":"bf-upload","endpoint_id":"ep-upload","basis":"ENDPOINT_CENTRED_STATIC_SLICE","verification_status":"NOT_VERIFIED"},
+                {"business_function_id":"bf-delete","endpoint_id":"ep-delete","basis":"ENDPOINT_CENTRED_STATIC_SLICE","verification_status":"NOT_VERIFIED"},
+                {"business_function_id":"bf-share","endpoint_id":"ep-share","basis":"ENDPOINT_CENTRED_STATIC_SLICE","verification_status":"NOT_VERIFIED"}]}}
+        self.graph_bytes=json.dumps(self.graph,ensure_ascii=False,indent=2).encode()
+        self.graph_hash=hashlib.sha256(self.graph_bytes).hexdigest()
+
+    def test_cross_checks_test_and_coverage_without_claiming_business_correctness(self):
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "business_function_results":[
+                {"business_function_id":"bf-upload","execution_status":"PASSED","mapped_test_case_count":3,"failed":0,"skipped":0},
+                {"business_function_id":"bf-delete","execution_status":"FAILED","mapped_test_case_count":2,"failed":1,"skipped":0}]}
+        coverage={"schema_version":"usit-code-coverage-results-v1",
+            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "business_function_coverage":[
+                {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0},
+                {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0}]}
+        result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
+        by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED")
+        self.assertEqual(by_id["bf-delete"]["verification_conclusion"],"TEST_FAILURE_OBSERVED")
+        self.assertEqual(by_id["bf-share"]["verification_conclusion"],"NO_RUNTIME_TEST_EVIDENCE")
+        self.assertTrue(all(x["business_correctness"]=="NOT_PROVEN" for x in by_id.values()))
+        self.assertEqual(result["evidence_conflict_count"],0)
+
+    def test_graph_hash_mismatch_is_global_conflict(self):
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"business_graph_sha256":"0"*64},"business_function_results":[]}
+        result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
+        self.assertEqual(result["evidence_conflict_count"],1)
+        self.assertTrue(all(x["evidence_conflict"] for x in result["business_function_evidence"]))
+        self.assertTrue(all(x["verification_conclusion"]=="EVIDENCE_CONFLICT" for x in result["business_function_evidence"]))
+
+    def test_unknown_function_and_duplicate_records_are_rejected_or_reported(self):
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "business_function_results":[{"business_function_id":"not-in-graph","execution_status":"PASSED"}]}
+        result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
+        self.assertEqual(result["evidence_conflicts"][0]["kind"],"UNKNOWN_BUSINESS_FUNCTION")
+        duplicate={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "business_function_results":[{"business_function_id":"bf-upload"},{"business_function_id":"bf-upload"}]}
+        with self.assertRaisesRegex(ValueError,"duplicate business_function_id"):
+            verify_business_function_evidence(self.graph,duplicate,None,self.graph_hash)
+
+    def test_invalid_schema_and_status_are_not_silently_accepted(self):
+        with self.assertRaisesRegex(ValueError,"usit-graph-v1"):
+            verify_business_function_evidence({"schema_version":"wrong"})
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "business_function_results":[{"business_function_id":"bf-upload","execution_status":"MAGIC_PASS"}]}
+        result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
+        self.assertEqual(result["evidence_conflicts"][0]["kind"],"INVALID_TEST_STATUS")
+
+    def test_missing_inputs_remain_not_measured(self):
+        result=verify_business_function_evidence(self.graph)
+        self.assertTrue(all(x["test_execution_status"]=="NOT_MEASURED" for x in result["business_function_evidence"]))
+        self.assertTrue(all(x["code_coverage_status"]=="NOT_MEASURED" for x in result["business_function_evidence"]))
+
+
+if __name__=="__main__":
+    unittest.main()
