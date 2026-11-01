@@ -645,3 +645,8 @@ The optional provenance layer is implemented in `usit.scan_attestation` using th
 - Private keys must be kept outside the project and evidence artifacts. Tests use ephemeral keys only.
 
 Install the project dependencies with `python -m pip install .`. Synthetic tests: `python -m unittest tests.test_scan_attestation -v`.
+
+
+### Verify a detached scan attestation
+
+Use `usit verify-scan-attestation --manifest scan_manifest.json --attestation scan_attestation.json --trusted-public-key <external-public-key.pem> --out attestation-report.json`. Repeat `--trusted-public-key` for additional trusted keys. Public keys may be raw 32-byte Ed25519 data or PEM Ed25519 public keys. An optional `--expected-snapshot-id` applies an explicit snapshot-identity policy. Exit code 0 means the signature is valid under a supplied trusted key; exit code 2 means verification or trust policy did not pass. Keep trust keys outside the evidence bundle and provision them independently; this CLI does not manage enrollment or revocation.
