@@ -75,3 +75,8 @@ Optional `--graph` accepts an existing `knowledge_graph.json` produced by a comp
 The business graph records a named route callback when it is a simple identifier or member expression on the same source line. With an existing `knowledge_graph.json`, USIT links the endpoint candidate to a unique function/method symbol only when that symbol is defined in the exact same route file. The relation is a candidate reference (`verified=false`, `verification_status=NOT_VERIFIED`, `confidence=STATIC_INFERENCE`), not runtime proof.
 
 Duplicate same-file symbol names are marked `AMBIGUOUS`. Missing declarations, imported/member handlers, inline callbacks, multiline registrations and dynamic expressions remain `UNKNOWN` or `NOT_ANALYZED`; USIT does not guess across files or match globally by name. This slice does not yet prove authorization-to-handler flow, handler-to-database flow, or runtime reachability.
+
+
+## S2.2 — Function-level call edges (partial)
+
+For Python AST calls and TypeScript Compiler API calls, USIT records the enclosing named function/method identity. When the caller symbol is present in the same scan graph, the calls edge originates from that symbol node instead of the file node. Calls outside a named function, anonymous callbacks without a symbol, and other languages without equivalent scope evidence retain file-level edges. This improves static call-chain traceability; it does not prove runtime execution order or data flow.
