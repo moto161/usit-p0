@@ -134,6 +134,7 @@ def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
     attestation = verify_scan_attestation(
         manifest_file.read_bytes(), sidecar_file.read_bytes(),
         trusted_public_keys or {},
+        expected_snapshot_id=entry.get("expected_snapshot_id"),
     )
     if (attestation.get("manifest_path") is not None and
             attestation["manifest_path"] != entry.get("snapshot_manifest_path")):
