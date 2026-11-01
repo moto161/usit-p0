@@ -252,6 +252,10 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         chain = summary["frontend_business_chains"][0]
         self.assertEqual((chain["method"], chain["path"]), ("GET", "/api/photos"))
         self.assertEqual(chain["verification_status"], "NOT_VERIFIED")
+        # Backend router.get registration must not be misclassified as a frontend API client call.
+        api_call_edges = [edge for edge in graph["edges"] if edge.get("method") == "typescript-api-client-call"]
+        self.assertEqual(len(api_call_edges), 1)
+        self.assertEqual(api_call_edges[0].get("route_path"), "/api/photos")
 
     def test_jsx_inline_callback_is_not_misreported_as_resolved_symbol(self):
         (self.root / "Inline.tsx").write_text(
