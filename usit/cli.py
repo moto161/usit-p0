@@ -288,6 +288,7 @@ def main(argv=None):
     aev=sub.add_parser('verify-evidence-bindings',help='Verify AI evidence catalog references against exact local artifact bytes; never promotes claims to facts')
     aev.add_argument('--input',required=True,help='Structured usit-ai-claim-ledger-v1 JSON')
     aev.add_argument('--evidence-root',required=True,help='Directory containing the referenced local evidence artifacts')
+    aev.add_argument('--trusted-public-key',action='append',default=[],help='External raw or PEM Ed25519 public key for snapshot attestations; repeat for multiple trusted keys')
     aev.add_argument('--out',required=True,help='New JSON binding report path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
@@ -319,7 +320,11 @@ def main(argv=None):
                 'freshness':result['freshness']},ensure_ascii=False,indent=2))
             return 0 if result['status']=='ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY' else 2
         if a.cmd=='verify-evidence-bindings':
-            result=verify_evidence_bindings_file(a.input,a.evidence_root)
+            trust={}
+            for key_path in a.trusted_public_key:
+                raw_key=load_trusted_public_key(key_path)
+                trust[public_key_id(raw_key)]=raw_key
+            result=verify_evidence_bindings_file(a.input,a.evidence_root,trust)
             output=Path(a.out).expanduser()
             if output.is_symlink() or output.exists():
                 raise ValueError('evidence binding output already exists or is a symbolic link; refusing to overwrite')
@@ -329,6 +334,7 @@ def main(argv=None):
                 'evidence_count':result['evidence_count'],'binding_status_counts':result['binding_status_counts'],
                 'claim_count':result['claim_count'],'claim_binding_status_counts':result['claim_binding_status_counts'],
                 'snapshot_binding_status_counts':result['snapshot_binding_status_counts'],
+                'attestation_status_counts':result['attestation_status_counts'],
                 'overall_truth_status':result['overall_truth_status']},ensure_ascii=False,indent=2))
             return 0 if all(x['binding_status']=='ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED' for x in result['claims']) else 2
         if a.cmd=='review-ai-claims':
