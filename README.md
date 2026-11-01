@@ -197,3 +197,36 @@ python -m usit ingest-test-results --junit junit.xml --mapping reviewed-test-map
 ```
 
 功能状态规则：有失败/错误为 `FAILED`；全部映射用例通过为 `PASSED`；存在跳过且没有失败为 `UNKNOWN`；没有匹配执行记录为 `NOT_EXECUTED`。未映射用例、映射但报告中缺失的用例、输入 SHA-256 均保留。JUnit 通过不等于需求完整实现；代码覆盖率仍为 `NOT_MEASURED`。当前版本仅支持 JUnit XML，其他测试报告格式和覆盖率报告尚未接入。
+
+
+## S2.16 — 多测试框架结果与代码覆盖率回流（部分适配）
+
+- `ingest-test-results` accepts completed JUnit XML (including compatible Android instrumentation reports) and pytest-json-report JSON. Testcase IDs must match the reviewed exact mapping; no fuzzy matching or inferred function linkage.
+- `ingest-coverage` accepts coverage.py JSON and JaCoCo XML. Function-level coverage is linked only by a reviewed `source_file + line_start + line_end → business_function_id` mapping.
+- Missing report files/ranges remain `UNKNOWN`; no coverage is not treated as 0%. Coverage is separate from test pass/fail and does not establish requirement completeness or correctness.
+- These commands import existing reports only. They do not install plugins, run tests, invoke Gradle/ADB, or execute project code.
+
+Example mapping:
+
+```json
+{
+  "schema_version": "usit-coverage-mapping-v1",
+  "mappings": [
+    {
+      "business_function_id": "bf-example",
+      "source_file": "app/src/main/java/example/PhotoService.java",
+      "line_start": 20,
+      "line_end": 48
+    }
+  ]
+}
+```
+
+Import commands:
+
+```powershell
+python -m usit ingest-test-results --junit .\\reports\\junit.xml --mapping .\\test-result-mapping.json --graph .\\business_knowledge_graph.json --out .\\test-execution-results.json
+python -m usit ingest-test-results --format pytest-json --junit .\\reports\\pytest-report.json --mapping .\\test-result-mapping.json --graph .\\business_knowledge_graph.json --out .\\pytest-execution-results.json
+python -m usit ingest-coverage --format coverage-py-json --coverage .\\reports\\coverage.json --mapping .\\coverage-mapping.json --graph .\\business_knowledge_graph.json --out .\\coverage-results.json
+python -m usit ingest-coverage --format jacoco-xml --coverage .\\app\\build\\reports\\jacoco\\testDebugUnitTestCoverage\\testDebugUnitTestCoverage.xml --mapping .\\coverage-mapping.json --graph .\\business_knowledge_graph.json --out .\\jacoco-results.json
+```
