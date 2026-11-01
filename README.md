@@ -522,3 +522,63 @@ The result distinguishes `SUCCEEDED`, `PARTIAL` and `FAILED`, retains each model
 
 This stage executes model inference only. It does not read project files, run builds/tests, change source code, or prove model conclusions. Supply only material you have deliberately reviewed and sanitized. Model role assignments are operator assertions, not benchmarked capability claims. A future evidence-fusion stage must compare model claims against source/runtime evidence and preserve disagreements rather than deciding truth by majority vote.
 
+
+
+## S2.26 — 多模型主张审查与证据融合（离线）
+
+新增 `usit/ai_claim_review.py` 与 `review-ai-claims`。本阶段把经过人工整理的模型主张、证据目录和审阅记录转为可追溯比较报告；**不自动解析自由文本、不自动读取项目文件、不调用模型、不运行项目测试**。
+
+### 输入账本
+
+输入使用 `usit-ai-claim-ledger-v1` JSON，包含：
+- `claims`：每条主张的唯一 `claim_id`、`model_id`、`task`、原文 `claim_text`、可选的人工指定 `comparison_group_id`、证据引用、uncertainty、可选自报 confidence 和带时区生成时间。
+- `evidence_catalog`：唯一 `evidence_id`、证据类型、来源文件/报告 SHA-256 和精确 locator。目录只用于验证引用是否存在，不代表 USIT 已独立读取或验证证据内容。
+- `reviews`：可选人工审阅决策，必须包含 claim_id、decision、reviewed_by、reviewed_at、rationale 和引用的 evidence_refs。审阅身份字段是审计记录，不是身份认证。
+
+### 命令
+
+```powershell
+python -m usit review-ai-claims --input .\\ai-claim-ledger.json --out .\\ai-claim-review.json
+```
+
+### 比较与状态规则
+
+- 只有账本中明确相同的 `comparison_group_id` 才会被放在一起比较；不做语义相似度或名称猜测。
+- 文本在空白归一化后完全相同，只标记 `TEXT_IDENTICAL_MULTI_MODEL_ALIGNMENT_NOT_VERIFICATION`；不同文本标记 `DIVERGENT_TEXT_REQUIRES_HUMAN_REVIEW`。
+- 每条主张保留独立模型来源、原文、时间、uncertainty、自报 confidence、证据引用和审阅记录。
+- 证据引用只校验是否存在于输入目录；未知引用显式标记。没有证据引用不等于反证。
+- 人工决策 `SUPPORTS_CLAIM` 只形成 `REVIEWED_SUPPORT_CANDIDATE`，不证明主张为真；`CONTRADICTS_CLAIM`、`NEEDS_MORE_EVIDENCE` 和 `CONFLICTING_EVIDENCE` 分别保留。
+- 所有主张的 `truth_status` 固定为 `NOT_ESTABLISHED`，`claim_status` 固定为 `MODEL_HYPOTHESIS`；不使用多数投票，不自动生成 `VERIFIED_FACT`。
+- 输出绑定输入账本 SHA-256；输入最大 10 MiB，最多 5,000 条主张及 20,000 条证据目录记录。拒绝符号链接和覆盖既有输出文件。
+
+### 示例账本
+
+```json
+{
+  "schema": "usit-ai-claim-ledger-v1",
+  "evidence_catalog": [
+    {
+      "evidence_id": "source-001",
+      "evidence_type": "SOURCE_CODE",
+      "source_sha256": "<64 lowercase hex characters>",
+      "locator": "src/photo.py:42"
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "claim-model-a-001",
+      "model_id": "exact-model-id-a",
+      "task": "defect",
+      "claim_text": "Photo access checks the owner identity.",
+      "comparison_group_id": "photo-owner-check",
+      "evidence_refs": ["source-001"],
+      "uncertainty": ["Static evidence only; runtime behavior unknown."],
+      "confidence": 0.7,
+      "generated_at": "2026-11-01T12:00:00+08:00"
+    }
+  ],
+  "reviews": []
+}
+```
+
+账本必须由操作人员或经审阅的结构化适配流程提供。不要把模型自由文本直接复制成“已验证证据”；模型自报 confidence 不代表校准概率。
