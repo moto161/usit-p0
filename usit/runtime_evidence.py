@@ -175,6 +175,24 @@ def validate_runtime_evidence(
                 if parsed_times[parent_id] > parsed_times[event["event_id"]]:
                     conflicts.append({"kind": "PARENT_AFTER_CHILD_TIMESTAMP", "event_id": event["event_id"], "parent_event_id": parent_id})
 
+    parent_by_child = {child: parent for parent, child in parent_edges}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    def visit(event_id: str) -> None:
+        if event_id in visiting:
+            conflicts.append({"kind": "PARENT_EVENT_CYCLE", "event_id": event_id})
+            return
+        if event_id in visited:
+            return
+        visiting.add(event_id)
+        parent_id = parent_by_child.get(event_id)
+        if parent_id is not None:
+            visit(parent_id)
+        visiting.remove(event_id)
+        visited.add(event_id)
+    for event_id in sorted(indexed):
+        visit(event_id)
+
     summaries = []
     for correlation_id, rows in sorted(correlations.items()):
         types = {row["event_type"] for row in rows}
@@ -189,7 +207,7 @@ def validate_runtime_evidence(
             "has_http_exchange": "HTTP_REQUEST" in types and "HTTP_RESPONSE" in types,
             "has_backend_span": "BACKEND_SPAN" in types,
             "has_database_change": "DATABASE_CHANGE" in types,
-            "end_to_end_chain_status": "PARTIAL_OBSERVATION",
+            "correlation_status": "PARTIAL_OBSERVATION",
             "interpretation": "阶段共现不证明因果关系；必须检查 parent_event_id、时间戳及外部采集器的可信度。",
         })
         # Parent links, rather than mere co-occurrence, are required even to
@@ -197,7 +215,7 @@ def validate_runtime_evidence(
         edges = {(a, b) for a, b in parent_edges if a in {r["event_id"] for r in rows} and b in {r["event_id"] for r in rows}}
         linked = {x for edge in edges for x in edge}
         if len(types) >= 2 and linked:
-            summaries[-1]["end_to_end_chain_status"] = "CORRELATED_EVENTS_OBSERVED"
+            summaries[-1]["correlation_status"] = "PARENT_LINKED_EVENTS_OBSERVED"
 
     return {
         "schema_version": "usit-runtime-evidence-validation-v1",
