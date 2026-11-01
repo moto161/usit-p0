@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from usit.ai_evidence_binding import verify_evidence_bindings
+from usit.cli import main
 from usit.scan_attestation import create_scan_attestation, public_key_id
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -233,6 +237,27 @@ class AIEvidenceBindingTests(unittest.TestCase):
                          {"scan_manifest.json", "scan_manifest_two.json"})
         self.assertEqual({x["snapshot_id"] for x in provenance},
                          {"snapshot-scan_manifest.json", "snapshot-two"})
+
+    def test_cli_accepts_independently_provisioned_trust_key(self):
+        self._attach_scan_manifest()
+        self._attach_scan_attestation()
+        ledger_path = self.root / "ledger.json"
+        ledger_path.write_text(json.dumps(self.ledger), encoding="utf-8")
+        trusted_path = self.root / "trusted-public-key.bin"
+        trusted_path.write_bytes(self.attestation_public)
+        output = self.root / "binding-report.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main([
+                "verify-evidence-bindings", "--input", str(ledger_path),
+                "--evidence-root", str(self.root),
+                "--trusted-public-key", str(trusted_path),
+                "--out", str(output),
+            ])
+        self.assertEqual(code, 2)
+        report = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(report["evidence_bindings"][0]["attestation_status"],
+                         "ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY")
+        self.assertEqual(report["claims"][0]["truth_status"], "NOT_ESTABLISHED")
 
     def test_hash_mismatch_is_stale(self):
         self.ledger["evidence_catalog"][0]["source_sha256"] = "0" * 64
