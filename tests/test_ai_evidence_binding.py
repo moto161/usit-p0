@@ -116,6 +116,23 @@ class AIEvidenceBindingTests(unittest.TestCase):
                          "MANIFEST_STALE")
         self.assertEqual(result["claims"][0]["snapshot_binding_status"], "CHECK_REQUIRED")
 
+    def test_duplicate_json_keys_in_scan_manifest_are_rejected(self):
+        source_sha = self.ledger["evidence_catalog"][0]["source_sha256"]
+        raw = (
+            '{"schema_version":"usit-manifest-v1",'
+            '"schema_version":"other",'
+            '"files":[{"path":"src/photo.py","sha256":"' + source_sha + '"}]}'
+        ).encode("utf-8")
+        (self.root / "duplicate-manifest.json").write_bytes(raw)
+        entry = self.ledger["evidence_catalog"][0]
+        entry["snapshot_manifest_path"] = "duplicate-manifest.json"
+        entry["snapshot_manifest_sha256"] = hashlib.sha256(raw).hexdigest()
+        result = verify_evidence_bindings(self.ledger, self.root)
+        self.assertEqual(result["evidence_bindings"][0]["snapshot_binding_status"],
+                         "MANIFEST_INVALID")
+        self.assertEqual(result["claims"][0]["snapshot_binding_status"], "CHECK_REQUIRED")
+        self.assertEqual(result["overall_truth_status"], "NOT_ESTABLISHED")
+
     def test_scan_manifest_recorded_source_digest_mismatch_is_rejected(self):
         self._attach_scan_manifest(recorded_sha="0" * 64)
         result = verify_evidence_bindings(self.ledger, self.root)
