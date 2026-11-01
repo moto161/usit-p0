@@ -46,7 +46,8 @@ def _evidence_ref(path: Any, line: Any = None, **extra: Any) -> dict[str, Any] |
 
 def _candidate(kind: str, endpoint: str, purpose: str, evidence: list[dict[str, Any]],
                steps: list[str], limitations: list[str], *, call_chain: list[Any],
-               authorization: Mapping[str, Any], database: list[Any]) -> dict[str, Any]:
+               authorization: Mapping[str, Any], database: list[Any],
+               identity_flow: list[Any] | None = None) -> dict[str, Any]:
     identity = {"kind": kind, "endpoint": endpoint, "evidence": evidence, "steps": steps}
     return {
         "test_id": _stable_id(kind, identity),
@@ -58,6 +59,7 @@ def _candidate(kind: str, endpoint: str, purpose: str, evidence: list[dict[str, 
         "call_chain_evidence": call_chain,
         "authorization_evidence": dict(authorization),
         "database_access_evidence": database,
+        "identity_dataflow_evidence": identity_flow or [],
         "preconditions": [
             "由项目负责人批准的隔离测试环境，不连接生产服务或真实用户数据",
             "提供明确的身份/角色矩阵、数据所有权规则、接口需求和测试账号",
@@ -96,6 +98,7 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
         association = _dict(node.get("handler_association"))
         chain = _list(association.get("call_chain_evidence"))
         database = _list(association.get("database_access_evidence"))
+        identity_flow = _list(association.get("identity_dataflow_evidence"))
         refs: list[dict[str, Any]] = []
         ref = _evidence_ref(source.get("path"), source.get("line"),
                             endpoint=label, evidence_type="endpoint_registration")
@@ -116,6 +119,16 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                                 evidence_type="database_access",
                                 operation=entry.get("operation"), tables=entry.get("tables"),
                                 columns=entry.get("columns"))
+            if ref:
+                refs.append(ref)
+        for entry in identity_flow:
+            if not isinstance(entry, Mapping):
+                continue
+            ref = _evidence_ref(entry.get("path"), entry.get("line"),
+                                evidence_type="identity_dataflow",
+                                identity_kind=entry.get("kind"),
+                                identity_evidence_id=entry.get("identity_evidence_id"),
+                                scope=entry.get("scope"))
             if ref:
                 refs.append(ref)
         for path_key in ("target_path",):
@@ -159,7 +172,7 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
             "验证接口的未登录访问边界及认证策略是否按需求生效",
             refs, steps,
             limitations + ["NOT_DETECTED_STATIC_SCAN 只表示当前有限静态扫描未发现线索，不代表接口缺少认证。"],
-            call_chain=chain, authorization=auth, database=database,
+            call_chain=chain, authorization=auth, database=database, identity_flow=identity_flow,
         ))
 
         guards = []
@@ -180,6 +193,43 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                  "使用获准角色执行对照请求，比较访问结果和数据副作用"],
                 limitations + ["检测到角色/权限 guard 名称不证明角色判定正确，也不证明所有分支均受保护。"],
                 call_chain=chain, authorization=auth, database=sensitive_db,
+            ))
+
+        request_to_owner = [
+            item for item in identity_flow if isinstance(item, Mapping)
+            and item.get("kind") == "direct_request_identity_to_sql_owner_binding"
+        ]
+        trusted_to_owner = [
+            item for item in identity_flow if isinstance(item, Mapping)
+            and item.get("kind") == "direct_authenticated_identity_to_sql_owner_binding"
+        ]
+        if request_to_owner:
+            candidates.append(_candidate(
+                "request_identity_owner_binding", label,
+                "核实 SQL 资源归属条件是否使用请求可控的 user_id/owner_id，而非经验证的当前登录身份",
+                refs,
+                ["确认接口契约中 user_id/owner_id 的来源及其是否允许客户端指定",
+                 "在隔离环境分别使用本人身份和另一用户身份提交不同归属 ID",
+                 "记录服务端最终绑定的 SQL 参数、授权决策及数据副作用，并与需求定义的资源归属规则对照"],
+                limitations + [
+                    "同一行出现请求字段和 SQL owner 占位符仅为文本共现，不证明该表达式就是实际绑定参数。",
+                    "必须检查完整参数数组、变量赋值、框架绑定规则和运行时身份；当前证据不是 IDOR 或漏洞结论。",
+                ],
+                call_chain=chain, authorization=auth, database=database, identity_flow=identity_flow,
+            ))
+        if trusted_to_owner:
+            candidates.append(_candidate(
+                "authenticated_identity_owner_binding", label,
+                "验证数据库资源归属是否确实绑定到当前已认证身份",
+                refs,
+                ["核对身份来源是否由认证中间件可信建立且不可被请求参数覆盖",
+                 "在隔离环境以两个用户身份分别读取/修改各自及对方资源",
+                 "记录实际 SQL 参数和资源访问结果，确认数据库归属条件与认证身份一致"],
+                limitations + [
+                    "req.user.id 等命名模式不证明对象可信、已认证或未被覆盖。",
+                    "同一行模式不代表完整参数数据流；未验证跨行赋值、别名、闭包、包装器或 ORM。",
+                ],
+                call_chain=chain, authorization=auth, database=database, identity_flow=identity_flow,
             ))
 
         owner_columns = sorted({
