@@ -266,9 +266,11 @@ The conclusion vocabulary is deliberately limited:
 - `TEST_PASS_AND_CODE_LINES_COVERED`: mapped tests passed and explicitly mapped executable lines are covered.
 - `TEST_PASS_WITH_COVERAGE_GAP`: mapped tests passed but mapped code lines are partial or uncovered.
 - `TEST_PASS_COVERAGE_NOT_MEASURED`: tests passed but no usable coverage evidence exists.
-- `TEST_EVIDENCE_INCONCLUSIVE`: mapped tests were skipped/unknown.
+- `TEST_EVIDENCE_INCONCLUSIVE`: mapped tests were skipped/unknown or the imported report omitted one or more expected mapped testcase IDs.
 - `NO_RUNTIME_TEST_EVIDENCE`: no imported runtime test evidence exists.
-- `EVIDENCE_CONFLICT`: source graph identity or business-function linkage conflicts.
+- `EVIDENCE_CONFLICT`: source graph identity, business-function linkage or testcase completeness metadata conflicts; a `PASSED` row with missing mapped testcases is downgraded to `UNKNOWN` and reported as a conflict.
+
+The evidence row preserves the testcase-level IDs/statuses, expected and reported mapped testcase counts, completeness state and missing testcase IDs. `trace-business` carries those fields into each linked requirement row, and its Markdown report lists reported and missing testcase IDs separately. An incomplete report is never treated as a function-level pass.
 
 Example:
 
