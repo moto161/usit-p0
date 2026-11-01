@@ -336,7 +336,15 @@ def main(argv=None):
                 'snapshot_binding_status_counts':result['snapshot_binding_status_counts'],
                 'attestation_status_counts':result['attestation_status_counts'],
                 'overall_truth_status':result['overall_truth_status']},ensure_ascii=False,indent=2))
-            return 0 if all(x['binding_status']=='ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED' for x in result['claims']) else 2
+            binding_ok=all(x['binding_status']=='ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED' for x in result['claims'])
+            snapshot_ok=all(x.get('snapshot_binding_status') in (
+                'NOT_APPLICABLE','NOT_PROVIDED','MATCHED_SCAN_MANIFEST_ENTRY'
+            ) for x in result['evidence_bindings'])
+            attestation_ok=all(x.get('attestation_status') in (
+                'NOT_APPLICABLE','ATTESTATION_NOT_PROVIDED',
+                'ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY'
+            ) for x in result['evidence_bindings'])
+            return 0 if binding_ok and snapshot_ok and attestation_ok else 2
         if a.cmd=='review-ai-claims':
             result=review_claim_ledger_file(a.input)
             output=Path(a.out).expanduser()
