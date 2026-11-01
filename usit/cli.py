@@ -8,6 +8,8 @@ from .benchmark import run_fixture_benchmark
 from .association_benchmark import run_association_invalidation_benchmark
 from .android_adapter import AndroidProjectAdapter
 from .command_planner import CommandPlanner
+from .business_semantics import analyze_business
+from .business_test_planner import plan_business_tests
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -72,6 +74,38 @@ def _inspect_android(a) -> int:
     return 0
 
 
+
+def _plan_business_tests(a) -> int:
+    """Build evidence-linked business test candidates; never execute them."""
+    auth = load_authorization_file(a.authorization_file, a.project, a.out)
+    project = canonical_project(a.project)
+    out = canonical_output(a.out)
+    auth.validate(project, out)
+    if out.exists():
+        raise ValueError("business test-plan output already exists; choose a new path to preserve prior evidence")
+    semantics = analyze_business(project)
+    plan = plan_business_tests(semantics)
+    out.mkdir(parents=True, exist_ok=False)
+    (out / "business_semantics.json").write_text(
+        json.dumps(semantics, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8"
+    )
+    (out / "business_test_plan.json").write_text(
+        json.dumps(plan, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8"
+    )
+    summary = {
+        "project_root": str(project),
+        "entity_count": semantics["entity_count"],
+        "feature_count": semantics["feature_count"],
+        "endpoint_count": semantics["endpoint_count"],
+        "discrepancy_count": semantics["discrepancy_count"],
+        "test_candidate_count": plan["candidate_count"],
+        "execution_status": "NOT_EXECUTED",
+        "outputs": [str(out / "business_semantics.json"), str(out / "business_test_plan.json")],
+        "note": "Static business understanding and candidate design only; no build, test, database or network operation was executed.",
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
 def main(argv=None):
     parser=argparse.ArgumentParser(prog='usit',description='USIT P0 read-only software scanner')
     sub=parser.add_subparsers(dest='cmd',required=True)
@@ -96,6 +130,10 @@ def main(argv=None):
     ins.add_argument('--out',required=True,help='Output directory for android_profile.json and android_test_plan.json (must not overlap the project)')
     ins.add_argument('--authorization-file',required=True,help='External JSON authorization record bound to project, action and output')
     ins.add_argument('--force',action='store_true',help='Overwrite an existing, non-empty output directory')
+    bt=sub.add_parser('plan-business-tests',help='Extract business semantics and generate evidence-linked test candidates (static only)')
+    bt.add_argument('project',help='Authorized absolute project root')
+    bt.add_argument('--out',required=True,help='New output directory outside the project root')
+    bt.add_argument('--authorization-file',required=True,help='External authorization record for static read-only analysis')
     a=parser.parse_args(argv)
     try:
         if a.cmd=='selftest': return selftest()
@@ -143,6 +181,8 @@ def main(argv=None):
             return 0 if result['is_valid'] else 1
         if a.cmd=='inspect-android':
             return _inspect_android(a)
+        if a.cmd=='plan-business-tests':
+            return _plan_business_tests(a)
         auth=load_authorization_file(a.authorization_file,a.project,a.out)
         print(json.dumps(scan_project(a.project,a.out,force=getattr(a,'force',False),authorization=auth),ensure_ascii=False,indent=2)); return 0
     except Exception as e:
