@@ -385,7 +385,7 @@ def main(argv=None):
             result["input_hashes"]={"business_semantics_sha256":hashlib.sha256(sem_bytes).hexdigest(),
                                     "business_graph_sha256":graph_hash}
             output.parent.mkdir(parents=True,exist_ok=True)
-                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             print(json.dumps({"template_status":result["template_status"],
                 "mapping_count":result["mapping_count"],"source_graph_sha256":graph_hash,
                 "result_path":str(output)},ensure_ascii=False,indent=2))
