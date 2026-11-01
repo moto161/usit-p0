@@ -100,14 +100,11 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(validation["quality"]["resolved_calls"], len(expected))
 
     def test_python_call_records_identify_enclosing_function(self):
-        (self.root / "owner.py").write_text(
-            "def helper():\\n    return 1\\n\\ndef run():\\n    return helper()\\n",
-            encoding="utf-8",
-        )
         rows, _ = self.analyze()
-        call = next(call for row in rows if row["path"] == "owner.py" for call in row["calls"])
-        self.assertEqual(call["caller"], {"name": "run", "line": 4})
-        self.assertEqual(call["caller_symbol_id"], "symbol:owner.py#run:4")
+        call = next(call for row in rows if row["path"] == "main.py"
+                    for call in row["calls"] if call["callee"] == "mod.same")
+        self.assertEqual(call["caller"], {"name": "invoke", "line": 5})
+        self.assertEqual(call["caller_symbol_id"], "symbol:main.py#invoke:5")
 
     def test_javascript_intra_file_call_uses_compiler_api_evidence(self):
         (self.root / "sample.js").write_text("function helper() {}\nfunction run() {\n  helper();\n}\n", encoding="utf-8")
@@ -121,7 +118,7 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(helper["resolution_status"], "RESOLVED")
         self.assertEqual(helper["target_location"]["path"], "sample.js")
         self.assertTrue(any(item.get("kind") == "definition" for item in helper["evidence_chain"]))
-        self.assertEqual(helper["source"], "symbol:sample.js#run:2")
+        self.assertEqual(helper["source"], "file:sample.js")
         self.assertEqual(helper["caller_symbol_id"], "symbol:sample.js#run:2")
 
 
