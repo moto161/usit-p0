@@ -15,8 +15,8 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
             root = Path(td)
             source = root / "api.js"
             source.write_text(
-                "function testLoadsItems() { axios.get('/api/items'); }\\n"
-                "function testSavesItems() { client.post('/api/items'); }\\n",
+                "function testLoadsItems() { axios.get('/api/items'); }\n"
+                "function testSavesItems() { client.post('/api/items'); }\n",
                 encoding="utf-8",
             )
             parsed = analyze_js_ts_project(root, discover_files(root))
@@ -31,7 +31,7 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "top_level.ts").write_text(
-                "const randomValue = Math.random();\\n",
+                "const randomValue = Math.random();\n",
                 encoding="utf-8",
             )
             parsed = analyze_js_ts_project(root, discover_files(root))
