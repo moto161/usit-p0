@@ -84,6 +84,26 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"duplicate business_function_id"):
             build_verification_gap_backlog({"features":[],"endpoint_contract_alignment":[]},graph)
 
+    def test_cli_writes_parseable_gap_backlog_with_input_hashes(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from usit.cli import main
+        with tempfile.TemporaryDirectory() as td:
+            base=Path(td)
+            semantics=base/"semantics.json"; graph=base/"graph.json"; plan=base/"plan.json"; out=base/"gaps.json"
+            semantics.write_text(json.dumps(self.semantics),encoding="utf-8")
+            graph.write_text(json.dumps(self.graph,ensure_ascii=False,indent=2),encoding="utf-8")
+            plan.write_text(json.dumps(self.plan),encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                code=main(["analyze-gaps","--semantics",str(semantics),"--graph",str(graph),
+                           "--test-plan",str(plan),"--out",str(out)])
+            self.assertEqual(code,0)
+            saved=json.loads(out.read_text(encoding="utf-8"))
+            self.assertGreater(saved["gap_count"],0)
+            self.assertEqual(len(saved["input_hashes"]["business_graph_sha256"]),64)
+
     def test_rejects_invalid_artifact_schemas(self):
         with self.assertRaisesRegex(ValueError,"usit-graph-v1"):
             build_verification_gap_backlog(self.semantics,{"schema_version":"bad"})
