@@ -365,3 +365,29 @@ python -m usit trace-business --semantics .\\business_semantics.json --graph .\\
 ```
 
 Markdown 按需求功能展开审阅决策、业务功能/API、各层证据状态、测试候选、运行时状态、源码证据引用和输入哈希。它只是 JSON 矩阵的可读投影，不产生额外验证结论；两个输出路径必须不同且均不得覆盖已有文件。
+
+
+## S2.21 — 运行时事件证据入口（只校验，不负责采集）
+
+USIT 新增 `usit-runtime-evidence-v1` 事件格式及 `validate-runtime-evidence`。该入口只读取已经由外部测试/观测工具采集的 JSON，不连接 Android 设备，不调用 ADB，不启动应用，不访问服务器或数据库，也不运行目标项目代码。
+
+### 命令
+
+```powershell
+python -m usit validate-runtime-evidence --events .\\runtime-events.json --graph .\\business_knowledge_graph.json --out .\\runtime-evidence-validation.json
+```
+
+### 事件模型
+
+每个事件包含唯一 `event_id`、带时区的 `timestamp`、`event_type`、`correlation_id`；可选 `parent_event_id` 和显式 `business_function_id`。支持事件类型：`UI_ACTION`、`APP_STATE`、`PERMISSION_RESULT`、`AUTH_CONTEXT`、`HTTP_REQUEST`、`HTTP_RESPONSE`、`BACKEND_SPAN`、`DATABASE_CHANGE`。Android 页面、控件、权限和身份上下文可由外部适配器映射到这些类型；服务端请求/响应、后端跨度和数据库变更也使用同一关联 ID 模型。
+
+事件仅允许白名单元数据字段（如页面/组件标识、操作类型、HTTP 方法、路由模板、状态码、数据库操作、权限结果）。禁止请求/响应正文、密码、令牌、Cookie、凭证、个人身份信息和原始数据库值。未知字段一律拒绝，不会被静默写入报告。
+
+### 证据解释边界
+
+- `RUNTIME_OBSERVED` 仅表示输入中存在运行时事件，不等于测试通过、业务正确或需求已满足。
+- `CORRELATED_EVENTS_OBSERVED` 要求至少存在显式父子事件关联；仅有相同 correlation ID 的阶段共现仍不足以证明因果。
+- 未关联业务功能的事件不会按页面名称、API 路由或时间邻近自动猜测归属。
+- 图谱 SHA-256 不一致、未知业务功能 ID、缺失父事件、跨关联父子关系和父子时间倒置均保留为冲突。
+- 完整 UI→HTTP→后端→数据库链不是每项业务功能的强制模板；缺失阶段表示未观察，不自动认定为缺陷。
+- 输出报告记录事件文件与图谱哈希；输入和输出均不得是符号链接，输出不得覆盖已有文件。
