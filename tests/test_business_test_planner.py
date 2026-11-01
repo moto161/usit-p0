@@ -61,6 +61,53 @@ class BusinessTestPlannerTests(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 3)
         self.assertEqual(len(result["warnings"]), 2)
 
+    def test_exact_api_contract_emits_verification_candidate_with_execution_evidence(self):
+        semantics = {"endpoint_contract_alignment": [{
+            "status": "EXACT_MATCH", "method": "GET", "path": "/api/photos",
+            "document_evidence": {"source": "docs/api.md", "line": 7},
+            "code_evidence": [{"source": "server/routes/photos.js", "line": 18}],
+        }]}
+        graph = {"business_understanding": {"endpoint_execution_paths": [{
+            "method": "GET", "endpoint": "/api/photos",
+            "source": {"path": "server/routes/photos.js", "line": 18},
+            "handler": {"path": "server/photos.js", "line": 30, "symbol_id": "sym-handler"},
+            "call_chain": [{"call_site": {"path": "server/photos.js", "line": 34}, "target_id": "sym-db"}],
+            "database_accesses": [{"database_access_id": "db-1", "path": "server/db.js", "line": 9}],
+            "authorization": {"route_middleware": [{"authorization_check_id": "auth-1", "path": "server/routes/photos.js", "line": 17}], "reachable_function_checks": []},
+            "identity_evidence": [{"identity_evidence_id": "identity-1", "path": "server/db.js", "line": 9}],
+        }]}}
+        result = plan_business_tests(semantics, graph)
+        candidate = next(x for x in result["candidates"] if x["category"] == "api_contract_verification")
+        self.assertEqual(candidate["execution_status"], "NOT_EXECUTED")
+        self.assertEqual(candidate["design_status"], "CANDIDATE_NEEDS_REQUIREMENTS")
+        kinds = {x.get("evidence_kind") for x in candidate["evidence_refs"]}
+        self.assertTrue({"documented_api_contract", "code_route", "resolved_handler", "call_chain", "database_access", "authorization", "identity_resource"}.issubset(kinds))
+        self.assertTrue(all(x["confidence"] == "STATIC_INFERENCE" for x in candidate["evidence_refs"]))
+
+    def test_unmatched_contracts_are_review_candidates_not_defect_verdicts(self):
+        semantics = {"endpoint_contract_alignment": [
+            {"status": "DOCUMENTED_NOT_FOUND_IN_CODE", "method": "POST", "path": "/api/missing", "document_evidence": {"source": "api.md", "line": 4}, "code_evidence": []},
+            {"status": "CODE_ENDPOINT_NOT_DOCUMENTED", "method": "GET", "path": "/internal", "document_evidence": None, "code_evidence": [{"source": "routes.js", "line": 8}]},
+        ]}
+        result = plan_business_tests(semantics)
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertTrue(all(x["category"] == "api_contract_review" for x in result["candidates"]))
+        self.assertTrue(all("不是" in "".join(x["limitations"]) or "不证明" in "".join(x["limitations"]) for x in result["candidates"]))
+
+    def test_ambiguous_route_alignment_does_not_attach_execution_path(self):
+        semantics = {"endpoint_contract_alignment": [{
+            "status": "MULTIPLE_CODE_MATCHES", "method": "GET", "path": "/dup",
+            "document_evidence": {"source": "api.md", "line": 2},
+            "code_evidence": [{"source": "a.js", "line": 1}, {"source": "b.js", "line": 2}],
+        }]}
+        graph = {"business_understanding": {"endpoint_execution_paths": [{
+            "method": "GET", "endpoint": "/dup", "handler": {"path": "handler.js", "line": 9},
+        }]}}
+        result = plan_business_tests(semantics, graph)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["category"], "api_contract_review")
+        self.assertFalse(any(x.get("evidence_kind") == "resolved_handler" for x in candidate["evidence_refs"]))
+
     def test_non_list_collection_is_rejected(self):
         with self.assertRaises(ValueError):
             plan_business_tests({"features": {}, "entities": [], "endpoints": [], "discrepancies": []})
