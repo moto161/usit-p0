@@ -210,6 +210,7 @@ class BusinessTraceabilityTests(unittest.TestCase):
             mapping = dict(self.mapping, source_graph_sha256=graph_hash)
             mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
             security_path.write_text(json.dumps({"schema_version": "usit-security-test-candidates-v1",
+                "source_business_graph_sha256": graph_hash,
                 "candidates": [{"test_id": "sec-cli-1", "business_function_id": "bf-list",
                     "category": "security_cross_user_resource_isolation", "purpose": "验证跨用户资源隔离",
                     "design_status": "CANDIDATE_NEEDS_REQUIREMENTS", "execution_status": "NOT_EXECUTED",
