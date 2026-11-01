@@ -655,7 +655,7 @@ function main(input) {
 
   for (const entry of accepted) {
     const sourceFile = program.getSourceFile(entry.full) || ts.createSourceFile(entry.full, safeRead(entry.full), ts.ScriptTarget.Latest, true, scriptKind(entry.full));
-    const row = { path: entry.rel, language: languageFor(entry.full), parser_name: PARSER, parser_version: ts.version, syntax_status: "VALID", symbols: [], imports: [], calls: [], diagnostics: [] };
+    const row = { path: entry.rel, language: languageFor(entry.full), parser_name: PARSER, parser_version: ts.version, syntax_status: "VALID", symbols: [], imports: [], calls: [], api_client_calls: [], diagnostics: [] };
     const syntaxErrors = sourceFile.parseDiagnostics || [];
     for (const d of syntaxErrors) {
       const position = d.start == null ? null : sourceFile.getLineAndCharacterOfPosition(d.start);
@@ -875,7 +875,6 @@ function main(input) {
     collectRouteHandlers(sourceFile);
 
     // S2.13-A: explicit JSX event-prop -> named handler evidence.
-    row.api_client_calls = [];
     row.ui_event_bindings = [];
     const uiEventProps = new Set(["onClick", "onSubmit", "onChange", "onPress", "onTap", "onLongPress"]);
     function collectUiEventBindings(node) {
