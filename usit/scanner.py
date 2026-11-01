@@ -1030,6 +1030,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
     for f in rows:
         fid='file:'+f['path']; nodes.append({'id':fid,'type':'file','label':f['path'],'category':f['category'],'language':f['language'],'module':f.get('module'),'evidence':{'path':f['path']}})
         defined_ids={}
+        defined_symbol_ids=set()
         for s in f['symbols']:
             sid='symbol:'+f['path']+'#'+s['name']+':'+str(s['line'])
             module_symbol=next((x for x in f.get('module_symbols',[]) if x['name']==s['name'] and x['line']==s['line']),None)
@@ -1038,6 +1039,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             nodes.append(node)
             edges.append(_edge(fid,sid,'defines',{'path':f['path'],'line':s['line']},method='extractor',confidence='medium'))
             defined_ids[s['name']]=sid
+            defined_symbol_ids.add(sid)
         for dep in f['imports']:
             did='dependency:'+dep['name']
             if not any(n['id']==did for n in nodes): nodes.append({'id':did,'type':'dependency','label':dep['name'],'evidence':{'path':f['path'],'line':dep['line']}})
@@ -1065,7 +1067,11 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             if c.get('diagnostic'): extras['diagnostic']=c['diagnostic']
             if target:
                 extras['target_location']={'path':target['file'],'line':target['line'],'qualified_name':target.get('qualified_name')}
-            edges.append(_edge(fid,tid,'calls',ev,method=c.get('method','regex'),confidence=c.get('confidence','low'),**extras))
+            caller_id=c.get('caller_symbol_id')
+            call_source=caller_id if caller_id in defined_symbol_ids else fid
+            if call_source != fid:
+                extras['caller_symbol_id']=call_source
+            edges.append(_edge(call_source,tid,'calls',ev,method=c.get('method','regex'),confidence=c.get('confidence','low'),**extras))
         for fc in f.get('framework_candidates',[]):
             cid='candidate:'+fc['kind']
             if not any(n['id']==cid for n in nodes): nodes.append({'id':cid,'type':'candidate','label':fc['kind'],'evidence':{'note':'框架候选关联，未验证，不视为已连通'}})
