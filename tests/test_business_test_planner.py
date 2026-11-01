@@ -73,8 +73,8 @@ class BusinessTestPlannerTests(unittest.TestCase):
             "handler": {"path": "server/photos.js", "line": 30, "symbol_id": "sym-handler"},
             "call_chain": [{"call_site": {"path": "server/photos.js", "line": 34}, "target_id": "sym-db"}],
             "database_accesses": [{"database_access_id": "db-1", "path": "server/db.js", "line": 9}],
-            "authorization": {"route_middleware": [{"authorization_check_id": "auth-1", "path": "server/routes/photos.js", "line": 17}], "reachable_function_checks": []},
-            "identity_evidence": [{"identity_evidence_id": "identity-1", "path": "server/db.js", "line": 9}],
+            "authorization": {"evidence": [{"authorization_check_id": "auth-1", "kind": "route_middleware", "path": "server/routes/photos.js", "line": 17}]},
+            "identity_resource_flow": [{"identity_evidence_id": "identity-1", "path": "server/db.js", "line": 9}],
         }]}}
         result = plan_business_tests(semantics, graph)
         candidate = next(x for x in result["candidates"] if x["category"] == "api_contract_verification")
