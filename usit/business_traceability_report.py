@@ -44,8 +44,12 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             for key, value in stages.items():
                 lines.append(f"| {_cell(key)} | {_cell(value)} |")
         candidates = row.get("test_candidate_ids", [])
+        observation = row.get("runtime_observation") if isinstance(row.get("runtime_observation"), dict) else {}
+        correlation_ids = observation.get("correlation_ids", [])
         lines.extend(["", f"- 测试候选 ID：{_cell(', '.join(map(str, candidates)) if candidates else '无')}",
             f"- 运行时测试：{_cell(stages.get('test_execution') if isinstance(stages, dict) else 'UNKNOWN')}",
+            f"- 运行时事件观察：{_cell(observation.get('status') or (stages.get('runtime_observation') if isinstance(stages, dict) else 'NOT_MEASURED'))}",
+            f"- 运行时关联 ID：{_cell(', '.join(map(str, correlation_ids)) if correlation_ids else '无')}",
             f"- 代码覆盖：{_cell(stages.get('code_coverage') if isinstance(stages, dict) else 'UNKNOWN')}",
             "- 证据引用："])
         refs = row.get("evidence_refs", [])
