@@ -96,7 +96,17 @@ def assess_project_quality(
     alignment_counts = Counter(
         item.get("status", "UNKNOWN") for item in endpoint_alignment if isinstance(item, dict)
     )
-    graph_hash = (input_hashes or {}).get("business_graph_sha256")\n    source_hash_conflicts = []\n    if evidence_matrix is not None and graph_hash:\n        matrix_graph_hash = evidence_matrix.get("business_graph_sha256")\n        if matrix_graph_hash is not None and matrix_graph_hash != graph_hash:\n            source_hash_conflicts.append({"artifact": "evidence_matrix", "expected": graph_hash, "actual": matrix_graph_hash})\n    if gap_backlog is not None and graph_hash:\n        gap_hashes = gap_backlog.get("input_hashes", {})\n        if isinstance(gap_hashes, dict) and gap_hashes.get("business_graph_sha256") not in {None, graph_hash}:\n            source_hash_conflicts.append({"artifact": "gap_backlog", "expected": graph_hash, "actual": gap_hashes.get("business_graph_sha256")})\n    gap_items = gap_backlog.get("gaps", []) if gap_backlog else []
+    graph_hash = (input_hashes or {}).get("business_graph_sha256")
+    source_hash_conflicts = []
+    if evidence_matrix is not None and graph_hash:
+        matrix_graph_hash = evidence_matrix.get("business_graph_sha256")
+        if matrix_graph_hash is not None and matrix_graph_hash != graph_hash:
+            source_hash_conflicts.append({"artifact": "evidence_matrix", "expected": graph_hash, "actual": matrix_graph_hash})
+    if gap_backlog is not None and graph_hash:
+        gap_hashes = gap_backlog.get("input_hashes", {})
+        if isinstance(gap_hashes, dict) and gap_hashes.get("business_graph_sha256") not in {None, graph_hash}:
+            source_hash_conflicts.append({"artifact": "gap_backlog", "expected": graph_hash, "actual": gap_hashes.get("business_graph_sha256")})
+    gap_items = gap_backlog.get("gaps", []) if gap_backlog else []
     if not isinstance(gap_items, list):
         raise ValueError("gap_backlog.gaps must be a list")
     gap_priority_counts = Counter(
