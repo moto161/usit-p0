@@ -27,6 +27,7 @@ def build_verification_gap_backlog(
     test_plan: dict[str, Any] | None = None,
     evidence_matrix: dict[str, Any] | None = None,
     input_hashes: dict[str, str] | None = None,
+    traceability_matrix: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(semantics,dict) or not isinstance(semantics.get("features",[]),list):
         raise ValueError("business semantics must contain a features list")
@@ -74,6 +75,17 @@ def build_verification_gap_backlog(
             raise ValueError(f"duplicate evidence row for business_function_id: {fid}")
         runtime_by_id[fid]=row
 
+    if traceability_matrix is not None:
+        if not isinstance(traceability_matrix, dict) or traceability_matrix.get("schema_version") != "usit-business-traceability-matrix-v1":
+            raise ValueError("traceability matrix must use usit-business-traceability-matrix-v1")
+        if traceability_matrix.get("source_graph_sha256") != (input_hashes or {}).get("business_graph_sha256"):
+            raise ValueError("traceability matrix source_graph_sha256 does not match the supplied business graph bytes")
+        trace_rows = traceability_matrix.get("rows")
+        if not isinstance(trace_rows, list):
+            raise ValueError("traceability matrix rows must be a list")
+    else:
+        trace_rows = []
+
     gaps=[]
     def add(kind:str,scope:str,target:str,severity:str,reason:str,action:str,evidence:list[dict[str,Any]],function_id:str|None=None):
         refs=[x for x in evidence if isinstance(x,dict)]
@@ -85,8 +97,27 @@ def build_verification_gap_backlog(
             "evidence_refs":refs,"defect_confirmed":False,
         })
 
-    # A PRD feature without an explicit feature→function contract remains a
-    # requirement-traceability gap. Names/module similarity are not associations.
+    # A reviewed traceability matrix may close this gap only for an exact
+    # feature identity and a target function validated in the same graph bytes.
+    reviewed_feature_links={}
+    for index, row in enumerate(trace_rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"traceability matrix rows[{index}] must be an object")
+        if row.get("mapping_decision") != "APPROVED_LINK":
+            continue
+        name=row.get("feature_name")
+        source=row.get("feature_source") if isinstance(row.get("feature_source"), str) else ""
+        line=row.get("feature_line")
+        if not isinstance(name, str) or not isinstance(row.get("business_function_id"), str) or not row["business_function_id"]:
+            continue
+        if line is not None and (not isinstance(line, int) or isinstance(line, bool) or line < 1):
+            raise ValueError(f"traceability matrix rows[{index}] has invalid feature_line")
+        key=(name.strip(), source, line)
+        if key in reviewed_feature_links:
+            raise ValueError(f"duplicate approved traceability row for feature identity: {key}")
+        reviewed_feature_links[key]=row
+
+    # Legacy graph-level reviewed links remain supported for backward compatibility.
     documented_links=understanding.get("documented_feature_linkage",[])
     link_by_identity={}
     if isinstance(documented_links,list):
@@ -108,7 +139,11 @@ def build_verification_gap_backlog(
         if not isinstance(line,int) or isinstance(line,bool) or line < 1:
             line=None
         links=link_by_identity.get((name,source,line),[])
-        linked=any(x.get("linkage_status")=="EXPLICIT_REVIEWED_LINK" for x in links)
+        trace_row=reviewed_feature_links.get((name,source,line))
+        linked=(
+            trace_row is not None
+            or any(x.get("linkage_status")=="EXPLICIT_REVIEWED_LINK" for x in links)
+        )
         if not linked:
             evidence=[]
             if feature.get("source"):
