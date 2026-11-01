@@ -59,6 +59,18 @@ class ProjectQualityAssessmentTests(unittest.TestCase):
         self.assertEqual(integrity["unknown_runtime_evidence_business_function_ids"],["bf-other"])
         self.assertEqual(integrity["status"],"CONFLICTS_OR_UNLINKED_RECORDS_PRESENT")
 
+    def test_invalid_status_and_source_hash_conflict_are_reported(self):
+        matrix={"schema_version":"usit-business-evidence-verification-v1",
+            "business_graph_sha256":"0"*64,
+            "business_function_evidence":[
+                {"business_function_id":"bf-upload","test_execution_status":"MAGIC","code_coverage_status":"COVERED"},
+                {"business_function_id":"bf-share","test_execution_status":"PASSED","code_coverage_status":"INVALID"}]}
+        result=assess_project_quality(self.semantics,self.graph,None,matrix)
+        integrity=result["evidence_integrity"]
+        self.assertEqual(integrity["invalid_runtime_status_business_function_ids"],["bf-share","bf-upload"])
+        self.assertEqual(integrity["source_hash_conflicts"][0]["artifact"],"evidence_matrix")
+        self.assertEqual(integrity["status"],"CONFLICTS_OR_UNLINKED_RECORDS_PRESENT")
+
     def test_empty_function_inventory_is_explicit_not_divided_by_zero(self):
         result=assess_project_quality({"features":[],"endpoint_contract_alignment":[]},
             {"schema_version":"usit-graph-v1","business_understanding":{"business_function_views":[]}})
