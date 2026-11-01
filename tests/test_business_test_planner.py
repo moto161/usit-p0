@@ -180,5 +180,35 @@ class BusinessTestPlannerTests(unittest.TestCase):
         self.assertEqual(result["business_function_coverage"]["function_views_with_test_design_candidate"], 1)
         self.assertEqual(result["business_function_coverage"]["test_execution_coverage"], "NOT_MEASURED")
 
+    def test_duplicate_endpoint_function_views_do_not_arbitrarily_link_flow_candidate(self):
+        semantics = {"features": [], "entities": [], "endpoints": [], "discrepancies": []}
+        graph = {"business_understanding": {
+            "business_function_views": [
+                {"business_function_id": "bf-photo-list", "endpoint_id": "ep-photos"},
+                {"business_function_id": "bf-photo-search", "endpoint_id": "ep-photos"},
+            ],
+            "endpoint_execution_paths": [{
+                "endpoint_id": "ep-photos", "method": "GET", "endpoint": "/api/photos",
+                "source": {"path": "server/routes.ts", "line": 8},
+                "handler": {"path": "server/photos.ts", "line": 12, "symbol_id": "handler"},
+                "call_chain": [], "database_accesses": [],
+                "authorization": {"evidence": []}, "identity_resource_flow": [],
+                "stage_status": {"handler": "RESOLVED"},
+            }],
+            "frontend_business_chains": [{
+                "source_file": "web/PhotoPage.tsx", "event_line": 4, "event_name": "onClick",
+                "handler_symbol_id": "ui", "endpoint_node_id": "ep-photos",
+                "api_call_node_id": "api-photos", "method": "GET", "path": "/api/photos",
+                "api_call_file": "web/api.ts", "api_call_line": 20,
+                "resolution_status": "EXACT_MATCH",
+            }],
+        }}
+        result = plan_business_tests(semantics, graph)
+        candidate = next(x for x in result["candidates"] if x["category"] == "frontend_backend_flow")
+        self.assertNotIn("business_function_id", candidate)
+        self.assertNotIn("function_coverage_linkage", candidate)
+        self.assertEqual(result["business_function_coverage"]["function_views_with_test_design_candidate"], 0)
+        self.assertTrue(any("multiple business function views" in item for item in result["warnings"]))
+
 if __name__ == "__main__":
     unittest.main()
