@@ -138,3 +138,12 @@ USIT records a bounded set of explicit authorization indicators: route middlewar
 A named permission call is attached to a function only when a call edge on the exact same source path and line yields one unique `caller_symbol_id`. An endpoint receives route-middleware candidates from its route file and function-level guard calls only when the owning function is present in the endpoint's already-resolved bounded call chain. This lets reports compare route/service authorization evidence with downstream database access evidence without inventing links.
 
 Important: `DETECTED` means only that a recognized source pattern was found. `NOT_DETECTED_STATIC_SCAN` is not proof of missing authorization. The current extractor does not prove middleware execution order, complete path coverage, correct deny behavior, authorization on every branch, tenant isolation, or runtime reachability. Dynamic middleware registration, wrappers, decorators, custom frameworks, and complex role/ownership conditions may be missed. No vulnerability is confirmed by absence alone.
+
+
+## S2.12 — API 契约到功能测试候选（partial）
+
+测试规划器现在消费 S2.11 的精确 API 契约对照结果：`EXACT_MATCH` 生成 API 契约核验候选；`DOCUMENTED_NOT_FOUND_IN_CODE` 与 `CODE_ENDPOINT_NOT_DOCUMENTED` 生成接口/文档复核候选；`MULTIPLE_CODE_MATCHES` 生成多路由歧义复核候选。未匹配和多匹配均不是缺陷结论。
+
+当调用方同时提供业务知识图谱时，只有唯一精确 method/path 对应的 endpoint execution path 才会附加到测试候选；候选可携带 route、resolved handler、bounded call-chain、database access、authorization 与 identity/resource 的现有证据引用。所有引用仍为 `STATIC_INFERENCE`，候选仍为 `CANDIDATE_NEEDS_REQUIREMENTS` / `NOT_EXECUTED`。
+
+本阶段不生成未由需求定义的请求体、参数、HTTP 状态码、响应结构或业务预期；运行时请求、构建、数据库操作和项目修改均未执行。图谱缺少或无法唯一关联时保留证据缺口，不按路径/名称猜测。
