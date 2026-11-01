@@ -257,6 +257,25 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(len(api_call_edges), 1)
         self.assertEqual(api_call_edges[0].get("route_path"), "/api/photos")
 
+    def test_jsx_handler_dynamic_fetch_url_remains_unknown_and_unlinked(self):
+        (self.root / "PhotoPage.tsx").write_text(
+            "export function PhotoPage() { return <button onClick={loadPhotos}>Load</button>; }\n"
+            "export function loadPhotos(id: string) { return fetch('/api/photos/' + id); }\n",
+            encoding="utf-8")
+        out = self.root.parent / "jsx-dynamic-api-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"features": [], "entities": [], "endpoints": [{
+            "method": "GET", "path": "/api/photos/:id", "source": "routes.ts:1", "line": 1,
+            "handler_reference": "getPhoto"}]})
+        summary = projected["business_understanding"]
+        self.assertEqual(summary["frontend_api_endpoint_link_count"], 1)
+        link = summary["frontend_api_endpoint_links"][0]
+        self.assertEqual(link["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+        self.assertIsNone(link["path"])
+        self.assertEqual(summary["frontend_business_chain_count"], 0)
+
     def test_jsx_inline_callback_is_not_misreported_as_resolved_symbol(self):
         (self.root / "Inline.tsx").write_text(
             "export function Page() { return <button onClick={() => save()}>Save</button>; }\n", encoding="utf-8")
