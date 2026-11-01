@@ -274,6 +274,7 @@ class AndroidProjectAdapter:
             self._count_entry(sub)
             if sub.is_dir():
                 cand = sub / "src" / "main" / MANIFEST_NAME
+                self._validate_project_path(cand)
                 if cand.is_file():
                     candidates.append(cand)
         for c in candidates:
@@ -310,7 +311,7 @@ class AndroidProjectAdapter:
             raise AdapterBlocked("INVALID_MODULE_PATH", "Gradle module path must start with ':'.")
         parts = gradle_path[1:].split(":")
         if (not parts or any(not part or part in (".", "..") or
-                             "/" in part or "\\\\" in part or "\x00" in part
+                             "/" in part or chr(92) in part or "\x00" in part
                              for part in parts)):
             raise AdapterBlocked("INVALID_MODULE_PATH", f"Unsafe Gradle module path refused: {gradle_path!r}")
         candidate = self.root.joinpath(*parts)
