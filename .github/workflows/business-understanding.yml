@@ -18,7 +18,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run business semantics, graph-projection and test-planner tests
-        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_business_graph -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the pinned local TypeScript parser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run business understanding and call-ownership tests
+        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_business_graph tests.test_python_resolver -v
       - name: Run USIT self-test
         run: python -m usit selftest
