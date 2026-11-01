@@ -252,3 +252,21 @@ python -m usit verify-evidence --graph .\\business_knowledge_graph.json --test-r
 ```
 
 Omit either optional result input when that evidence is unavailable. Missing evidence remains `NOT_MEASURED`. A zero-conflict report is not a certification: test pass does not prove requirement completeness or business correctness; line coverage does not prove assertion quality, branch coverage, authorization correctness or end-to-end behavior. Static business-function views remain `STATIC_INFERENCE` / `NOT_VERIFIED`.
+
+
+## S2.18 — 需求追溯与验证缺口清单
+
+`analyze-gaps` creates a prioritized, reviewable backlog from business semantics, the business graph, optional test-design candidates and optional runtime evidence matrix. It reports:
+- PRD feature → business-function traceability gaps when no reviewed explicit mapping exists.
+- Documented API contracts not found in the scanned code, undocumented code endpoints and ambiguous route matches.
+- Business functions with no linked test design, no runtime test evidence, observed test failures, missing/unknown coverage, partial coverage or evidence conflicts.
+
+The analyzer consumes only explicit `business_function_id` associations. It does not infer a feature-to-endpoint link from names or module similarity. Every entry is `REVIEW_REQUIRED` and `defect_confirmed=false`; a missing static match is not a defect verdict.
+
+Example:
+
+```powershell
+python -m usit analyze-gaps --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --out .\\verification-gap-backlog.json
+```
+
+The test plan and evidence matrix are optional. The output records SHA-256 hashes of every supplied input. P0/P1/P2 are triage priorities, not severity determinations. Requirements and acceptance criteria still require owner review.
