@@ -488,3 +488,37 @@ val tapEvent = UsitEventEmitter.uiAction(
 ```
 
 示例只定义采集端接口，不代表已在某个真实 Android 项目编译或运行。将受控 logcat 导出为 UTF-8 文件后，交给前述 `adapt-android-events` 离线转换。CI 当前验证 Python 适配器与证据链，不会伪称已验证 Android SDK 编译、设备兼容性或真实页面操作。
+
+## S2.25 — Multi-model task orchestration
+
+USIT now supports explicit role-based parallel calls to local Agent2API models. The registry schema is `usit-ai-model-registry-v1`; task roles are manually assigned and are never inferred from model names or provider metadata.
+
+### Initialize and configure a local model registry
+
+```powershell
+python -m usit ai-init-registry --out .\\usit-models.local.json
+```
+
+Edit the generated JSON and replace the placeholder model ID with exact IDs returned by `python -m usit ai-models`. Set `enabled` to `true` only after manually verifying that model. Assign one or more roles:
+- `architecture_analysis`
+- `defect_analysis`
+- `test_design`
+- `independent_review`
+- `general_analysis`
+
+The template disables the placeholder model by default. The registry is local configuration and should not be committed with personal credentials.
+
+### Run an explicit multi-model task
+
+```powershell
+python -m usit ai-ensemble --config .\\usit-models.local.json --task architecture --prompt "分析以下已脱敏的软件架构材料，区分证据、推断和未知项：……" --max-models 3 --out .\\architecture-ensemble.json
+```
+
+Supported tasks: `architecture`, `defect`, `test_design`, `review`, `general`. Only enabled models explicitly assigned the corresponding role are selected. Up to eight models may be configured; each invocation is bounded by timeout, token and prompt-size limits. Model calls run concurrently, while output ordering follows registry order for reproducibility.
+
+The result distinguishes `SUCCEEDED`, `PARTIAL` and `FAILED`, retains each model's independent answer and usage metadata, and does not merge disagreement into a fabricated consensus. Gateway exception text and credentials are not copied into result records. Optional output files are new files only; existing paths and symlinks are rejected.
+
+### Important evidence boundary
+
+This stage executes model inference only. It does not read project files, run builds/tests, change source code, or prove model conclusions. Supply only material you have deliberately reviewed and sanitized. Model role assignments are operator assertions, not benchmarked capability claims. A future evidence-fusion stage must compare model claims against source/runtime evidence and preserve disagreements rather than deciding truth by majority vote.
+
