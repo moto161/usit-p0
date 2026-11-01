@@ -19,6 +19,7 @@ from .verification_gap_analyzer import build_verification_gap_backlog
 from .project_quality_assessment import assess_project_quality
 from .project_quality_report import render_project_quality_markdown
 from .business_traceability import build_business_traceability
+from .traceability_template import create_feature_mapping_template
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -227,6 +228,10 @@ def main(argv=None):
     bt.add_argument('--test-plan',help='Optional business_test_plan.json')
     bt.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
     bt.add_argument('--out',required=True,help='New traceability matrix JSON path; existing files are never overwritten')
+    tt=sub.add_parser('init-traceability-template',help='Create an unapproved feature-to-function review template bound to the exact graph hash')
+    tt.add_argument('--semantics',required=True,help='business_semantics.json')
+    tt.add_argument('--graph',required=True,help='business_knowledge_graph.json')
+    tt.add_argument('--out',required=True,help='New mapping template JSON path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
         if a.cmd=='selftest': return selftest()
@@ -276,6 +281,34 @@ def main(argv=None):
             return _inspect_android(a)
         if a.cmd=='plan-business-tests':
             return _plan_business_tests(a)
+        if a.cmd=='init-traceability-template':
+            import hashlib
+            def read_template_input(path, limit):
+                source=Path(path).expanduser()
+                if source.is_symlink(): raise ValueError("input must not be a symbolic link")
+                resolved=source.resolve(strict=True)
+                if not resolved.is_file(): raise ValueError("input must be a regular file")
+                raw=resolved.read_bytes()
+                if len(raw)>limit: raise ValueError("traceability template input exceeds size limit")
+                return raw,json.loads(raw)
+            sem_bytes,sem_doc=read_template_input(a.semantics,20*1024*1024)
+            graph_bytes,graph_doc=read_template_input(a.graph,50*1024*1024)
+            if graph_doc.get("schema_version")!="usit-graph-v1" or not isinstance(graph_doc.get("business_understanding"),dict):
+                raise ValueError("graph must be a business-projected usit-graph-v1 artifact")
+            output=Path(a.out).expanduser()
+            if output.is_symlink(): raise ValueError("output must not be a symbolic link")
+            output=output.resolve()
+            if output.exists(): raise ValueError("mapping template output already exists; choose a new path")
+            graph_hash=hashlib.sha256(graph_bytes).hexdigest()
+            result=create_feature_mapping_template(sem_doc,graph_hash)
+            result["input_hashes"]={"business_semantics_sha256":hashlib.sha256(sem_bytes).hexdigest(),
+                                    "business_graph_sha256":graph_hash}
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+            print(json.dumps({"template_status":result["template_status"],
+                "mapping_count":result["mapping_count"],"source_graph_sha256":graph_hash,
+                "result_path":str(output)},ensure_ascii=False,indent=2))
+            return 0
         if a.cmd=='trace-business':
             import hashlib
             def read_trace_json(path, limit):
