@@ -855,6 +855,88 @@ def project_business_graph(graph: Mapping[str, Any],
         str(item.get("source_file") or ""), int(item.get("line") or 0),
         str(item.get("event_name") or ""), str(item.get("binding_expression") or ""),
     ))
+    # S2.13-B: exact frontend HTTP method/path literal -> documented/code endpoint candidates.
+    endpoint_by_contract: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for endpoint_node in nodes:
+        if endpoint_node.get("business_kind") != "endpoint":
+            continue
+        details = endpoint_node.get("business_details")
+        details = details if isinstance(details, Mapping) else {}
+        method = str(details.get("method") or "").upper()
+        path = str(details.get("path") or "")
+        if method and path:
+            endpoint_by_contract.setdefault((method, path), []).append(endpoint_node)
+    api_endpoint_links = []
+    for edge in edges:
+        if edge.get("method") != "typescript-api-client-call":
+            continue
+        method = str(edge.get("route_method") or "").upper()
+        path = edge.get("route_path")
+        matches = endpoint_by_contract.get((method, path), []) if method and isinstance(path, str) else []
+        evidence = edge.get("evidence") if isinstance(edge.get("evidence"), Mapping) else {}
+        if len(matches) == 1:
+            endpoint = matches[0]
+            api_endpoint_links.append({
+                "api_call_node_id": edge.get("target"), "endpoint_node_id": endpoint.get("id"),
+                "method": method, "path": path, "source_file": evidence.get("path"),
+                "line": evidence.get("line"), "caller_symbol_id": edge.get("caller_symbol_id"),
+                "resolution_status": "EXACT_MATCH", "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+            })
+        else:
+            api_endpoint_links.append({
+                "api_call_node_id": edge.get("target"), "method": method or None, "path": path,
+                "source_file": evidence.get("path"), "line": evidence.get("line"),
+                "caller_symbol_id": edge.get("caller_symbol_id"),
+                "resolution_status": "NO_MATCH" if not matches else "AMBIGUOUS",
+                "candidate_endpoint_ids": sorted(item.get("id") for item in matches),
+                "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+            })
+    # Join UI entrypoints to API endpoints only through resolved call-graph edges.
+    calls_by_caller: dict[str, list[str]] = {}
+    for edge in edges:
+        if edge.get("type") == "calls" and edge.get("resolution_status") == "RESOLVED":
+            caller = edge.get("caller_symbol_id")
+            target = edge.get("target")
+            if isinstance(caller, str) and isinstance(target, str):
+                calls_by_caller.setdefault(caller, []).append(target)
+    api_links_by_caller: dict[str, list[dict[str, Any]]] = {}
+    for item in api_endpoint_links:
+        caller = item.get("caller_symbol_id")
+        if isinstance(caller, str):
+            api_links_by_caller.setdefault(caller, []).append(item)
+    frontend_business_chains = []
+    for binding in frontend_interaction_bindings:
+        start = binding.get("handler_symbol_id")
+        if binding.get("resolution_status") != "RESOLVED" or not isinstance(start, str):
+            continue
+        queue = [(start, 0)]
+        visited = set()
+        found = []
+        while queue and len(visited) < 100:
+            symbol_id, depth = queue.pop(0)
+            if symbol_id in visited or depth > 8:
+                continue
+            visited.add(symbol_id)
+            found.extend(api_links_by_caller.get(symbol_id, []))
+            if depth < 8:
+                queue.extend((target, depth + 1) for target in sorted(calls_by_caller.get(symbol_id, [])))
+        for link in found:
+            frontend_business_chains.append({
+                "source_file": binding.get("source_file"), "event_line": binding.get("line"),
+                "event_name": binding.get("event_name"), "handler_symbol_id": start,
+                "endpoint_node_id": link.get("endpoint_node_id"),
+                "api_call_node_id": link.get("api_call_node_id"), "method": link.get("method"),
+                "path": link.get("path"), "api_call_file": link.get("source_file"),
+                "api_call_line": link.get("line"), "resolution_status": link.get("resolution_status"),
+                "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+                "call_graph_depth_limit": 8,
+            })
+    frontend_business_chains.sort(key=lambda item: (
+        str(item.get("source_file") or ""), int(item.get("event_line") or 0),
+        str(item.get("api_call_file") or ""), int(item.get("api_call_line") or 0),
+        str(item.get("method") or ""), str(item.get("path") or ""),
+    ))
     endpoint_execution_paths = _build_endpoint_execution_paths(nodes)
     endpoint_contract_alignment = semantics.get("endpoint_contract_alignment", [])
     if not isinstance(endpoint_contract_alignment, list):
@@ -864,6 +946,10 @@ def project_business_graph(graph: Mapping[str, Any],
     result["business_understanding"] = {
         "frontend_interaction_bindings": frontend_interaction_bindings,
         "frontend_interaction_binding_count": len(frontend_interaction_bindings),
+        "frontend_api_endpoint_links": api_endpoint_links,
+        "frontend_api_endpoint_link_count": len(api_endpoint_links),
+        "frontend_business_chains": frontend_business_chains,
+        "frontend_business_chain_count": len(frontend_business_chains),
         "endpoint_execution_paths": endpoint_execution_paths,
         "endpoint_execution_path_count": len(endpoint_execution_paths),
         "endpoint_contract_alignment_count": len(endpoint_contract_alignment),
