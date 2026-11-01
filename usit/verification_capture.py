@@ -214,41 +214,49 @@ def _snapshot(root: Path, relative_paths: Sequence[str]) -> tuple[list[dict[str,
 
 
 def _terminate_process_tree(process: subprocess.Popen) -> int:
-    """Terminate the command and descendants created in its isolated process group."""
+    """Terminate the command and make a best-effort kill of its process tree."""
     if os.name == "nt":
+        # CREATE_NEW_PROCESS_GROUP permits a cooperative CTRL_BREAK first.
+        # Do not wait for the root process before taskkill: the root may exit
+        # on CTRL_BREAK while a child keeps the inherited pipes open.
         try:
             process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
         except (OSError, ValueError):
+            pass
+        try:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, shell=False, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
             try:
-                process.terminate()
+                process.kill()
             except OSError:
                 pass
         try:
-            return process.wait(timeout=1.0)
+            return process.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             try:
-                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, shell=False, timeout=5, check=False)
-            except (OSError, subprocess.SubprocessError):
-                try:
-                    process.kill()
-                except OSError:
-                    pass
+                process.kill()
+            except OSError:
+                pass
             return process.wait()
+
+    # A root process can exit before a descendant. Always escalate against the
+    # original process group after the grace period, even when wait() has
+    # already reaped the root; checking only the root's return code is unsafe.
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
     try:
-        return process.wait(timeout=1.0)
+        process.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        return process.wait()
-
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return process.wait()
 
 def _drain_bounded(stream, sink, label: str, lock: threading.Lock, state: dict[str, int],
                    limit_event: threading.Event, reader_errors: list[str]) -> None:
