@@ -50,8 +50,7 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             f"- 运行时测试：{_cell(stages.get('test_execution') if isinstance(stages, dict) else 'UNKNOWN')}",
             f"- 运行时事件观察：{_cell(observation.get('status') or (stages.get('runtime_observation') if isinstance(stages, dict) else 'NOT_MEASURED'))}",
             f"- 运行时关联 ID：{_cell(', '.join(map(str, correlation_ids)) if correlation_ids else '无')}",
-            f"- 代码覆盖：{_cell(stages.get('code_coverage') if isinstance(stages, dict) else 'UNKNOWN')}",
-            "- 证据引用："])
+            f"- 代码覆盖：{_cell(stages.get('code_coverage') if isinstance(stages, dict) else 'UNKNOWN')}"])
         runtime_evidence = row.get("runtime_evidence")
         runtime_evidence = runtime_evidence if isinstance(runtime_evidence, dict) else {}
         execution_detail = runtime_evidence.get("test_execution_detail")
@@ -72,6 +71,7 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                 lines.append("- 映射但未出现在报告中的 testcase：")
                 for case_id in missing_cases:
                     lines.append(f"  - {_cell(case_id)}")
+        lines.append("- 证据引用：")
         refs = row.get("evidence_refs", [])
         if refs:
             for ref in refs:
