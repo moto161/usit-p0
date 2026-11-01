@@ -55,3 +55,14 @@
 - Run the checked-in independent fixtures with `python -m usit benchmark-fixtures --out C:\\USIT-Reports\\fixture-results.json`. The command is static only, never imports or executes fixture code, and refuses to overwrite an existing result.
 - Scan reports distinguish test assets (`test_execution_status=NOT_RUN`) from static associations and coverage evidence (`UNKNOWN`).
 - Check test-to-symbol evidence invalidation with `python -m usit benchmark-associations --out C:\\USIT-Reports\\association-results.json`; the command only mutates disposable synthetic fixtures and rejects overwriting an existing result.
+
+
+## Business understanding → test-candidate planning
+
+Run the static business-understanding pass and generate evidence-linked test candidates:
+
+```powershell
+python -m usit plan-business-tests "C:\\path\\to\\your-project" --out "C:\\USIT-Reports\\business-001" --authorization-file "C:\\USIT-Reports\\auth-business-001.json"
+```
+
+The command writes `business_semantics.json` and `business_test_plan.json` to a new output directory outside the target project. It reuses the explicit static-read-only authorization gate. Candidates are derived from discovered PRD features, API endpoints, documented data entities and static discrepancies; each candidate retains source evidence, preconditions, steps, limitations and an explicit `NOT_EXECUTED` status. The planner does not invent acceptance criteria or expected HTTP status codes: candidates remain `CANDIDATE_NEEDS_REQUIREMENTS` until the owner supplies verifiable requirements. No project code, build, test, database, device or network operation is executed.
