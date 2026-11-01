@@ -129,10 +129,13 @@ def _plan_business_tests(a) -> int:
         json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     if business_graph is not None:
-        (out / "business_knowledge_graph.json").write_text(
-            json.dumps(business_graph, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        import hashlib
+        business_graph_bytes = (
+            json.dumps(business_graph, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        if security_plan is not None:
+            security_plan["source_business_graph_sha256"] = hashlib.sha256(business_graph_bytes).hexdigest()
+        (out / "business_knowledge_graph.json").write_bytes(business_graph_bytes)
     if security_plan is not None:
         (out / "security_test_candidates.json").write_text(
             json.dumps(security_plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
