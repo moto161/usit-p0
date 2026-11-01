@@ -140,6 +140,8 @@ def validate_claim_ledger(ledger: Any) -> None:
         refs = row.get("evidence_refs", [])
         if not isinstance(refs, list) or any(not isinstance(x, str) or not x.strip() for x in refs):
             raise ValueError(f"{claim_id}.review evidence_refs must be a list of non-empty strings")
+        if len(refs) != len(set(refs)):
+            raise ValueError(f"{claim_id}.review evidence_refs must not contain duplicates")
 
 
 def review_claim_ledger(ledger: dict[str, Any], ledger_sha256: str | None = None) -> dict[str, Any]:
@@ -241,7 +243,12 @@ def review_claim_ledger(ledger: dict[str, Any], ledger_sha256: str | None = None
         "input_sha256": ledger_sha256,
         "claim_count": len(reviewed_claims),
         "comparison_group_count": len(group_results),
-        "reviewed_claim_count": sum(row["review_status"] != "REVIEW_REQUIRED" for row in reviewed_claims),
+        "reviewed_claim_count": sum(
+            row["review_attestation"] is not None
+            and not row["review_attestation"]["unknown_evidence_refs"]
+            and not row["unknown_evidence_refs"]
+            for row in reviewed_claims
+        ),
         "review_required_count": sum(row["review_status"].startswith("REVIEW_REQUIRED") for row in reviewed_claims),
         "unknown_evidence_reference_count": sum(
             len(row["unknown_evidence_refs"]) +
