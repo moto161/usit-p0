@@ -462,8 +462,6 @@ def main(argv=None):
             result=ingest_coverage_results(a.coverage,a.mapping,a.graph,a.format)
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding="utf-8")
-            if markdown_output is not None:
-                markdown_output.parent.mkdir(parents=True,exist_ok=True)
             summary={key:result[key] for key in ("schema_version","source_format","business_function_count","coverage_status_counts")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
