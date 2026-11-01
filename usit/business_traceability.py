@@ -17,6 +17,7 @@ def build_business_traceability(
     test_plan: dict[str, Any] | None = None,
     evidence_matrix: dict[str, Any] | None = None,
     input_hashes: dict[str, str] | None = None,
+    runtime_evidence_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(semantics, dict) or not isinstance(semantics.get("features", []), list):
         raise ValueError("semantics.features must be a list")
@@ -39,6 +40,16 @@ def build_business_traceability(
         raise ValueError("evidence matrix must use usit-business-evidence-verification-v1")
     if evidence_matrix is not None and evidence_matrix.get("business_graph_sha256") not in {None, graph_hash}:
         raise ValueError("evidence matrix business_graph_sha256 does not match the supplied graph bytes")
+    if runtime_evidence_validation is not None:
+        if not isinstance(runtime_evidence_validation, dict) or runtime_evidence_validation.get("schema_version") != "usit-runtime-evidence-validation-v1":
+            raise ValueError("runtime evidence validation must use usit-runtime-evidence-validation-v1")
+        runtime_hashes = runtime_evidence_validation.get("source_hashes")
+        if not isinstance(runtime_hashes, dict) or runtime_hashes.get("business_graph_sha256") != graph_hash:
+            raise ValueError("runtime evidence business_graph_sha256 does not match the supplied graph bytes")
+        if not isinstance(runtime_evidence_validation.get("business_function_ids_observed"), list):
+            raise ValueError("runtime evidence validation is missing business_function_ids_observed")
+        if not isinstance(runtime_evidence_validation.get("correlations"), list):
+            raise ValueError("runtime evidence validation is missing correlations")
 
     features = [item for item in semantics["features"] if isinstance(item, dict) and isinstance(item.get("name"), str)]
     feature_index: dict[tuple[str, str, int | None], dict[str, Any]] = {}
@@ -106,6 +117,15 @@ def build_business_traceability(
     rows = evidence_matrix.get("business_function_evidence", []) if evidence_matrix else []
     if not isinstance(rows, list):
         raise ValueError("evidence_matrix.business_function_evidence must be a list")
+    runtime_observed_ids = set(runtime_evidence_validation.get("business_function_ids_observed", [])) if runtime_evidence_validation else set()
+    runtime_correlations_by_function: dict[str, list[str]] = {}
+    if runtime_evidence_validation:
+        for correlation in runtime_evidence_validation["correlations"]:
+            if not isinstance(correlation, dict) or not isinstance(correlation.get("correlation_id"), str):
+                raise ValueError("runtime evidence validation contains malformed correlation")
+            for observed_id in correlation.get("business_function_ids", []):
+                runtime_correlations_by_function.setdefault(observed_id, []).append(correlation["correlation_id"])
+    runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT")
     runtime_by_function: dict[str, dict[str, Any]] = {}
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("business_function_id"), str):
@@ -139,6 +159,7 @@ def build_business_traceability(
         runtime = runtime_by_function.get(fid) if view else None
         runtime_status = runtime.get("test_execution_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
         coverage_status = runtime.get("code_coverage_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
+        runtime_observation_status = ("EVIDENCE_CONFLICT" if runtime_global_conflict else "RUNTIME_OBSERVED") if fid in runtime_observed_ids else ("NOT_OBSERVED" if runtime_evidence_validation else "NOT_MEASURED")
         valid_runtime_statuses = {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"}
         valid_coverage_statuses = {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}
         if runtime_status not in valid_runtime_statuses:
@@ -157,6 +178,7 @@ def build_business_traceability(
             "test_design": "CANDIDATE_LINKED" if candidate_items else ("NO_LINKED_TEST_CANDIDATE" if view else "NOT_AVAILABLE"),
             "test_execution": runtime_status,
             "code_coverage": coverage_status,
+            "runtime_observation": runtime_observation_status,
         }
         row_status = "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} else (
             "TRACEABLE_TO_STATIC_FUNCTION_VIEW" if view else linkage)
@@ -196,6 +218,10 @@ def build_business_traceability(
             "endpoint": {"method": view.get("method"), "path": view.get("endpoint")} if view else None,
             "test_candidate_ids": sorted(str(item.get("test_id")) for item in candidate_items if item.get("test_id") is not None),
             "runtime_evidence": runtime,
+            "runtime_observation": {
+                "status": runtime_observation_status,
+                "correlation_ids": sorted(set(runtime_correlations_by_function.get(fid, []))) if fid else [],
+            } if runtime_evidence_validation else None,
             "evidence_refs": refs,
             "review": {key: mapping.get(key) for key in ("reviewed_by", "reviewed_at", "rationale")} if mapping else None,
             "confidence": "STATIC_INFERENCE" if view else "UNKNOWN",
@@ -221,7 +247,8 @@ def build_business_traceability(
         "limitations": [
             "只有 mapping manifest 中逐项审阅并批准的精确 feature source/name → business_function_id 才建立需求追溯；不按名称、模块、目录或相邻代码猜测。",
             "静态 UI → API → endpoint → handler/call/DB/authorization/identity 关联不证明运行时页面可达、代码执行或业务正确。",
-            "测试候选表示测试设计，不表示执行；运行时状态仅来自导入的测试证据。",
+            "测试候选表示测试设计，不表示执行；测试执行状态仅来自测试报告导入。运行时事件观察单独记录为 RUNTIME_OBSERVED，不等于测试通过。",
+            "运行时事件按显式 business_function_id 和 correlation_id 关联；无显式关联的事件不会映射到需求功能。",
             "代码覆盖和权限/身份阶段状态仅表示输入工件中的证据状态，不证明安全性或业务正确性。",
             "映射 manifest 绑定精确 graph SHA-256；图谱变化后必须重新审阅或重新生成映射，旧映射不会自动迁移。",
             "reviewed_by/reviewed_at/rationale 是审阅者提供的审计元数据，不构成身份认证或电子签名。",
