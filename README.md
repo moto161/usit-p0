@@ -173,3 +173,27 @@ TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调
 新增 endpoint-centred `business_function_views`，将可证据关联的前端入口、后端 Handler/调用链、数据库访问、已文档化实体关联、授权及身份/资源线索汇总为可审计功能切片。PRD feature 与 endpoint 没有显式关系证据时，标记 `NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION`，不按名称或模块猜测。
 
 测试规划器将已生成的 `frontend_backend_flow` 候选关联到对应功能视图，分别报告测试设计关联与执行覆盖：`TEST_DESIGN_CANDIDATE_LINKED` 不代表测试执行，`test_execution_coverage` 固定为 `NOT_MEASURED`。尚未接入真实测试运行结果、覆盖率报告或需求追踪矩阵。
+
+
+## S2.15 — JUnit 测试结果回流（显式映射）
+
+新增 `ingest-test-results` 命令，导入已经完成的 JUnit XML 测试报告，并通过人工审阅的映射 JSON 将精确 testcase ID 关联到 `business_function_id`。命令不执行测试、不访问目标项目、不推断功能关联。
+
+映射格式：
+
+```json
+{
+  "schema_version": "usit-test-result-mapping-v1",
+  "mappings": [
+    {"test_case_id": "tests.PhotoTests::test_upload", "business_function_id": "bf-<graph中的真实ID>"}
+  ]
+}
+```
+
+调用示例：
+
+```bash
+python -m usit ingest-test-results --junit junit.xml --mapping reviewed-test-map.json --graph business_knowledge_graph.json --out test_execution_results.json
+```
+
+功能状态规则：有失败/错误为 `FAILED`；全部映射用例通过为 `PASSED`；存在跳过且没有失败为 `UNKNOWN`；没有匹配执行记录为 `NOT_EXECUTED`。未映射用例、映射但报告中缺失的用例、输入 SHA-256 均保留。JUnit 通过不等于需求完整实现；代码覆盖率仍为 `NOT_MEASURED`。当前版本仅支持 JUnit XML，其他测试报告格式和覆盖率报告尚未接入。
