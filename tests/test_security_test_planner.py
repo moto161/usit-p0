@@ -90,6 +90,37 @@ class SecurityTestPlannerTests(unittest.TestCase):
         self.assertTrue(all("不证明存在绕过" in " ".join(item["limitations"])
                             for item in alternate))
 
+    def test_request_controlled_identity_binding_generates_review_candidate(self):
+        item = endpoint()
+        item["handler_association"]["identity_dataflow_evidence"] = [{
+            "identity_evidence_id": "identity-request",
+            "kind": "direct_request_identity_to_sql_owner_binding",
+            "path": "repo/photos.js", "line": 44,
+            "scope": "SAME_LINE_PATTERN",
+            "details": {"request_expressions": ["req.body.user_id"]},
+        }]
+        result = plan_security_tests({"nodes": [item]})
+        candidate = next(x for x in result["candidates"]
+                         if x["category"] == "security_request_identity_owner_binding")
+        self.assertEqual(candidate["execution_status"], "NOT_EXECUTED")
+        self.assertIn("不是 IDOR 或漏洞结论", " ".join(candidate["limitations"]))
+        self.assertEqual(candidate["identity_dataflow_evidence"][0]["identity_evidence_id"],
+                         "identity-request")
+
+    def test_trusted_identity_binding_generates_verification_candidate_not_proof(self):
+        item = endpoint()
+        item["handler_association"]["identity_dataflow_evidence"] = [{
+            "identity_evidence_id": "identity-trusted",
+            "kind": "direct_authenticated_identity_to_sql_owner_binding",
+            "path": "repo/photos.js", "line": 44,
+            "scope": "SAME_LINE_PATTERN",
+            "details": {"identity_expressions": ["req.user.id"]},
+        }]
+        result = plan_security_tests({"nodes": [item]})
+        candidate = next(x for x in result["candidates"]
+                         if x["category"] == "security_authenticated_identity_owner_binding")
+        self.assertIn("不证明对象可信", " ".join(candidate["limitations"]))
+
     def test_deterministic_and_empty_graph(self):
         graph = {"nodes": [endpoint()]}
         self.assertEqual(plan_security_tests(graph), plan_security_tests(graph))
