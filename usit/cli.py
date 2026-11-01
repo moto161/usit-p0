@@ -27,6 +27,7 @@ from .ai_gateway import Agent2APIClient, DEFAULT_BASE_URL, DEFAULT_API_KEY_ENV
 from .ai_orchestrator import load_model_registry, run_ensemble, registry_template
 from .ai_claim_review import review_claim_ledger_file
 from .ai_evidence_binding import verify_evidence_bindings_file
+from .scan_attestation import load_trusted_public_key, public_key_id, verify_scan_attestation
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -278,12 +279,45 @@ def main(argv=None):
     acr=sub.add_parser('review-ai-claims',help='Compare explicit model claims against a reference catalog; never promotes claims to facts')
     acr.add_argument('--input',required=True,help='Structured usit-ai-claim-ledger-v1 JSON; free-text model output is not parsed automatically')
     acr.add_argument('--out',required=True,help='New review JSON path; existing files are never overwritten')
+    avs=sub.add_parser('verify-scan-attestation',help='Verify detached scan manifest signature against independently provisioned Ed25519 public keys')
+    avs.add_argument('--manifest',required=True,help='Exact scan manifest file')
+    avs.add_argument('--attestation',required=True,help='Detached scan_attestation.json sidecar')
+    avs.add_argument('--trusted-public-key',action='append',required=True,help='External raw or PEM Ed25519 public key; repeat for multiple trusted keys')
+    avs.add_argument('--expected-snapshot-id',help='Optional caller-supplied anti-substitution policy; not a freshness timestamp')
+    avs.add_argument('--out',required=True,help='New JSON verification report path; existing files are never overwritten')
     aev=sub.add_parser('verify-evidence-bindings',help='Verify AI evidence catalog references against exact local artifact bytes; never promotes claims to facts')
     aev.add_argument('--input',required=True,help='Structured usit-ai-claim-ledger-v1 JSON')
     aev.add_argument('--evidence-root',required=True,help='Directory containing the referenced local evidence artifacts')
     aev.add_argument('--out',required=True,help='New JSON binding report path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
+        if a.cmd=='verify-scan-attestation':
+            manifest_path=Path(a.manifest).expanduser()
+            attestation_path=Path(a.attestation).expanduser()
+            if manifest_path.is_symlink() or attestation_path.is_symlink():
+                raise ValueError('manifest and attestation paths must not be symbolic links')
+            manifest=manifest_path.resolve(strict=True)
+            attestation=attestation_path.resolve(strict=True)
+            if not manifest.is_file() or not attestation.is_file():
+                raise ValueError('manifest and attestation must be regular files')
+            if manifest.stat().st_size > 50*1024*1024 or attestation.stat().st_size > 64*1024:
+                raise ValueError('manifest or attestation exceeds the supported size limit')
+            trust={}
+            for key_path in a.trusted_public_key:
+                raw_key=load_trusted_public_key(key_path)
+                trust[public_key_id(raw_key)]=raw_key
+            result=verify_scan_attestation(manifest.read_bytes(),attestation.read_bytes(),trust,
+                expected_snapshot_id=a.expected_snapshot_id)
+            output=Path(a.out).expanduser()
+            if output.is_symlink() or output.exists():
+                raise ValueError('attestation report already exists or is a symbolic link; refusing to overwrite')
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+            print(json.dumps({'result_path':str(output.resolve()),'status':result['status'],
+                'key_id':result['key_id'],'snapshot_id':result['snapshot_id'],
+                'signature_valid':result['signature_valid'],'trusted_key':result['trusted_key'],
+                'freshness':result['freshness']},ensure_ascii=False,indent=2))
+            return 0 if result['status']=='ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY' else 2
         if a.cmd=='verify-evidence-bindings':
             result=verify_evidence_bindings_file(a.input,a.evidence_root)
             output=Path(a.out).expanduser()
