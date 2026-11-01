@@ -294,6 +294,7 @@ def main(argv=None):
             print(json.dumps({'result_path':str(output.resolve()),'schema':result['schema'],
                 'evidence_count':result['evidence_count'],'binding_status_counts':result['binding_status_counts'],
                 'claim_count':result['claim_count'],'claim_binding_status_counts':result['claim_binding_status_counts'],
+                'snapshot_binding_status_counts':result['snapshot_binding_status_counts'],
                 'overall_truth_status':result['overall_truth_status']},ensure_ascii=False,indent=2))
             return 0 if all(x['binding_status']=='ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED' for x in result['claims']) else 2
         if a.cmd=='review-ai-claims':
