@@ -157,5 +157,28 @@ class BusinessTestPlannerTests(unittest.TestCase):
             plan_business_tests([])
 
 
+    def test_s214_function_view_links_design_candidate_without_claiming_execution(self):
+        semantics = {"features": [], "entities": [], "endpoints": [], "discrepancies": []}
+        graph = {"business_understanding": {
+            "business_function_views": [{"business_function_id": "bf-1", "endpoint_id": "ep-1"}],
+            "endpoint_execution_paths": [{
+                "endpoint_id": "ep-1", "method": "GET", "endpoint": "/api/photos",
+                "source": {"path": "server/routes.ts", "line": 8},
+                "handler": {"path": "server/photos.ts", "line": 12, "symbol_id": "handler"},
+                "call_chain": [], "database_accesses": [], "authorization": {"evidence": []},
+                "identity_resource_flow": [], "stage_status": {"handler": "RESOLVED"}}],
+            "frontend_business_chains": [{
+                "source_file": "web/PhotoPage.tsx", "event_line": 4, "event_name": "onClick",
+                "handler_symbol_id": "ui", "endpoint_node_id": "ep-1", "api_call_node_id": "api-1",
+                "method": "GET", "path": "/api/photos", "api_call_file": "web/api.ts",
+                "api_call_line": 20, "resolution_status": "EXACT_MATCH"}]}}
+        result = plan_business_tests(semantics, graph)
+        candidate = next(x for x in result["candidates"] if x["category"] == "frontend_backend_flow")
+        self.assertEqual(candidate["business_function_id"], "bf-1")
+        self.assertEqual(candidate["function_coverage_linkage"], "TEST_DESIGN_CANDIDATE_LINKED")
+        self.assertEqual(candidate["test_execution_coverage"], "NOT_MEASURED")
+        self.assertEqual(result["business_function_coverage"]["function_views_with_test_design_candidate"], 1)
+        self.assertEqual(result["business_function_coverage"]["test_execution_coverage"], "NOT_MEASURED")
+
 if __name__ == "__main__":
     unittest.main()
