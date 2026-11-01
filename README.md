@@ -103,6 +103,14 @@ When projecting into `business_knowledge_graph.json`, USIT associates a database
 Dynamic SQL, concatenation, multiline SQL, CTE/UNION statements, unsupported SQL forms, missing/ambiguous caller ownership, and undocumented tables are not guessed. This slice does not prove runtime execution, actual read/write effects, transaction commit, parameter values, field-level data flow, ORM model-to-table mapping, or authorization enforcement. All database links remain candidate/unverified static evidence.
 
 
+## S2.8 — Authorization-gap analysis → security test candidates (partial)
+
+When `plan-business-tests` receives an existing `knowledge_graph.json` through `--graph`, USIT now also emits `security_test_candidates.json`. The planner reuses endpoint handler associations, bounded call-chain evidence, reachable authorization indicators and function-owned SQL access evidence. Candidate categories include unauthenticated boundary verification, role-boundary verification, cross-user resource isolation, owner/user ID parameter-tampering checks, and alternate-entrypoint authorization review where two endpoints share the same statically linked database-access record but expose different authorization-signal statuses.
+
+Every candidate carries endpoint/source references, available call-chain/auth/database evidence, preconditions, steps, limitations, `STATIC_INFERENCE`, `CANDIDATE_NEEDS_REQUIREMENTS` and `NOT_EXECUTED`. Missing authorization signals never become a vulnerability finding. Owner/IDOR candidates require recognized owner-like columns in the linked SQL evidence; role candidates require a recognized role/admin/permission guard name plus sensitive read/write evidence; alternate-entrypoint candidates require shared database-access identity and differing static authorization statuses.
+
+This is deliberately a test-design aid, not a vulnerability scanner verdict. SQL column names do not prove request parameters or authorization semantics; guard names do not prove correct enforcement; shared static database evidence does not prove a bypass. Requirements, account/role matrix, test data, runtime behavior and deny outcomes remain unverified. The command performs no HTTP requests, builds, tests, database access or project modifications. Security candidates are emitted only when `--graph` is supplied.
+
 ## S2.7 — Authorization evidence along endpoint-to-database paths (partial)
 
 USIT records a bounded set of explicit authorization indicators: route middleware registrations (`router.use` and common route methods), named guard/permission calls (for example `authRequired`, `adminRequired`, `requirePermission`, `canAccess`), and simple role/owner comparisons. Each item retains source path/line and remains `STATIC_INFERENCE` / `NOT_VERIFIED`.
