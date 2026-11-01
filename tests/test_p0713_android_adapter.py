@@ -328,6 +328,21 @@ class PathSafetyTests(unittest.TestCase):
             adapter_obj._detect_root_signals(adapter.AndroidProjectProfile())
         self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
 
+    def test_fallback_module_build_symlink_is_rejected_before_stat_probe(self):
+        p = _SyntheticAndroidProject(self)
+        app = p.root / "app"
+        app.mkdir()
+        outside = p.base / "outside-build.gradle"
+        outside.write_text("android {}\n", encoding="utf-8")
+        link = app / "build.gradle"
+        if not _make_symlink(link, outside):
+            CAPABILITY_LOG["android_module_build_symlink"] = "NOT TESTED - OS denied symlink creation"
+            self.skipTest("OS denied symlink creation")
+        adapter_obj = AndroidProjectAdapter(p.root)
+        with self.assertRaises(AdapterBlocked) as blocked:
+            adapter_obj._discover_modules([])
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
+
     def test_symlinked_project_root_is_rejected(self):
         p = _SyntheticAndroidProject(self)
         real = p.base / "real"
