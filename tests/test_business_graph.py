@@ -257,6 +257,83 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(evidence[0]["tables"], ["photos"])
         self.assertEqual(evidence[0]["verification_status"], "NOT_VERIFIED")
 
+    def test_authorization_evidence_follows_endpoint_to_service_and_repository_path(self):
+        source = graph()
+        source["nodes"].extend([
+            {"id": "file:server/services/photo_service.py", "type": "file",
+             "label": "server/services/photo_service.py",
+             "evidence": {"path": "server/services/photo_service.py"}},
+            {"id": "file:server/repos/photo_repo.py", "type": "file",
+             "label": "server/repos/photo_repo.py",
+             "evidence": {"path": "server/repos/photo_repo.py"}},
+            {"id": "external:auth.requirePermission", "type": "external",
+             "label": "requirePermission"},
+            {"id": "external:repo.load", "type": "external", "label": "load"},
+        ])
+        handler = "symbol:server/routes/photos.js#listPhotos:10"
+        service = "symbol:server/services/photo_service.py#listPhotos:4"
+        repository = "symbol:server/repos/photo_repo.py#load:4"
+        source["nodes"].extend([
+            {"id": handler, "type": "function", "label": "listPhotos",
+             "evidence": {"path": "server/routes/photos.js", "line": 10}},
+            {"id": service, "type": "function", "label": "listPhotos",
+             "evidence": {"path": "server/services/photo_service.py", "line": 4}},
+            {"id": repository, "type": "function", "label": "load",
+             "evidence": {"path": "server/repos/photo_repo.py", "line": 4}},
+        ])
+        source["edges"].extend([
+            {"source": "file:server/routes/photos.js", "target": service,
+             "type": "calls", "caller_symbol_id": handler, "resolution_status": "RESOLVED",
+             "evidence": {"path": "server/routes/photos.js", "line": 15}},
+            {"source": "file:server/services/photo_service.py", "target": "external:auth.requirePermission",
+             "type": "calls", "caller_symbol_id": service, "resolution_status": "EXTERNAL",
+             "evidence": {"path": "server/services/photo_service.py", "line": 8}},
+            {"source": "file:server/services/photo_service.py", "target": repository,
+             "type": "calls", "caller_symbol_id": service, "resolution_status": "RESOLVED",
+             "evidence": {"path": "server/services/photo_service.py", "line": 9}},
+            {"source": "file:server/repos/photo_repo.py", "target": "external:repo.load",
+             "type": "calls", "caller_symbol_id": repository, "resolution_status": "EXTERNAL",
+             "evidence": {"path": "server/repos/photo_repo.py", "line": 22}},
+        ])
+        semantics = {
+            "endpoints": [{"method": "GET", "path": "/photos",
+                           "source": "server/routes/photos.js:20", "line": 20,
+                           "handler_reference": "listPhotos", "code_auth": "auth",
+                           "authorization_status": "DETECTED"}],
+            "authorization_checks": [
+                {"source": "server/routes/photos.js", "line": 20,
+                 "kind": "route_middleware", "guard_names": ["authRequired"],
+                 "parser": "bounded-source-line-patterns"},
+                {"source": "server/services/photo_service.py", "line": 8,
+                 "kind": "authorization_call", "guard_names": ["requirePermission"],
+                 "parser": "bounded-source-line-patterns"},
+            ],
+            "database_accesses": [{
+                "source": "server/repos/photo_repo.py", "line": 22,
+                "callee": "cursor.execute", "operation": "SELECT", "tables": ["photos"],
+                "columns": ["id"], "parse_status": "RESOLVED",
+            }],
+        }
+        result = project_business_graph(source, semantics)
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        auth = endpoint["authorization_evidence"]
+        self.assertEqual(auth["status"], "DETECTED")
+        self.assertEqual(len(auth["route_middleware"]), 1)
+        self.assertEqual(len(auth["reachable_function_checks"]), 1)
+        self.assertEqual(auth["reachable_function_checks"][0]["owner_symbol_id"], service)
+        self.assertEqual(len(endpoint["handler_association"]["database_access_evidence"]), 1)
+
+    def test_no_authorization_evidence_is_not_reported_as_proven_vulnerability(self):
+        source = graph()
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "GET", "path": "/photos",
+            "source": "server/routes/photos.js:20", "line": 20,
+        }]})
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["authorization_evidence"]["status"], "NOT_DETECTED_STATIC_SCAN")
+        self.assertEqual(endpoint["authorization_evidence"]["route_middleware"], [])
+        self.assertTrue(endpoint["authorization_evidence"]["limitations"])
+
     def test_database_access_without_unique_caller_is_not_attached_to_function(self):
         source = graph()
         source["nodes"].append({
