@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import unittest
 from usit.project_quality_assessment import assess_project_quality
+from usit.project_quality_report import render_project_quality_markdown
 
 
 class ProjectQualityAssessmentTests(unittest.TestCase):
@@ -77,6 +78,14 @@ class ProjectQualityAssessmentTests(unittest.TestCase):
         self.assertIsNone(result["dimensions"]["business_function_test_design"]["percent"])
         self.assertEqual(result["dimensions"]["business_function_test_design"]["status"],"NOT_APPLICABLE_OR_NOT_FOUND")
 
+    def test_markdown_renderer_rejects_wrong_schema_and_escapes_table_cells(self):
+        report=assess_project_quality(self.semantics,self.graph)
+        report["input_hashes"]={"artifact|name":"abc123"}
+        markdown=render_project_quality_markdown(report)
+        self.assertIn("artifact\\|name",markdown)
+        with self.assertRaisesRegex(ValueError,"usit-project-quality-assessment-v1"):
+            render_project_quality_markdown({"schema_version":"wrong"})
+
     def test_rejects_duplicate_function_ids_and_bad_schema(self):
         graph={"schema_version":"usit-graph-v1","business_understanding":{"business_function_views":[
             {"business_function_id":"same"},{"business_function_id":"same"}]}}
@@ -93,17 +102,20 @@ class ProjectQualityAssessmentTests(unittest.TestCase):
         from usit.cli import main
         with tempfile.TemporaryDirectory() as td:
             base=Path(td)
-            sem=base/"sem.json"; graph=base/"graph.json"; plan=base/"plan.json"; out=base/"quality.json"
+            sem=base/"sem.json"; graph=base/"graph.json"; plan=base/"plan.json"; out=base/"quality.json"; out_md=base/"quality.md"
             sem.write_text(json.dumps(self.semantics),encoding="utf-8")
             graph.write_text(json.dumps(self.graph),encoding="utf-8")
             plan.write_text(json.dumps(self.plan),encoding="utf-8")
             with redirect_stdout(StringIO()):
                 code=main(["assess-quality","--semantics",str(sem),"--graph",str(graph),
-                           "--test-plan",str(plan),"--out",str(out)])
+                           "--test-plan",str(plan),"--out",str(out),"--out-md",str(out_md)])
             self.assertEqual(code,0)
             saved=json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(len(saved["input_hashes"]["business_graph_sha256"]),64)
             self.assertEqual(saved["assessment_mode"],"MULTIDIMENSIONAL_NO_AGGREGATE_SCORE")
+            markdown=out_md.read_text(encoding="utf-8")
+            self.assertIn("# USIT 项目质量评估报告",markdown)
+            self.assertIn("不计算单一质量总分",markdown)
 
 
 if __name__=="__main__":
