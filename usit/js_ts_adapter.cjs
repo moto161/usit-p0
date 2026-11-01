@@ -695,9 +695,27 @@ function main(input) {
     }
     collectRequireImports(sourceFile);
     importsBySource.set(path.resolve(sourceFile.fileName), importEvidenceRows);
-    function visit(node, testContext) {
+    function declaredFunctionOwner(node) {
+      let name = null;
+      if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name) {
+        name = node.name.getText(sourceFile);
+      } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+          && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+        name = node.name.text;
+      } else if (ts.isPropertyDeclaration(node) && node.initializer
+          && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+        name = node.name.getText(sourceFile);
+      }
+      if (!name) return null;
+      const position = loc(sourceFile, node);
+      return { name, line: position.line,
+        symbol_id: "symbol:" + entry.rel + "#" + name + ":" + position.line };
+    }
+
+    function visit(node, testContext, callerOwner) {
+      const currentOwner = declaredFunctionOwner(node) || callerOwner || null;
       let childTestContext = testContext;
-      if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && /^test\w*/i.test(node.name.getText(sourceFile))) {
+      if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && /^test\\w*/i.test(node.name.getText(sourceFile))) {
         childTestContext = node.name.getText(sourceFile);
       }
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && ["test", "it"].includes(node.expression.text) && node.arguments.length && ts.isStringLiteralLike(node.arguments[0])) {
@@ -729,6 +747,10 @@ function main(input) {
           const importReference = ts.isPropertyAccessExpression(expression) ? expression.expression : expression;
           const importEvidence = localName ? findImportEvidence(sourceFile, localName, importReference) : null;
           const call = callStatus(node, sourceFile, entry, symbol, localName, importEvidence);
+          if (currentOwner) {
+            call.caller = { name: currentOwner.name, line: currentOwner.line };
+            call.caller_symbol_id = currentOwner.symbol_id;
+          }
           if (childTestContext) call.test_name = childTestContext;
           if (row.syntax_status === "INVALID" && call.resolution_status === "RESOLVED") {
             call.resolution_status = "UNKNOWN"; call.resolved = false; call.diagnostic = "SOURCE_HAS_SYNTAX_ERRORS"; delete call.target;
@@ -737,9 +759,9 @@ function main(input) {
           calls.push(call);
         }
       }
-      ts.forEachChild(node, (child) => visit(child, childTestContext));
+      ts.forEachChild(node, (child) => visit(child, childTestContext, currentOwner));
     }
-    for (const statement of sourceFile.statements) visit(statement, null);
+    for (const statement of sourceFile.statements) visit(statement, null, null);
     row.imports = imports;
     row.calls = calls;
     const importBindings = new Map();
