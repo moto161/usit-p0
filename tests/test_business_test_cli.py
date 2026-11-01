@@ -4,7 +4,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from usit.cli import main
@@ -77,12 +77,15 @@ class BusinessTestCliTests(unittest.TestCase):
             auth_path.write_text(
                 json.dumps(authorization_record(project, output)), encoding="utf-8"
             )
-            with self.assertRaises(ValueError):
-                main([
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                exit_code = main([
                     "plan-business-tests", str(project),
                     "--out", str(output),
                     "--authorization-file", str(auth_path),
                 ])
+            self.assertEqual(exit_code, 2)
+            self.assertIn("output already exists", stderr.getvalue())
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
 
 
