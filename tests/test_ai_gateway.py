@@ -65,5 +65,32 @@ class Agent2APITests(unittest.TestCase):
                 client.list_models()
 
 
+    def test_cli_ai_models_and_ai_chat_use_local_provider(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import json
+        from usit import cli
+
+        models_client = Agent2APIClient(api_key="")
+        with patch.object(cli, "Agent2APIClient", return_value=models_client), \
+             patch.object(models_client, "list_models", return_value=[{"id": "model-a"}]):
+            output = StringIO()
+            with redirect_stdout(output):
+                code = cli.main(["ai-models"])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["models"][0]["id"], "model-a")
+
+        with patch.object(cli, "Agent2APIClient", return_value=models_client), \
+             patch.object(models_client, "chat", return_value={
+                 "model": "model-a", "content": "ok", "finish_reason": "stop",
+                 "usage": None, "request_id": "r1"
+             }) as chat:
+            output = StringIO()
+            with redirect_stdout(output):
+                code = cli.main(["ai-chat", "--model", "model-a", "--prompt", "hello"])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["content"], "ok")
+            chat.assert_called_once()
+
 if __name__ == "__main__":
     unittest.main()
