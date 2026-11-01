@@ -81,6 +81,58 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
         self.assertEqual(feature_gaps[0]["evidence_refs"][0]["path"], "docs/member.md")
         self.assertEqual(feature_gaps[0]["evidence_refs"][0]["line"], 20)
 
+    def test_approved_graph_bound_traceability_closes_exact_requirement_gap(self):
+        graph_hash = "a" * 64
+        traceability = {
+            "schema_version": "usit-business-traceability-matrix-v1",
+            "source_graph_sha256": graph_hash,
+            "rows": [{
+                "feature_name": "照片上传",
+                "feature_source": "docs/PRD.md",
+                "feature_line": 8,
+                "mapping_decision": "APPROVED_LINK",
+                "business_function_id": "bf-upload",
+                "traceability_status": "TRACEABLE_TO_STATIC_FUNCTION_VIEW",
+            }],
+        }
+        result = build_verification_gap_backlog(
+            self.semantics, self.graph, self.plan, self.matrix,
+            {"business_graph_sha256": graph_hash}, traceability,
+        )
+        self.assertFalse(any(item["gap_kind"] == "REQUIREMENT_TRACEABILITY_GAP"
+                             for item in result["gaps"]))
+
+    def test_traceability_matrix_with_stale_graph_hash_is_rejected(self):
+        traceability = {
+            "schema_version": "usit-business-traceability-matrix-v1",
+            "source_graph_sha256": "b" * 64,
+            "rows": [],
+        }
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            build_verification_gap_backlog(
+                self.semantics, self.graph, input_hashes={"business_graph_sha256": "a" * 64},
+                traceability_matrix=traceability,
+            )
+
+    def test_unapproved_or_targetless_traceability_does_not_close_requirement_gap(self):
+        graph_hash = "a" * 64
+        for decision, function_id in (("NEEDS_REVIEW", None), ("APPROVED_LINK", None)):
+            traceability = {
+                "schema_version": "usit-business-traceability-matrix-v1",
+                "source_graph_sha256": graph_hash,
+                "rows": [{
+                    "feature_name": "照片上传", "feature_source": "docs/PRD.md",
+                    "feature_line": 8, "mapping_decision": decision,
+                    "business_function_id": function_id,
+                }],
+            }
+            result = build_verification_gap_backlog(
+                self.semantics, self.graph, input_hashes={"business_graph_sha256": graph_hash},
+                traceability_matrix=traceability,
+            )
+            self.assertTrue(any(item["gap_kind"] == "REQUIREMENT_TRACEABILITY_GAP"
+                                for item in result["gaps"]))
+
     def test_unlinked_function_without_runtime_and_coverage_is_unknown_gap(self):
         result=build_verification_gap_backlog({"features":[],"endpoint_contract_alignment":[]},
             {"schema_version":"usit-graph-v1","business_understanding":{"business_function_views":[
