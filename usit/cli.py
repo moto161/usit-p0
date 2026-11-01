@@ -336,7 +336,12 @@ def main(argv=None):
                 'snapshot_binding_status_counts':result['snapshot_binding_status_counts'],
                 'attestation_status_counts':result['attestation_status_counts'],
                 'overall_truth_status':result['overall_truth_status']},ensure_ascii=False,indent=2))
-            binding_ok=all(x['binding_status']=='ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED' for x in result['claims'])
+            binding_ok=(
+                all(x['binding_status']=='ARTIFACT_HASH_MATCH_AND_LOCATOR_VALID'
+                    for x in result['evidence_bindings'])
+                and all(x['binding_status']=='ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED'
+                        for x in result['claims'])
+            )
             snapshot_ok=all(x.get('snapshot_binding_status') in (
                 'NOT_APPLICABLE','NOT_PROVIDED','MATCHED_SCAN_MANIFEST_ENTRY'
             ) for x in result['evidence_bindings'])
