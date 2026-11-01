@@ -166,6 +166,21 @@ class AIEvidenceBindingTests(unittest.TestCase):
                          "snapshot-scan_manifest.json")
         self.assertEqual(result["claims"][0]["truth_status"], "NOT_ESTABLISHED")
 
+    def test_signed_manifest_path_must_match_catalog_path(self):
+        self._attach_scan_manifest()
+        manifest_bytes = (self.root / "scan_manifest.json").read_bytes()
+        (self.root / "wrong-path.json").write_bytes(manifest_bytes)
+        (self.root / "scan_attestation.json").write_bytes(create_scan_attestation(
+            manifest_bytes, self.attestation_private_pem, snapshot_id="snapshot-path",
+            created_at="2026-11-01T12:00:00Z", scanner_version="0.1.0",
+            source_revision="fixture-revision", manifest_path="wrong-path.json",
+        ))
+        self.ledger["evidence_catalog"][0]["snapshot_attestation_path"] = "scan_attestation.json"
+        result = verify_evidence_bindings(
+            self.ledger, self.root, trusted_public_keys={self.attestation_key_id: self.attestation_public}
+        )
+        self.assertEqual(result["evidence_bindings"][0]["attestation_status"],
+                         "ATTESTATION_MANIFEST_PATH_MISMATCH")
     def test_trusted_manifest_signature_does_not_hide_source_entry_mismatch(self):
         self._attach_scan_manifest(recorded_sha="0" * 64)
         self._attach_scan_attestation()
