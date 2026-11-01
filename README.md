@@ -103,6 +103,12 @@ When projecting into `business_knowledge_graph.json`, USIT associates a database
 Dynamic SQL, concatenation, multiline SQL, CTE/UNION statements, unsupported SQL forms, missing/ambiguous caller ownership, and undocumented tables are not guessed. This slice does not prove runtime execution, actual read/write effects, transaction commit, parameter values, field-level data flow, ORM model-to-table mapping, or authorization enforcement. All database links remain candidate/unverified static evidence.
 
 
+## S2.11 — Documented API contract ↔ code-route reconciliation (partial)
+
+The business-semantics pass now extracts documented API method/path pairs with Markdown source line evidence and compares them with statically extracted code routes using exact HTTP method + path equality. Results are classified as `EXACT_MATCH`, `MULTIPLE_CODE_MATCHES`, `DOCUMENTED_NOT_FOUND_IN_CODE`, or `CODE_ENDPOINT_NOT_DOCUMENTED`; document and code locations are retained. The business graph exposes this alignment list as part of its understanding summary.
+
+This is a contract-alignment signal, not a defect verdict. Router mount prefixes, API gateway rewrites, version prefixes, dynamic route construction, generated routes and incomplete/out-of-scope documents are not expanded or normalized. An unmatched documented route does not prove missing implementation; an undocumented code route does not prove it is invalid. All results remain `STATIC_INFERENCE` / `NOT_VERIFIED`.
+
 ## S2.10 — Evidence-backed endpoint execution-path reconstruction (partial)
 
 The business graph now emits `business_understanding.endpoint_execution_paths`, a deterministic per-endpoint summary assembled only from existing explicit evidence: route source, resolved handler, bounded call-chain steps, linked database accesses, route/function authorization indicators, and exact-line identity/resource evidence. Each stage is reported separately (entrypoint, handler, calls, database, authorization, identity/resource), with unresolved/external steps and call-chain truncation retained as unknowns. Every path remains `STATIC_INFERENCE` / `NOT_VERIFIED`.
