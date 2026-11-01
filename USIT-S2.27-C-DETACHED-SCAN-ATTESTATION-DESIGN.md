@@ -1,6 +1,6 @@
 # USIT S2.27-C — Detached scan attestation and provenance trust model
 
-- Status: DESIGN / implementation not yet enabled
+- Status: CORE IMPLEMENTED / CLI, scanner integration, and key custody workflow pending
 - Target branch: `feature/understanding-to-test-v1`
 - Baseline: S2.27-B (`usit-manifest-v1` byte and source-entry cross-binding)
 - Security posture: read-only verification; fail closed; no automatic claim promotion
@@ -148,6 +148,17 @@ CI must run the focused tests on Linux and Windows where applicable, plus the ex
 
 ## 8. Implementation gate / acceptance
 
-Implementation may start only after the repository selects a maintained Ed25519 provider and specifies key enrollment/storage UX. The implementation PR must include the canonical serialization test vectors, trust-store format and lifecycle, CLI contract, negative tests above, and a security review of path/key handling.
+### 8.1 Core implementation delivered
 
-Until that gate is met, S2.27-C is **DESIGN COMPLETE / IMPLEMENTATION NOT STARTED**. S2.27-B remains the strongest available check and must continue to be labelled integrity cross-binding, not authenticated provenance.
+- `usit/scan_attestation.py` implements detached Ed25519 signing and verification using the maintained `cryptography==50.0.2` provider.
+- The sidecar embeds only the raw public key, never private key material. The verifier cryptographically checks the embedded key, then separately checks whether the exact public key is present in the caller-supplied external trust map.
+- Statuses distinguish valid-but-untrusted signatures, trusted signatures, manifest mismatch, invalid signature/format, unsupported algorithm, and caller policy rejection.
+- Canonical UTF-8 JSON serialization, duplicate-key rejection, strict base64 lengths, manifest digest binding, snapshot ID policy, and relative manifest path checks are implemented.
+- `tests/test_scan_attestation.py` adds 15 synthetic tests; CI installs the pinned provider and runs the tests on the Linux business suite and Windows full regression.
+- This is a library/API core only. There is not yet a CLI, scanner auto-signing, trust-store file format/lifecycle, OS-backed private-key custody, revocation workflow, or integration into `verify-evidence-bindings`.
+
+### 8.2 Remaining implementation gate
+
+Before production use, define explicit key enrollment/storage UX and integrate signing as a deliberate operation. The caller must provision trusted public keys independently of the evidence directory. Do not add an implicit machine key or trust-on-first-use. A trusted signature still does not establish trusted time, scanner integrity, scan completeness, or semantic truth.
+
+S2.27-C is **CORE IMPLEMENTED / INTEGRATION PENDING**. S2.27-B remains integrity cross-binding, not authenticated provenance.
