@@ -386,6 +386,112 @@ def project_business_graph(graph: Mapping[str, Any],
                             "reason": "NO_UNIQUE_SAME_FILE_SYMBOL",
                         }
 
+    # S2.6: link a literal SQL execution site to its exact function owner.
+    # No owner is inferred from nearby names or global symbol search.
+    database_access_records = semantics.get("database_accesses", [])
+    if not isinstance(database_access_records, list):
+        raise ValueError("semantics.database_accesses must be a list")
+    database_access_linked = 0
+    database_access_unowned = 0
+    database_table_links = 0
+    entity_nodes_by_name: dict[str, list[dict[str, Any]]] = {}
+    for item in nodes:
+        if item.get("business_kind") == "entity":
+            entity_nodes_by_name.setdefault(str(item.get("label") or "").lower(), []).append(item)
+    for raw in database_access_records:
+        if not isinstance(raw, Mapping):
+            continue
+        path = _source_path(raw)
+        line = _source_line(raw)
+        if not path or line is None or path not in file_ids:
+            unlinked.append({"kind": "database_access", "reason": "INVALID_OR_MISSING_SOURCE"})
+            continue
+        matching_calls = [
+            edge for edge in edges
+            if edge.get("type") == "calls"
+            and (edge.get("evidence") or {}).get("path") == path
+            and (edge.get("evidence") or {}).get("line") == line
+        ]
+        owners = sorted({edge.get("caller_symbol_id") for edge in matching_calls
+                         if isinstance(edge.get("caller_symbol_id"), str)})
+        owner_id = owners[0] if len(owners) == 1 else None
+        if owner_id is None:
+            database_access_unowned += 1
+        identity = {
+            "path": path, "line": line, "callee": raw.get("callee"),
+            "operation": raw.get("operation"), "tables": raw.get("tables", []),
+            "columns": raw.get("columns", []), "owner": owner_id,
+        }
+        access_id = _stable_id("database-access", identity)
+        if access_id not in existing_ids:
+            details = {
+                "operation": raw.get("operation") or "UNKNOWN",
+                "tables": raw.get("tables") if isinstance(raw.get("tables"), list) else [],
+                "columns": raw.get("columns") if isinstance(raw.get("columns"), list) else [],
+                "callee": raw.get("callee") or "",
+                "owner_symbol_id": owner_id,
+                "owner_resolution_status": "RESOLVED" if owner_id else "UNKNOWN",
+                "parse_status": raw.get("parse_status") or "UNKNOWN",
+                "parser": raw.get("parser") or "UNKNOWN",
+            }
+            nodes.append({
+                "id": access_id, "type": "candidate", "label": f"DB {details['operation']} @ {path}:{line}",
+                "business_kind": "database_access", "business_details": details,
+                "evidence": {"path": path, "line": line, "confidence": "STATIC_INFERENCE"},
+                "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+            })
+            existing_ids.add(access_id)
+            edges.append({
+                "source": file_ids[path], "target": access_id, "type": "references",
+                "evidence": {"path": path, "line": line, "callee": details["callee"],
+                             "owner_symbol_id": owner_id},
+                "method": "database-access-static-callsite", "confidence": "medium",
+                "candidate": True, "verified": False, "verification_status": "NOT_VERIFIED",
+            })
+        database_access_linked += 1
+        tables = details["tables"] if access_id in existing_ids else raw.get("tables", [])
+        for table in tables if isinstance(tables, list) else []:
+            matches = entity_nodes_by_name.get(str(table).lower(), [])
+            if len(matches) == 1:
+                edges.append({
+                    "source": access_id, "target": matches[0]["id"], "type": "references",
+                    "evidence": {"path": path, "line": line, "table": table,
+                                 "sql_operation": raw.get("operation")},
+                    "method": "database-access-to-documented-entity", "confidence": "low",
+                    "candidate": True, "verified": False,
+                    "verification_status": "NOT_VERIFIED",
+                })
+                database_table_links += 1
+
+    # Attach database evidence to endpoints only when its owner is present in
+    # the endpoint's already-resolved, bounded call-chain symbol sequence.
+    for endpoint_node in nodes:
+        association = endpoint_node.get("handler_association")
+        if not isinstance(association, dict) or association.get("resolution_status") != "RESOLVED":
+            continue
+        reachable_symbols = {association.get("target_symbol_id")}
+        for chain in association.get("call_chain_evidence", []):
+            for step in chain.get("steps", []):
+                if isinstance(step.get("caller_symbol_id"), str):
+                    reachable_symbols.add(step["caller_symbol_id"])
+                if isinstance(step.get("target_id"), str):
+                    reachable_symbols.add(step["target_id"])
+        related = []
+        for access in nodes:
+            details = access.get("business_details", {})
+            if access.get("business_kind") == "database_access" and details.get("owner_symbol_id") in reachable_symbols:
+                related.append({"database_access_id": access.get("id"),
+                                "owner_symbol_id": details.get("owner_symbol_id"),
+                                "path": (access.get("evidence") or {}).get("path"),
+                                "line": (access.get("evidence") or {}).get("line"),
+                                "operation": details.get("operation"),
+                                "tables": details.get("tables", []),
+                                "columns": details.get("columns", []),
+                                "confidence": "STATIC_INFERENCE",
+                                "verification_status": "NOT_VERIFIED"})
+        related.sort(key=lambda item: (item["path"] or "", item["line"] or 0, item["database_access_id"]))
+        association["database_access_evidence"] = related
+
     result["nodes"] = nodes
     result["edges"] = edges
     result["business_understanding"] = {
@@ -398,12 +504,16 @@ def project_business_graph(graph: Mapping[str, Any],
         "handler_downstream_call_evidence": handler_downstream_calls,
         "handler_call_chains": handler_call_chains,
         "handler_call_chains_truncated": handler_call_chains_truncated,
+        "database_access_records": database_access_linked,
+        "database_access_unowned": database_access_unowned,
+        "database_access_table_links": database_table_links,
         "limitations": [
             "业务记录只与精确来源文件关联；命名路由 handler 可通过同文件唯一符号或 TypeScript Compiler API 的导入符号证据建立候选引用。",
             "跨文件 handler 仅在编译器符号解析唯一且目标符号存在于当前图谱时关联；动态、外部、歧义或缺少符号证据时保留原状态，不按名称猜测。",
             "未建立功能到接口、接口到数据实体、角色到权限的推断关系。",
             "candidate/verified=false 表示未验证，不代表运行时可达或功能已实现。",
             "调用链仅沿唯一 RESOLVED 的图谱符号边进行有界静态展开；循环会标记，深度/数量上限会截断，不证明运行时执行。",
+            "数据库访问只识别单行直接 SQL 字符串字面量；owner 必须由同路径同调用行的 caller_symbol_id 唯一绑定。动态/拼接/多行 SQL 不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
         ],
     }
     return result
