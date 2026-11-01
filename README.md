@@ -57,6 +57,31 @@
 - Check test-to-symbol evidence invalidation with `python -m usit benchmark-associations --out C:\\USIT-Reports\\association-results.json`; the command only mutates disposable synthetic fixtures and rejects overwriting an existing result.
 
 
+## Local Agent2API multi-model provider (S2.24 foundation)
+
+USIT can discover and call models exposed by a local Agent2API gateway through its OpenAI-compatible Chat Completions API. The default endpoint is `http://127.0.0.1:3065/v1`; model IDs are discovered dynamically from `GET /v1/models` and are never hard-coded.
+
+Security and scope:
+- Only plain-HTTP loopback URLs (`127.0.0.1` or `localhost`) are accepted; remote hosts, HTTPS redirects and URL-embedded credentials are rejected.
+- Optional gateway authentication is read from the process environment variable `USIT_AGENT2API_API_KEY`; never put a key in source, command arguments, reports or repository files. If Agent2API authentication is disabled, the gateway may not require a key.
+- No project files are uploaded automatically. A model call occurs only when the operator explicitly runs `ai-chat` with a prompt.
+- Request/response bodies are not logged; response size, timeout and prompt length are bounded. Streaming, tool calls, automatic task routing and autonomous code modification are not implemented in this foundation.
+
+PowerShell examples:
+
+```powershell
+# Optional: only if Gateway Key authentication is enabled in Agent2API.
+$env:USIT_AGENT2API_API_KEY = Read-Host "Agent2API gateway key"
+
+# Discover available models; this performs a local GET only.
+python -m usit ai-models
+
+# Explicitly test one model with a harmless prompt (replace model ID with one returned above).
+python -m usit ai-chat --model "MODEL_ID" --prompt "请只回复：USIT本地网关连通测试成功"
+```
+
+The current provider uses `POST /v1/chat/completions` with `stream=false`. Model discovery proves only that the local endpoint returned a model list; a successful `ai-chat` call proves one selected model responded to one explicit prompt. Neither proves the model's reasoning quality or the correctness of its conclusions.
+
 ## Business understanding → test-candidate planning
 
 Run the static business-understanding pass and generate evidence-linked test candidates:
