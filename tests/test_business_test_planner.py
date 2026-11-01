@@ -45,6 +45,10 @@ class BusinessTestPlannerTests(unittest.TestCase):
         )
         self.assertTrue(all(x["execution_status"] == "NOT_EXECUTED" for x in result["candidates"]))
         self.assertTrue(all(x["design_status"] == "CANDIDATE_NEEDS_REQUIREMENTS" for x in result["candidates"]))
+        self.assertTrue(all(x["actions"] for x in result["candidates"]))
+        self.assertTrue(all(x["evidence_requirements"] for x in result["candidates"]))
+        self.assertTrue(all(x["expected_results_status"] == "OWNER_CONFIRMATION_REQUIRED"
+                            for x in result["candidates"]))
 
     def test_output_is_deterministic(self):
         self.assertEqual(plan_business_tests(self.source), plan_business_tests(self.source))
