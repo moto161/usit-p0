@@ -270,3 +270,25 @@ python -m usit analyze-gaps --semantics .\\business_semantics.json --graph .\\bu
 ```
 
 The test plan and evidence matrix are optional. The output records SHA-256 hashes of every supplied input. P0/P1/P2 are triage priorities, not severity determinations. Requirements and acceptance criteria still require owner review.
+
+
+## S2.19 — 多维度项目质量评估
+
+`assess-quality` combines business semantics, the business graph, optional test-design candidates, optional runtime evidence matrix and optional verification gap backlog into a single traceable report. It deliberately does **not** calculate an aggregate quality score.
+
+Reported dimensions:
+- Documented feature traceability: explicitly reviewed feature → business-function links.
+- Business-function test design: functions with at least one explicitly linked test candidate.
+- Runtime test evidence: functions with determinate PASSED/FAILED evidence, reported separately from pass ratio.
+- Test pass ratio: PASSED among functions with determinate PASSED/FAILED status.
+- Code coverage measurement: functions with explicit COVERED/PARTIAL/NOT_COVERED status.
+
+It also reports inventory counts, endpoint-contract alignment statuses, gap priority/type counts, evidence conflicts and unknown business-function IDs. Every input artifact's exact-byte SHA-256 is recorded by the CLI.
+
+Example:
+
+```powershell
+python -m usit assess-quality --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --gap-backlog .\\verification-gap-backlog.json --out .\\project-quality-assessment.json
+```
+
+Optional evidence inputs may be omitted. Missing evidence remains `NOT_MEASURED`; an empty denominator yields `percent=null`, not a fabricated score. A test pass ratio is not a business-correctness score. The report remains bounded by the coverage and limitations of its source artifacts.
