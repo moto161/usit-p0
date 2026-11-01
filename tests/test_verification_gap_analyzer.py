@@ -113,5 +113,27 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
             build_verification_gap_backlog(self.semantics,self.graph,{"schema_version":"bad"})
 
 
+    def test_missing_or_invalid_runtime_test_status_is_inconclusive(self):
+        for status in (None, "INVALID", "CANCELLED"):
+            with self.subTest(status=status):
+                row = {"business_function_id": "bf-upload"}
+                if status is not None:
+                    row["test_execution_status"] = status
+                matrix = {
+                    "schema_version": "usit-business-evidence-verification-v1",
+                    "business_function_evidence": [row],
+                }
+                result = build_verification_gap_backlog(
+                    {"features": [], "endpoint_contract_alignment": []},
+                    {"schema_version": "usit-graph-v1", "business_understanding": {
+                        "business_function_views": [{"business_function_id": "bf-upload"}],
+                    }},
+                    evidence_matrix=matrix,
+                )
+                kinds = {item["gap_kind"] for item in result["gaps"]}
+                self.assertIn("INCONCLUSIVE_TEST_EVIDENCE", kinds)
+                self.assertNotIn("NO_RUNTIME_TEST_EVIDENCE", kinds)
+
+
 if __name__=="__main__":
     unittest.main()
