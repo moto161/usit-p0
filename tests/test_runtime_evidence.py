@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+
+from usit.runtime_evidence import validate_runtime_evidence
+
+
+class RuntimeEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.graph = {"schema_version": "usit-graph-v1", "business_understanding": {
+            "business_function_views": [
+                {"business_function_id": "bf-photo-view"},
+                {"business_function_id": "bf-photo-delete"},
+            ]}}
+        self.graph_bytes = json.dumps(self.graph, ensure_ascii=False, indent=2).encode()
+        self.graph_hash = hashlib.sha256(self.graph_bytes).hexdigest()
+        self.doc = {
+            "schema_version": "usit-runtime-evidence-v1",
+            "source_graph_sha256": self.graph_hash,
+            "session": {"session_id": "session-001", "platform": "ANDROID",
+                        "captured_at": "2026-11-01T12:00:00+08:00"},
+            "events": [
+                {"event_id": "e1", "timestamp": "2026-11-01T12:00:01+08:00",
+                 "event_type": "UI_ACTION", "correlation_id": "c1",
+                 "business_function_id": "bf-photo-view", "component": "PhotoDetail",
+                 "operation": "tap_open", "parent_event_id": None},
+                {"event_id": "e2", "timestamp": "2026-11-01T12:00:02+08:00",
+                 "event_type": "HTTP_REQUEST", "correlation_id": "c1",
+                 "business_function_id": "bf-photo-view", "http_method": "GET",
+                 "route_template": "/api/photos/{id}", "parent_event_id": "e1"},
+                {"event_id": "e3", "timestamp": "2026-11-01T12:00:03+08:00",
+                 "event_type": "HTTP_RESPONSE", "correlation_id": "c1",
+                 "business_function_id": "bf-photo-view", "status_code": 200,
+                 "parent_event_id": "e2"},
+                {"event_id": "e4", "timestamp": "2026-11-01T12:00:04+08:00",
+                 "event_type": "BACKEND_SPAN", "correlation_id": "c1",
+                 "business_function_id": "bf-photo-view", "operation": "load_photo",
+                 "parent_event_id": "e3"},
+            ],
+        }
+
+    def test_validates_explicit_runtime_observations_without_claiming_correctness(self):
+        result = validate_runtime_evidence(self.doc, self.graph, self.graph_hash, "a" * 64)
+        self.assertEqual(result["assessment_status"], "VALIDATED_EVENT_STRUCTURE")
+        self.assertEqual(result["event_count"], 4)
+        self.assertEqual(result["business_function_observation_count"], 1)
+        chain = result["correlations"][0]
+        self.assertEqual(chain["runtime_observation_status"], "RUNTIME_OBSERVED")
+        self.assertEqual(chain["end_to_end_chain_status"], "CORRELATED_EVENTS_OBSERVED")
+        self.assertTrue(chain["has_ui_action"])
+        self.assertTrue(chain["has_http_exchange"])
+        self.assertTrue(chain["has_backend_span"])
+        self.assertFalse(chain["has_database_change"])
+        self.assertTrue(any("不证明功能正确" in x for x in result["limitations"]))
+
+    def test_graph_hash_and_unknown_function_are_conflicts(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["source_graph_sha256"] = "0" * 64
+        doc["events"][0]["business_function_id"] = "bf-not-in-graph"
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        self.assertEqual(result["assessment_status"], "EVIDENCE_CONFLICT")
+        self.assertEqual({x["kind"] for x in result["evidence_conflicts"]},
+                         {"GRAPH_HASH_MISMATCH", "UNKNOWN_BUSINESS_FUNCTION"})
+
+    def test_rejects_sensitive_fields_and_unrecognised_metadata(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][0]["request_body"] = "private payload"
+        with self.assertRaisesRegex(ValueError, "potentially sensitive fields"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        doc = json.loads(json.dumps(self.doc))
+        doc["session"]["user_email"] = "private@example.invalid"
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+
+    def test_rejects_duplicate_ids_bad_parent_and_timezone_less_timestamp(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][1]["event_id"] = "e1"
+        with self.assertRaisesRegex(ValueError, "duplicate runtime event_id"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][1]["parent_event_id"] = "missing"
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        self.assertIn("MISSING_PARENT_EVENT", {x["kind"] for x in result["evidence_conflicts"]})
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][0]["timestamp"] = "2026-11-01T12:00:01"
+        with self.assertRaisesRegex(ValueError, "include a timezone"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+
+    def test_cli_writes_validation_report_and_returns_conflict_exit_code(self):
+        from usit.cli import main
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            graph_path, event_path, out_path = base / "graph.json", base / "events.json", base / "validated.json"
+            graph_path.write_bytes(self.graph_bytes)
+            event_path.write_text(json.dumps(self.doc), encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                code = main(["validate-runtime-evidence", "--events", str(event_path),
+                             "--graph", str(graph_path), "--out", str(out_path)])
+            self.assertEqual(code, 0)
+            report = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["event_count"], 4)
+            self.assertEqual(report["source_hashes"]["runtime_evidence_sha256"],
+                             hashlib.sha256(event_path.read_bytes()).hexdigest())
+            bad_path = base / "bad-events.json"
+            bad_doc = json.loads(json.dumps(self.doc))
+            bad_doc["source_graph_sha256"] = "f" * 64
+            bad_path.write_text(json.dumps(bad_doc), encoding="utf-8")
+            bad_out = base / "bad-report.json"
+            with redirect_stdout(StringIO()):
+                bad_code = main(["validate-runtime-evidence", "--events", str(bad_path),
+                                 "--graph", str(graph_path), "--out", str(bad_out)])
+            self.assertEqual(bad_code, 1)
+            self.assertEqual(json.loads(bad_out.read_text())["assessment_status"], "EVIDENCE_CONFLICT")
+            with redirect_stdout(StringIO()):
+                overwrite_code = main(["validate-runtime-evidence", "--events", str(event_path),
+                                       "--graph", str(graph_path), "--out", str(out_path)])
+            self.assertEqual(overwrite_code, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
