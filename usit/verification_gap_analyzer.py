@@ -112,6 +112,9 @@ def build_verification_gap_backlog(
             continue
         if line is not None and (not isinstance(line, int) or isinstance(line, bool) or line < 1):
             raise ValueError(f"traceability matrix rows[{index}] has invalid feature_line")
+        target_id=row["business_function_id"]
+        if target_id not in view_by_id:
+            raise ValueError(f"traceability matrix row references unknown business_function_id: {target_id}")
         key=(name.strip(), source, line)
         if key in reviewed_feature_links:
             raise ValueError(f"duplicate approved traceability row for feature identity: {key}")
