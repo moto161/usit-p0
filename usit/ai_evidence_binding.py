@@ -42,6 +42,70 @@ def _artifact_path(root: Path, relative: Any) -> Path:
     return resolved
 
 
+def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
+                          source_sha256: str) -> dict[str, Any]:
+    manifest_path = entry.get("snapshot_manifest_path")
+    manifest_sha = entry.get("snapshot_manifest_sha256")
+    if manifest_path is None and manifest_sha is None:
+        return {"status": "NOT_PROVIDED", "manifest_path": None,
+                "manifest_sha256": None,
+                "detail": "No scan manifest identity was supplied; source snapshot provenance is unverified."}
+    if manifest_path is None or manifest_sha is None:
+        return {"status": "INCOMPLETE_DECLARATION", "manifest_path": manifest_path,
+                "manifest_sha256": None,
+                "detail": "snapshot_manifest_path and snapshot_manifest_sha256 must be supplied together."}
+    if not isinstance(manifest_sha, str) or len(manifest_sha) != 64 or any(x not in "0123456789abcdef" for x in manifest_sha):
+        return {"status": "INVALID_DECLARATION", "manifest_path": manifest_path,
+                "manifest_sha256": None, "detail": "snapshot_manifest_sha256 must be a lowercase SHA-256 digest."}
+    try:
+        path = _artifact_path(root, manifest_path)
+    except FileNotFoundError:
+        return {"status": "MANIFEST_MISSING", "manifest_path": manifest_path,
+                "manifest_sha256": None, "detail": "Referenced scan manifest is missing."}
+    if path.stat().st_size > MAX_ARTIFACT_BYTES:
+        raise ValueError("scan manifest exceeds 50 MiB")
+    raw = path.read_bytes()
+    actual_manifest_sha = hashlib.sha256(raw).hexdigest()
+    if actual_manifest_sha != manifest_sha:
+        return {"status": "MANIFEST_STALE", "manifest_path": manifest_path,
+                "manifest_sha256": actual_manifest_sha,
+                "detail": "Scan manifest bytes do not match the declared manifest SHA-256."}
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"status": "MANIFEST_INVALID", "manifest_path": manifest_path,
+                "manifest_sha256": actual_manifest_sha,
+                "detail": "Scan manifest is not valid UTF-8 JSON."}
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "usit-manifest-v1" or not isinstance(manifest.get("files"), list):
+        return {"status": "MANIFEST_INVALID", "manifest_path": manifest_path,
+                "manifest_sha256": actual_manifest_sha,
+                "detail": "Manifest schema must be usit-manifest-v1 with a files array."}
+    snapshot_file_path = entry.get("snapshot_file_path", source_path)
+    matches = [row for row in manifest["files"] if isinstance(row, dict) and row.get("path") == snapshot_file_path]
+    if not matches:
+        return {"status": "FILE_NOT_IN_MANIFEST", "manifest_path": manifest_path,
+                "manifest_sha256": actual_manifest_sha,
+                "snapshot_file_path": snapshot_file_path,
+                "detail": "Source file path is not present in the supplied scan manifest."}
+    if len(matches) != 1:
+        return {"status": "MANIFEST_DUPLICATE_PATH", "manifest_path": manifest_path,
+                "manifest_sha256": actual_manifest_sha,
+                "snapshot_file_path": snapshot_file_path,
+                "detail": "Scan manifest contains duplicate entries for the source file path."}
+    recorded_sha = matches[0].get("sha256")
+    if recorded_sha != source_sha256:
+        return {"status": "FILE_HASH_MISMATCH", "manifest_path": manifest_path,
+                "manifest_sha256": actual_manifest_sha,
+                "snapshot_file_path": snapshot_file_path,
+                "manifest_file_sha256": recorded_sha,
+                "detail": "Scan manifest file digest does not match the verified source artifact bytes."}
+    return {"status": "MATCHED_SCAN_MANIFEST_ENTRY", "manifest_path": manifest_path,
+            "manifest_sha256": actual_manifest_sha,
+            "snapshot_file_path": snapshot_file_path,
+            "manifest_file_sha256": recorded_sha,
+            "detail": "Manifest bytes match the declared digest and its exact file entry matches the verified source bytes."}
+
+
 def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
                              ledger_sha256: str | None = None) -> dict[str, Any]:
     from .ai_claim_review import validate_claim_ledger
@@ -66,6 +130,8 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
             "locator": entry["locator"],
             "binding_status": "UNVERIFIED_REFERENCE",
             "detail": "No local artifact_path was supplied; catalog presence is not artifact verification.",
+            "snapshot_binding_status": "NOT_APPLICABLE",
+            "snapshot_binding": None,
         }
         relative = entry.get("artifact_path")
         if relative is None:
@@ -102,6 +168,9 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
                 if line_count < 0 or int(line_text) > line_count:
                     row.update(binding_status="INVALID_LOCATOR", detail="Source line is outside the UTF-8 artifact.")
                 else:
+                    snapshot = _verify_scan_manifest(root, entry, relative, actual)
+                    row["snapshot_binding"] = snapshot
+                    row["snapshot_binding_status"] = snapshot["status"]
                     row.update(binding_status="ARTIFACT_HASH_MATCH_AND_LOCATOR_VALID",
                                detail="Exact source bytes match SHA-256 and the referenced line exists.")
         elif kind == "TEST_RESULT":
@@ -158,8 +227,21 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
         else:
             status = "UNVERIFIED_REFERENCE"
         claim_counts[status] = claim_counts.get(status, 0) + 1
+        source_snapshot_states = [
+            bindings[x].get("snapshot_binding_status", "NOT_PROVIDED")
+            for x in refs if x in bindings and bindings[x]["evidence_type"] == "SOURCE_CODE"
+        ]
+        if not source_snapshot_states:
+            snapshot_status = "NOT_APPLICABLE"
+        elif all(x == "MATCHED_SCAN_MANIFEST_ENTRY" for x in source_snapshot_states):
+            snapshot_status = "ALL_SOURCE_ENTRIES_MATCHED_SCAN_MANIFEST"
+        elif all(x == "NOT_PROVIDED" for x in source_snapshot_states):
+            snapshot_status = "NOT_PROVIDED"
+        else:
+            snapshot_status = "CHECK_REQUIRED"
         claims.append({
             "claim_id": claim["claim_id"],
+            "snapshot_binding_status": snapshot_status,
             "evidence_refs": list(refs),
             "unknown_evidence_refs": unknown,
             "binding_status": status,
@@ -174,12 +256,18 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
         "evidence_count": len(bindings),
         "binding_status_counts": {key: evidence_counts[key] for key in sorted(evidence_counts)},
         "evidence_bindings": list(bindings.values()),
+        "snapshot_binding_status_counts": {
+            key: sum(1 for item in bindings.values() if item.get("snapshot_binding_status") == key)
+            for key in sorted({item.get("snapshot_binding_status") for item in bindings.values()
+                               if item.get("snapshot_binding_status") not in (None, "NOT_APPLICABLE")})
+        },
         "claim_count": len(claims),
         "claim_binding_status_counts": {key: claim_counts[key] for key in sorted(claim_counts)},
         "claims": claims,
         "verification_limits": [
             "A matching SHA-256 proves byte identity against the supplied catalog digest, not artifact provenance or authenticity.",
             "SOURCE_CODE verification checks an exact UTF-8 file and line existence; it does not prove runtime execution or semantic support.",
+            "An optional usit-manifest-v1 binding checks the manifest digest and exact path-to-file SHA-256 entry; it does not authenticate who produced the manifest or prove the project snapshot was independently captured.",
             "TEST_RESULT verification checks an exact JUnit testcase and optional expected outcome; it does not prove test adequacy or business correctness.",
             "Unsupported evidence types and references without artifact_path remain UNVERIFIED_REFERENCE.",
             "No model claim or reviewer attestation is promoted to VERIFIED_FACT.",
