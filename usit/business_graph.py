@@ -464,6 +464,67 @@ def project_business_graph(graph: Mapping[str, Any],
                 })
                 database_table_links += 1
 
+    # S2.7: project explicit authorization guard/check evidence.
+    authorization_records = semantics.get("authorization_checks", [])
+    if not isinstance(authorization_records, list):
+        raise ValueError("semantics.authorization_checks must be a list")
+    authorization_linked = 0
+    authorization_unowned = 0
+    authorization_nodes: list[dict[str, Any]] = []
+    for raw in authorization_records:
+        if not isinstance(raw, Mapping):
+            continue
+        path = _source_path(raw)
+        line = _source_line(raw)
+        if not path or line is None or path not in file_ids:
+            unlinked.append({"kind": "authorization_check", "reason": "INVALID_OR_MISSING_SOURCE"})
+            continue
+        matching_calls = [
+            edge for edge in edges
+            if edge.get("type") == "calls"
+            and (edge.get("evidence") or {}).get("path") == path
+            and (edge.get("evidence") or {}).get("line") == line
+        ]
+        owners = sorted({edge.get("caller_symbol_id") for edge in matching_calls
+                         if isinstance(edge.get("caller_symbol_id"), str)})
+        owner_id = owners[0] if len(owners) == 1 and raw.get("kind") == "authorization_call" else None
+        if raw.get("kind") == "authorization_call" and owner_id is None:
+            authorization_unowned += 1
+        identity = {"path": path, "line": line, "kind": raw.get("kind"),
+                    "guard_names": raw.get("guard_names", []), "role_value": raw.get("role_value"),
+                    "owner_condition": raw.get("owner_condition"), "owner_symbol_id": owner_id}
+        auth_id = _stable_id("authorization-check", identity)
+        details = {
+            "kind": raw.get("kind") or "UNKNOWN",
+            "guard_names": raw.get("guard_names") if isinstance(raw.get("guard_names"), list) else [],
+            "role_value": raw.get("role_value"),
+            "owner_condition": bool(raw.get("owner_condition")),
+            "owner_symbol_id": owner_id,
+            "owner_resolution_status": "RESOLVED" if owner_id else "UNKNOWN",
+            "parser": raw.get("parser") or "UNKNOWN",
+            "evidence_text": raw.get("evidence_text") or "",
+        }
+        if auth_id not in existing_ids:
+            auth_node = {
+                "id": auth_id, "type": "candidate",
+                "label": f"Authorization {details['kind']} @ {path}:{line}",
+                "business_kind": "authorization_check", "business_details": details,
+                "evidence": {"path": path, "line": line, "confidence": "STATIC_INFERENCE"},
+                "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+            }
+            nodes.append(auth_node)
+            existing_ids.add(auth_id)
+            edges.append({
+                "source": file_ids[path], "target": auth_id, "type": "references",
+                "evidence": {"path": path, "line": line, "owner_symbol_id": owner_id},
+                "method": "authorization-source-line-candidate", "confidence": "low",
+                "candidate": True, "verified": False, "verification_status": "NOT_VERIFIED",
+            })
+        else:
+            auth_node = next(item for item in nodes if item.get("id") == auth_id)
+        authorization_nodes.append(auth_node)
+        authorization_linked += 1
+
     # Attach database evidence to endpoints only when its owner is present in
     # the endpoint's already-resolved, bounded call-chain symbol sequence.
     for endpoint_node in nodes:
