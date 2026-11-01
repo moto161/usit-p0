@@ -1,6 +1,7 @@
 from __future__ import annotations
 import unittest
 from usit.business_traceability import build_business_traceability
+from usit.business_traceability_report import render_business_traceability_markdown
 
 
 class BusinessTraceabilityTests(unittest.TestCase):
@@ -114,7 +115,7 @@ class BusinessTraceabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             sem_path, graph_path = base / "sem.json", base / "graph.json"
-            mapping_path, out_path = base / "mapping.json", base / "trace.json"
+            mapping_path, out_path, md_path = base / "mapping.json", base / "trace.json", base / "trace.md"
             sem_path.write_text(json.dumps(self.semantics), encoding="utf-8")
             graph_bytes = json.dumps(self.graph).encode("utf-8")
             graph_path.write_bytes(graph_bytes)
@@ -122,12 +123,16 @@ class BusinessTraceabilityTests(unittest.TestCase):
             mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
             with redirect_stdout(StringIO()):
                 code = main(["trace-business", "--semantics", str(sem_path), "--graph", str(graph_path),
-                    "--mapping", str(mapping_path), "--out", str(out_path)])
+                    "--mapping", str(mapping_path), "--out", str(out_path), "--out-md", str(md_path)])
             self.assertEqual(code, 0)
             report = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(report["schema_version"], "usit-business-traceability-matrix-v1")
             self.assertEqual(report["input_hashes"]["business_graph_sha256"], hashlib.sha256(graph_bytes).hexdigest())
             self.assertEqual(report["reviewed_mapping_count"], 2)
+            markdown = md_path.read_text(encoding="utf-8")
+            self.assertIn("# USIT 业务需求跨层追溯报告", markdown)
+            self.assertIn("查看照片", markdown)
+            self.assertIn("不证明运行时页面可达", markdown)
 
     def test_rejects_invalid_review_timestamp_and_reports_invalid_runtime_state(self):
         invalid = dict(self.mapping, mappings=[dict(self.mapping["mappings"][0], reviewed_at="yesterday")])
@@ -141,6 +146,17 @@ class BusinessTraceabilityTests(unittest.TestCase):
         mapped_row = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
         self.assertEqual(mapped_row["stage_status"]["test_execution"], "INVALID")
         self.assertEqual(result["invalid_runtime_status_function_ids"], ["bf-list"])
+
+    def test_markdown_renderer_rejects_wrong_schema_and_escapes_cells(self):
+        report = build_business_traceability(self.semantics, self.graph,
+            {"schema_version": "usit-feature-function-mapping-v1",
+             "source_graph_sha256": self.graph_hash, "mappings": []},
+            input_hashes=self.hashes)
+        report["rows"][0]["feature_name"] = "A|B"
+        markdown = render_business_traceability_markdown(report)
+        self.assertIn("A\\\\|B", markdown)
+        with self.assertRaisesRegex(ValueError, "usit-business-traceability-matrix-v1"):
+            render_business_traceability_markdown({"schema_version": "wrong"})
 
     def test_rejects_invalid_runtime_evidence_shape(self):
         evidence = {"schema_version": "usit-business-evidence-verification-v1",
