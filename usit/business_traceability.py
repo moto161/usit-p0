@@ -36,6 +36,8 @@ def build_business_traceability(
         raise ValueError("test plan must use usit-business-test-plan-v1")
     if evidence_matrix is not None and (not isinstance(evidence_matrix, dict) or evidence_matrix.get("schema_version") != "usit-business-evidence-verification-v1"):
         raise ValueError("evidence matrix must use usit-business-evidence-verification-v1")
+    if evidence_matrix is not None and evidence_matrix.get("business_graph_sha256") not in {None, graph_hash}:
+        raise ValueError("evidence matrix business_graph_sha256 does not match the supplied graph bytes")
 
     features = [item for item in semantics["features"] if isinstance(item, dict) and isinstance(item.get("name"), str)]
     feature_index: dict[tuple[str, str, int | None], dict[str, Any]] = {}
