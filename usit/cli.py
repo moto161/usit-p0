@@ -346,6 +346,9 @@ def main(argv=None):
                 plan_pair[1],matrix_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+            if markdown_output is not None:
+                markdown_output.parent.mkdir(parents=True,exist_ok=True)
+                markdown_output.write_text(render_business_traceability_markdown(result),encoding='utf-8')
             summary={"schema_version":result["schema_version"],
                      "feature_count":result["feature_count"],
                      "business_function_view_count":result["business_function_view_count"],
@@ -389,8 +392,6 @@ def main(argv=None):
             result=assess_project_quality(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],gaps_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-            if markdown_output is not None:
-                markdown_output.parent.mkdir(parents=True,exist_ok=True)
                 markdown_output.write_text(render_project_quality_markdown(result),encoding='utf-8')
             summary={"schema_version":result["schema_version"],"assessment_mode":result["assessment_mode"],
                      "inventory":result["inventory"],"dimensions":result["dimensions"],
@@ -461,7 +462,6 @@ def main(argv=None):
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding="utf-8")
             if markdown_output is not None:
                 markdown_output.parent.mkdir(parents=True,exist_ok=True)
-                markdown_output.write_text(render_business_traceability_markdown(result),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","source_format","business_function_count","coverage_status_counts")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
