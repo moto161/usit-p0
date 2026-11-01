@@ -94,7 +94,7 @@ class VerificationCaptureTests(unittest.TestCase):
         )
         result = self.run_capture(parent_code, timeout=0.3, poll_interval=0.01)
         self.assertTrue(result.timed_out)
-        self.assertIn(result.status, ("FAIL", "INFRASTRUCTURE_ERROR"))
+        self.assertEqual(result.status, "FAIL")
         time.sleep(1.6)
         self.assertFalse(marker.exists(), "timeout left a descendant process running")
         self.assertTrue(result.manifest_valid)
