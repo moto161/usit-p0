@@ -83,17 +83,16 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
                 # A recognized execution call split across lines is deliberately
                 # not reconstructed; it will be reported as NOT_ANALYZED by limits.
             else:
-                pattern = re.compile(r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(execute|query|raw)\s*\(\s*(['\"])(.*?)\3")
+                pattern = re.compile(r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(execute|query|raw)\s*\(\s*(?:(['\"])(.*?)\3)?")
                 for match in pattern.finditer(line):
-                    receiver, method, _, literal = match.groups()
-                    if "${" in literal or "\n" in literal or "\r" in literal:
-                        sql = None
-                    else:
+                    receiver, method, quote, literal = match.groups()
+                    sql = None
+                    if quote and literal is not None and "${" not in literal and "\n" not in literal and "\r" not in literal:
                         try:
-                            sql = ast.literal_eval(match.group(3) + literal + match.group(3))
+                            sql = ast.literal_eval(quote + literal + quote)
                         except (SyntaxError, ValueError):
                             sql = None
-                    found.append((receiver + "." + method, sql, "js-ts-single-line-literal"))
+                    found.append((receiver + "." + method, sql, "js-ts-single-line-literal-or-dynamic"))
             for callee, sql, parser in found:
                 parsed = _parse_sql(sql) if isinstance(sql, str) else {
                     "operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"
