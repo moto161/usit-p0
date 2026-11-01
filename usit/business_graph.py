@@ -838,6 +838,23 @@ def project_business_graph(graph: Mapping[str, Any],
             ],
         }
 
+    # S2.13-A: explicit JSX event-handler entrypoints; not yet linked to API routes.
+    frontend_interaction_bindings = []
+    for edge in edges:
+        if edge.get("method") != "typescript-jsx-event-handler-binding":
+            continue
+        evidence = edge.get("evidence") if isinstance(edge.get("evidence"), Mapping) else {}
+        frontend_interaction_bindings.append({
+            "source_file": evidence.get("path"), "line": evidence.get("line"),
+            "event_name": edge.get("event_name"), "binding_expression": edge.get("binding_expression"),
+            "handler_symbol_id": edge.get("target") if edge.get("resolution_status") == "RESOLVED" else None,
+            "resolution_status": edge.get("resolution_status") or "UNKNOWN",
+            "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+        })
+    frontend_interaction_bindings.sort(key=lambda item: (
+        str(item.get("source_file") or ""), int(item.get("line") or 0),
+        str(item.get("event_name") or ""), str(item.get("binding_expression") or ""),
+    ))
     endpoint_execution_paths = _build_endpoint_execution_paths(nodes)
     endpoint_contract_alignment = semantics.get("endpoint_contract_alignment", [])
     if not isinstance(endpoint_contract_alignment, list):
@@ -845,6 +862,8 @@ def project_business_graph(graph: Mapping[str, Any],
     result["nodes"] = nodes
     result["edges"] = edges
     result["business_understanding"] = {
+        "frontend_interaction_bindings": frontend_interaction_bindings,
+        "frontend_interaction_binding_count": len(frontend_interaction_bindings),
         "endpoint_execution_paths": endpoint_execution_paths,
         "endpoint_execution_path_count": len(endpoint_execution_paths),
         "endpoint_contract_alignment_count": len(endpoint_contract_alignment),
