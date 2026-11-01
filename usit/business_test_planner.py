@@ -210,7 +210,7 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
             }:
                 warnings.append("ignored unsupported or incomplete endpoint contract alignment")
                 continue
-            flow = _path_for(method, endpoint_path) if status in {"EXACT_MATCH", "MULTIPLE_CODE_MATCHES"} else None
+            flow = _path_for(method, endpoint_path) if status == "EXACT_MATCH" else None
             refs = _api_refs(alignment, flow)
             if status == "EXACT_MATCH":
                 category = "api_contract_verification"
