@@ -155,12 +155,10 @@ def parser_availability(project_root: Path) -> dict[str, Any]:
     if not trust["trusted"]:
         return {
             "available": False, "reason": trust["reason"], "node": node,
-            "ts_lib": trust["ts_lib"], "ts_lib_real_path": trust["real_path"],
             "parser_name": PARSER_NAME,
         }
     return {
         "available": True, "node": node, "version": trust["version"],
-        "ts_lib": trust["ts_lib"], "ts_lib_real_path": trust["real_path"],
         "parser_name": PARSER_NAME,
     }
 
