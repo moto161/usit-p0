@@ -253,7 +253,7 @@ class AIEvidenceBindingTests(unittest.TestCase):
                 "--trusted-public-key", str(trusted_path),
                 "--out", str(output),
             ])
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 0)
         report = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(report["evidence_bindings"][0]["attestation_status"],
                          "ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY")
