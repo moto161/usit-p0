@@ -188,7 +188,9 @@ class AIEvidenceBindingTests(unittest.TestCase):
         self._attach_scan_attestation()
         sidecar = self.root / "scan_attestation.json"
         value = __import__("json").loads(sidecar.read_bytes())
-        value["signature"] = "A" * 88
+        signature = bytearray(__import__("base64").b64decode(value["signature"]))
+        signature[0] ^= 1
+        value["signature"] = __import__("base64").b64encode(signature).decode("ascii")
         sidecar.write_text(__import__("json").dumps(value), encoding="utf-8")
         result = verify_evidence_bindings(
             self.ledger, self.root, trusted_public_keys={self.attestation_key_id: self.attestation_public}
