@@ -303,12 +303,8 @@ class ZRFX9BeforeAfterEvidence(_Base):
     """The before/after B3 logs exist and show the transition."""
 
     def test_zrfx9_before_and_after_logs(self):
-        before_path = OUT / "B3_BEFORE_FIX.json"
-        after_path = OUT / "B3_AFTER_FIX.json"
-        if not before_path.is_file() or not after_path.is_file():
-            self.skipTest("historical B3 before/after evidence files are not included in this source checkout")
-        before = json.loads(before_path.read_text(encoding="utf-8"))
-        after = json.loads(after_path.read_text(encoding="utf-8"))
+        before = json.loads((OUT / "B3_BEFORE_FIX.json").read_text(encoding="utf-8"))
+        after = json.loads((OUT / "B3_AFTER_FIX.json").read_text(encoding="utf-8"))
         self.assertTrue(before["accepts_A_count_as_trusted"])
         self.assertFalse(after["accepts_A_count_as_trusted"])
         self.assertEqual(after["verified_mapping"], {})
