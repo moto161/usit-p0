@@ -141,7 +141,7 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         binding = next(edge for edge in graph["edges"]
                        if edge.get("method") == "typescript-route-handler-binding"
                        and edge.get("route_path") == "/photos")
-        self.assertEqual(binding["resolution_status"], "RESOLVED")
+        self.assertEqual(binding["resolution_status"], "RESOLVED", msg=repr(binding))
         self.assertEqual(binding["target"], "symbol:controllers/photos.js#uploadPhoto:1")
         from usit.business_graph import project_business_graph
         projected = project_business_graph(graph, {"endpoints": [{
