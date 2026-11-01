@@ -46,6 +46,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - name: Install pinned Python runtime dependencies
+        run: python -m pip install 'cryptography==50.0.2'
       - name: Install the pinned local TypeScript parser
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run USIT self-test on Windows
