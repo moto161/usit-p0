@@ -221,7 +221,7 @@ TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调
 python -m usit ingest-test-results --junit junit.xml --mapping reviewed-test-map.json --graph business_knowledge_graph.json --out test_execution_results.json
 ```
 
-功能状态规则：有失败/错误为 `FAILED`；全部映射用例通过为 `PASSED`；存在跳过且没有失败为 `UNKNOWN`；没有匹配执行记录为 `NOT_EXECUTED`。未映射用例、映射但报告中缺失的用例、输入 SHA-256 均保留。JUnit 通过不等于需求完整实现；代码覆盖率仍为 `NOT_MEASURED`。当前版本仅支持 JUnit XML，其他测试报告格式和覆盖率报告尚未接入。
+功能状态规则：任一已报告映射用例失败/错误为 `FAILED`；只有所有已映射预期 testcase 都出现在报告且全部通过，才标记 `PASSED`；存在跳过或报告不完整（部分映射 testcase 缺失）且没有已观察失败时标记 `UNKNOWN`；没有任何匹配执行记录时标记 `NOT_EXECUTED`。部分报告会输出 `expected_mapped_test_case_count`、`reported_mapped_test_case_count`、`mapped_case_completeness`、`mapped_cases_missing_from_report` 和 `execution_status_reason`，不再因已出现用例全通过就误判整个功能通过。未映射用例、输入 SHA-256 均保留。JUnit 通过不等于需求完整实现；代码覆盖率仍为 `NOT_MEASURED`。
 
 
 ## S2.16 — 多测试框架结果与代码覆盖率回流（部分适配）
