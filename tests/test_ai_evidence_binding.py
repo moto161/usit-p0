@@ -333,6 +333,23 @@ class AIEvidenceBindingTests(unittest.TestCase):
                          "ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY")
         self.assertEqual(report["claims"][0]["truth_status"], "NOT_ESTABLISHED")
 
+    def test_cli_fails_when_unreferenced_catalog_evidence_is_missing(self):
+        self.ledger["claims"][0]["evidence_refs"] = ["test"]
+        self.ledger["evidence_catalog"][0]["artifact_path"] = "missing-source.py"
+        ledger_path = self.root / "ledger-orphan-missing.json"
+        ledger_path.write_text(json.dumps(self.ledger), encoding="utf-8")
+        output = self.root / "binding-orphan-report.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main([
+                "verify-evidence-bindings", "--input", str(ledger_path),
+                "--evidence-root", str(self.root), "--out", str(output),
+            ])
+        self.assertEqual(code, 2)
+        report = json.loads(output.read_text(encoding="utf-8"))
+        source_binding = next(x for x in report["evidence_bindings"]
+                              if x["evidence_id"] == "src")
+        self.assertEqual(source_binding["binding_status"], "MISSING")
+
     def test_hash_mismatch_is_stale(self):
         self.ledger["evidence_catalog"][0]["source_sha256"] = "0" * 64
         result = verify_evidence_bindings(self.ledger, self.root)
