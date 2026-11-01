@@ -6,6 +6,7 @@ to an endpoint-centred business-function view.
 """
 from __future__ import annotations
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 
@@ -86,6 +87,10 @@ def build_business_traceability(
         for required in ("reviewed_by", "reviewed_at", "rationale"):
             if not isinstance(mapping.get(required), str) or not mapping[required].strip():
                 raise ValueError(f"mappings[{index}] requires non-empty {required}")
+        try:
+            datetime.fromisoformat(mapping["reviewed_at"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"mappings[{index}].reviewed_at must be an ISO-8601 timestamp") from exc
         if decision == "APPROVED_LINK" and (not isinstance(mapping.get("business_function_id"), str) or not mapping["business_function_id"]):
             raise ValueError(f"mappings[{index}] approved link requires business_function_id")
         mapping_by_feature[key] = mapping
@@ -132,6 +137,14 @@ def build_business_traceability(
             linkage = "MAPPING_TARGET_NOT_FOUND_IN_GRAPH"
         candidate_items = candidates_by_function.get(fid, []) if view else []
         runtime = runtime_by_function.get(fid) if view else None
+        runtime_status = runtime.get("test_execution_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
+        coverage_status = runtime.get("code_coverage_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
+        valid_runtime_statuses = {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"}
+        valid_coverage_statuses = {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}
+        if runtime_status not in valid_runtime_statuses:
+            runtime_status = "INVALID"
+        if coverage_status not in valid_coverage_statuses:
+            coverage_status = "INVALID"
         stages = {
             "requirement_to_business_function": linkage,
             "business_function_to_frontend_entrypoint": "LINKED" if view and view.get("frontend_entrypoint_count", len(view.get("frontend_entrypoints", []))) else "NOT_LINKED_OR_UNKNOWN",
@@ -142,8 +155,8 @@ def build_business_traceability(
             "authorization_evidence": (view.get("stage_status", {}).get("authorization", "UNKNOWN") if view else "NOT_AVAILABLE"),
             "identity_resource_evidence": (view.get("stage_status", {}).get("identity_resource", "UNKNOWN") if view else "NOT_AVAILABLE"),
             "test_design": "CANDIDATE_LINKED" if candidate_items else ("NO_LINKED_TEST_CANDIDATE" if view else "NOT_AVAILABLE"),
-            "test_execution": runtime.get("test_execution_status", "NOT_MEASURED") if runtime else "NOT_MEASURED",
-            "code_coverage": runtime.get("code_coverage_status", "NOT_MEASURED") if runtime else "NOT_MEASURED",
+            "test_execution": runtime_status,
+            "code_coverage": coverage_status,
         }
         row_status = "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} else (
             "TRACEABLE_TO_STATIC_FUNCTION_VIEW" if view else linkage)
@@ -202,11 +215,15 @@ def build_business_traceability(
         "unmapped_feature_count": sum(1 for row in result_rows if row["mapping_decision"] == "NOT_MAPPED"),
         "unlinked_runtime_function_ids": sorted(set(runtime_by_function) - set(functions)),
         "unlinked_test_design_function_ids": sorted(set(candidates_by_function) - set(functions)),
+        "invalid_runtime_status_function_ids": sorted(fid for fid, row in runtime_by_function.items()
+            if row.get("test_execution_status", "NOT_MEASURED") not in {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"}
+            or row.get("code_coverage_status", "NOT_MEASURED") not in {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}),
         "limitations": [
             "只有 mapping manifest 中逐项审阅并批准的精确 feature source/name → business_function_id 才建立需求追溯；不按名称、模块、目录或相邻代码猜测。",
             "静态 UI → API → endpoint → handler/call/DB/authorization/identity 关联不证明运行时页面可达、代码执行或业务正确。",
             "测试候选表示测试设计，不表示执行；运行时状态仅来自导入的测试证据。",
             "代码覆盖和权限/身份阶段状态仅表示输入工件中的证据状态，不证明安全性或业务正确性。",
             "映射 manifest 绑定精确 graph SHA-256；图谱变化后必须重新审阅或重新生成映射，旧映射不会自动迁移。",
+            "reviewed_by/reviewed_at/rationale 是审阅者提供的审计元数据，不构成身份认证或电子签名。",
         ],
     }
