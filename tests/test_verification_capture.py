@@ -188,6 +188,17 @@ class VerificationCaptureTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         verified = capture.verify_manifest(result.evidence_dir)
         self.assertFalse(verified["valid"])
+
+    def test_manifest_rejects_ntfs_alternate_data_stream_path(self):
+        result = self.run_capture("pass")
+        manifest_path = Path(result.manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        stdout = next(item for item in manifest["artifacts"] if item["path"] == "stdout.log")
+        stdout["path"] = "stdout.log:secret"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        verified = capture.verify_manifest(result.evidence_dir)
+        self.assertFalse(verified["valid"])
+        self.assertTrue(any("unsafe artifact path" in error for error in verified["errors"]))
         self.assertTrue(any("omits required artifacts" in error for error in verified["errors"]))
 
     def test_evidence_parent_inside_project_is_rejected(self):
