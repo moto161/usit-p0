@@ -68,3 +68,10 @@ python -m usit plan-business-tests "C:\\path\\to\\your-project" --out "C:\\USIT-
 The command writes `business_semantics.json` and `business_test_plan.json` to a new output directory outside the target project. It reuses the explicit static-read-only authorization gate. Candidates are derived from discovered PRD features, API endpoints, documented data entities and static discrepancies; each candidate retains source evidence, preconditions, steps, limitations and an explicit `NOT_EXECUTED` status. The planner does not invent acceptance criteria or expected HTTP status codes: candidates remain `CANDIDATE_NEEDS_REQUIREMENTS` until the owner supplies verifiable requirements.
 
 Optional `--graph` accepts an existing `knowledge_graph.json` produced by a completed USIT scan. When supplied, USIT emits `business_knowledge_graph.json`, adding business candidate nodes and exact source-file reference edges. The graph input must be outside the target project and output directory. Only exact relative source-path matches are linked; unmatched records remain listed as unlinked. This is a static evidence anchor, not proof of runtime reachability, implementation, or a complete business flow. No project code, build, test, database, device or network operation is executed.
+
+
+## S2.1 — API route → handler evidence association (partial)
+
+The business graph records a named route callback when it is a simple identifier or member expression on the same source line. With an existing `knowledge_graph.json`, USIT links the endpoint candidate to a unique function/method symbol only when that symbol is defined in the exact same route file. The relation is a candidate reference (`verified=false`, `verification_status=NOT_VERIFIED`, `confidence=STATIC_INFERENCE`), not runtime proof.
+
+Duplicate same-file symbol names are marked `AMBIGUOUS`. Missing declarations, imported/member handlers, inline callbacks, multiline registrations and dynamic expressions remain `UNKNOWN` or `NOT_ANALYZED`; USIT does not guess across files or match globally by name. This slice does not yet prove authorization-to-handler flow, handler-to-database flow, or runtime reachability.
