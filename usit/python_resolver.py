@@ -89,14 +89,17 @@ def _collect_bindings(node: ast.AST) -> set[str]:
 
 class _CallVisitor(ast.NodeVisitor):
     def __init__(self):
-        self.calls: list[tuple[ast.Call, set[str]]] = []
+        self.calls: list[tuple[ast.Call, set[str], tuple[str, int] | None]] = []
         self.scopes: list[set[str]] = []
+        self.owners: list[tuple[str, int]] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.owners.append((node.name, node.lineno))
         self.scopes.append(_collect_bindings(node))
         for statement in node.body:
             self.visit(statement)
         self.scopes.pop()
+        self.owners.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -112,7 +115,8 @@ class _CallVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         shadowed = set().union(*self.scopes) if self.scopes else set()
-        self.calls.append((node, shadowed))
+        caller = self.owners[-1] if self.owners else None
+        self.calls.append((node, shadowed, caller))
         self.generic_visit(node)
 
 
@@ -302,7 +306,7 @@ def resolve_python_calls(root: str, rows: list[dict[str, Any]], *,
         visitor = _CallVisitor()
         visitor.visit(tree)
         calls: list[dict[str, Any]] = []
-        for call, shadowed in sorted(visitor.calls, key=lambda pair: (pair[0].lineno, pair[0].col_offset)):
+        for call, shadowed, caller in sorted(visitor.calls, key=lambda item: (item[0].lineno, item[0].col_offset)):
             func = call.func
             line = call.lineno
             col = call.col_offset
@@ -410,6 +414,9 @@ def resolve_python_calls(root: str, rows: list[dict[str, Any]], *,
                 record["import_evidence"] = import_evidence
             if candidates:
                 record["candidate_targets"] = [item["id"] for item in candidates]
+            if caller:
+                record["caller"] = {"name": caller[0], "line": caller[1]}
+                record["caller_symbol_id"] = _definition_id(rel, caller[0], caller[1])
             calls.append(record)
         rows_by_path = next(row for row in rows if row.get("path") == rel)
         rows_by_path["calls"] = calls
