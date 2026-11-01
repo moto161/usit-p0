@@ -582,3 +582,34 @@ python -m usit review-ai-claims --input .\\ai-claim-ledger.json --out .\\ai-clai
 ```
 
 账本必须由操作人员或经审阅的结构化适配流程提供。不要把模型自由文本直接复制成“已验证证据”；模型自报 confidence 不代表校准概率。
+
+
+## S2.27-A — AI 主张证据绑定校验（本地只读）
+
+`verify-evidence-bindings` 将 `usit-ai-claim-ledger-v1` 中的证据目录引用与本地真实 artifact 字节核对。它不执行项目代码、构建或测试，不联网，也不读取凭证。
+
+### 证据目录扩展字段
+
+每个 `evidence_catalog` 条目保留既有字段，并可增加：
+- `artifact_path`：相对于 `--evidence-root` 的 POSIX 相对路径；禁止绝对路径、路径穿越和符号链接。
+- `SOURCE_CODE`：`locator` 必须为 `artifact_path:line`，校验 UTF-8 文件哈希与行号存在。
+- `TEST_RESULT`：当前仅支持 JUnit XML；`locator` 必须为 `artifact_path#test_case_id`。可选 `expected_test_status`（PASSED/FAILED/SKIPPED）用于核对报告中的真实 testcase 结果。
+
+既有条目没有 `artifact_path` 时兼容保留，但状态为 `UNVERIFIED_REFERENCE`，不能因为 ID 存在于目录就算验证通过。
+
+### 运行
+
+```powershell
+python -m usit verify-evidence-bindings --input .\\ai-claim-ledger.json --evidence-root .\\evidence --out .\\ai-evidence-bindings.json
+```
+
+### 状态与限制
+
+- `ARTIFACT_HASH_MATCH_AND_LOCATOR_VALID`：精确字节哈希匹配，且当前支持的定位符有效。
+- `STALE`：实际 artifact SHA-256 与目录中的 `source_sha256` 不一致。
+- `MISSING`：引用文件不存在。
+- `INVALID_LOCATOR`：源码行或 JUnit testcase 定位无效。
+- `CONFLICT`：目录声明的预期测试结果与 JUnit testcase 实际结果不一致。
+- `UNKNOWN_REFERENCE` / `UNVERIFIED_REFERENCE`：未知 ID、缺少 artifact 或暂不支持的证据类型。
+
+即使所有绑定均为 `ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED`，也只证明字节与定位符符合提供的目录声明；不证明来源可信、审阅者身份真实、代码语义支持主张或业务功能正确。所有主张的 `truth_status` 固定为 `NOT_ESTABLISHED`，不会提升为 `VERIFIED_FACT`。报告为新文件，不覆盖已有结果。
