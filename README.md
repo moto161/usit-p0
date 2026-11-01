@@ -402,3 +402,37 @@ python -m usit trace-business --semantics .\\business_semantics.json --graph .\\
 ```
 
 新增的 `runtime_observation` 阶段与 `test_execution` 分开记录：前者只表示事件已观察并通过显式业务功能 ID 关联；后者仍只来自已导入的测试执行报告。需求未获审阅映射时，即使运行事件存在，也不会把事件自动关联到该需求。图谱哈希不匹配会拒绝回填；事件验证报告内部存在冲突时，追溯行保留 `EVIDENCE_CONFLICT`，不把冲突事件标成可信观察。
+
+
+## S2.23 — Android 原生应用事件适配器（离线）
+
+新增 `usit/android_event_adapter.py` 与 `adapt-android-events`。它把 Android Instrumentation / UI Automator / Espresso 等测试端导出的结构化 JSONL 记录转换为统一的 `usit-runtime-evidence-v1`。本阶段只实现文件适配，不包含 ADB 连接、设备控制、APK 安装、应用启动或 Android SDK 编译。
+
+### 输入格式
+
+每条有效记录必须以 `USIT_ANDROID_EVENT ` 开头，后面跟一个 JSON 对象。普通 logcat 行会被忽略，不会复制到输出。示例：
+
+```text
+USIT_ANDROID_EVENT {"event_id":"evt-001","timestamp":"2026-11-01T12:00:01+08:00","event":"screen_opened","correlation_id":"flow-001","business_function_id":"bf-photo-view","screen_id":"PhotoDetail","app_state":"RESUMED"}
+USIT_ANDROID_EVENT {"event_id":"evt-002","timestamp":"2026-11-01T12:00:02+08:00","event":"ui_action","correlation_id":"flow-001","parent_event_id":"evt-001","business_function_id":"bf-photo-view","screen_id":"PhotoDetail","control_id":"openButton","action":"tap","result":"accepted"}
+USIT_ANDROID_EVENT {"event_id":"evt-003","timestamp":"2026-11-01T12:00:03+08:00","event":"permission_result","correlation_id":"flow-001","parent_event_id":"evt-002","permission":"android.permission.READ_MEDIA_IMAGES","granted":true}
+USIT_ANDROID_EVENT {"event_id":"evt-004","timestamp":"2026-11-01T12:00:04+08:00","event":"http_request","correlation_id":"flow-001","parent_event_id":"evt-002","http_method":"GET","route_template":"/api/photos/{id}"}
+USIT_ANDROID_EVENT {"event_id":"evt-005","timestamp":"2026-11-01T12:00:05+08:00","event":"http_response","correlation_id":"flow-001","parent_event_id":"evt-004","status_code":200}
+```
+
+支持事件：`screen_opened`、`ui_action`、`permission_result`、`auth_context`、`http_request`、`http_response`、`backend_span`、`database_change`。事件类型映射为统一模型中的 APP_STATE、UI_ACTION、PERMISSION_RESULT、AUTH_CONTEXT、HTTP_REQUEST、HTTP_RESPONSE、BACKEND_SPAN、DATABASE_CHANGE。
+
+### 转换与校验命令
+
+```powershell
+python -m usit adapt-android-events --input .\\android-events.jsonl --graph .\\business_knowledge_graph.json --session-id android-run-001 --captured-at 2026-11-01T12:00:00+08:00 --out .\\runtime-events.json
+python -m usit validate-runtime-evidence --events .\\runtime-events.json --graph .\\business_knowledge_graph.json --out .\\runtime-evidence-validation.json
+```
+
+适配器只接受白名单字段；未知字段（包括 token、密码、请求正文、Cookie 等）直接拒绝。业务功能 ID 必须已存在于输入图谱；不按 Activity、页面名或控件名猜测业务归属。事件 ID 必须唯一，时间戳必须带时区。输入和输出不得为符号链接，输出不得覆盖已有文件。
+
+### 采集端接入约定
+
+Android 测试适配器应在明确的测试/观测授权下发出结构化事件，优先使用不含个人信息的 screen_id、control_id、route_template 与 opaque actor_ref。每个 UI 测试动作由采集端生成 event_id 和 correlation_id；父事件关系必须由采集端真实掌握后再写入 parent_event_id。禁止把完整 logcat、HTTP headers/body、访问令牌、用户手机号/邮箱或数据库原始值当作事件属性提交。
+
+适配器生成的文件可直接交给统一校验器，再通过 `trace-business --runtime-evidence` 回填业务追溯。转换成功只代表格式适配成功；校验通过只代表事件结构有效；两者都不代表 Android 功能测试通过或业务正确。
