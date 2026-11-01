@@ -166,6 +166,17 @@ class AIEvidenceBindingTests(unittest.TestCase):
                          "snapshot-scan_manifest.json")
         self.assertEqual(result["claims"][0]["truth_status"], "NOT_ESTABLISHED")
 
+    def test_trusted_manifest_signature_does_not_hide_source_entry_mismatch(self):
+        self._attach_scan_manifest(recorded_sha="0" * 64)
+        self._attach_scan_attestation()
+        result = verify_evidence_bindings(
+            self.ledger, self.root, trusted_public_keys={self.attestation_key_id: self.attestation_public}
+        )
+        self.assertEqual(result["evidence_bindings"][0]["attestation_status"],
+                         "ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY")
+        self.assertEqual(result["evidence_bindings"][0]["snapshot_binding_status"],
+                         "FILE_HASH_MISMATCH")
+        self.assertEqual(result["claims"][0]["snapshot_provenance_status"], "CHECK_REQUIRED")
     def test_expected_snapshot_identity_policy_mismatch_is_rejected(self):
         self._attach_scan_manifest()
         self._attach_scan_attestation()
