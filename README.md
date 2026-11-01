@@ -391,3 +391,14 @@ python -m usit validate-runtime-evidence --events .\\runtime-events.json --graph
 - 图谱 SHA-256 不一致、未知业务功能 ID、缺失父事件、跨关联父子关系和父子时间倒置均保留为冲突。
 - 完整 UI→HTTP→后端→数据库链不是每项业务功能的强制模板；缺失阶段表示未观察，不自动认定为缺陷。
 - 输出报告记录事件文件与图谱哈希；输入和输出均不得是符号链接，输出不得覆盖已有文件。
+
+
+### 将运行时观察回填到需求追溯矩阵
+
+完成事件结构校验后，可把校验报告传给 `trace-business`：
+
+```powershell
+python -m usit trace-business --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --mapping .\\feature-function-mapping.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --runtime-evidence .\\runtime-evidence-validation.json --out .\\business-traceability-matrix.json --out-md .\\business-traceability-report.md
+```
+
+新增的 `runtime_observation` 阶段与 `test_execution` 分开记录：前者只表示事件已观察并通过显式业务功能 ID 关联；后者仍只来自已导入的测试执行报告。需求未获审阅映射时，即使运行事件存在，也不会把事件自动关联到该需求。图谱哈希不匹配会拒绝回填；事件验证报告内部存在冲突时，追溯行保留 `EVIDENCE_CONFLICT`，不把冲突事件标成可信观察。
