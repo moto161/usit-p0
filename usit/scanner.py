@@ -103,7 +103,7 @@ def is_sensitive(rel: str) -> bool:
     return False
 
 def discover_files(root: Path, *, deadline: float | None = None, clock=time.monotonic,
-                   identities: dict[str, tuple[int, int]] | None = None) -> list[Path]:
+                   identities: dict[str, tuple[int, int, int]] | None = None) -> list[Path]:
     """Bounded, deterministic discovery. Any unsafe path or budget ambiguity blocks the scan.
 
     P0.7.4: when ``identities`` is supplied it is filled with the ``(st_dev,
@@ -170,7 +170,7 @@ def discover_files(root: Path, *, deadline: float | None = None, clock=time.mono
             total_bytes+=size
             out.append(path)
             if identities is not None:
-                identities[rel]=safeio.identity_of(info)
+                identities[rel]=(*safeio.identity_of(info), int(info.st_ctime_ns))
     return sorted(out,key=lambda path:path.relative_to(root).as_posix().casefold())
 
 def lang_for(path: Path) -> str:
@@ -231,7 +231,7 @@ def _write_scan_status(directory: Path, exc: BaseException) -> None:
         pass
 
 
-def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int] | None = None,
+def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, ...] | None = None,
                     identity_out: dict[str, Any] | None = None) -> bytes:
     """Open a discovered input file and read it without following an escape.
 
@@ -245,7 +245,7 @@ def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int
     2. The descriptor requests read access only, so a concurrent write, rename or
        delete is denied while it is held.
     3. The descriptor's reparse attribute and hard-link count are checked, and its
-       identity ``(st_dev, st_ino)`` is compared against the identity recorded at
+       identity ``(st_dev, st_ino, st_ctime_ns)`` is compared against the identity recorded at
        discovery.  A mismatch means the path was substituted for a different file
        — including an *intermediate* directory junction, which the final-component
        no-follow cannot see — and the scan fails closed before reading.
@@ -292,9 +292,20 @@ def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int
             raise ScanBlocked('REPARSE_POINT_REJECTED', 'Input path is a symbolic link, junction or reparse point.')
         if getattr(info, 'st_nlink', 1) > 1:
             raise ScanBlocked('HARD_LINK_REJECTED', 'Input file has multiple hard links; refusing to read a multiply-linked file.')
-        if expected_identity is not None and safeio.identity_of(info) != tuple(expected_identity):
-            raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
-                              'The opened file is not the file that was discovered; the input was substituted before reading.')
+        if expected_identity is not None:
+            expected = tuple(expected_identity)
+            if safeio.identity_of(info) != expected[:2]:
+                raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                  'The opened file is not the file that was discovered; the input was substituted before reading.')
+            if len(expected) >= 3:
+                try:
+                    opened_ctime_ns = int(info.st_ctime_ns)
+                except (AttributeError, TypeError, ValueError):
+                    raise ScanBlocked('FILE_IDENTITY_UNAVAILABLE',
+                                      'The opened file identity metadata is incomplete; refusing to read.')
+                if opened_ctime_ns != expected[2]:
+                    raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                      'The opened file metadata changed after discovery; refusing to read.')
         return os.read(fd, limit + 1)
     finally:
         try:
