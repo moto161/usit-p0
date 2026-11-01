@@ -212,6 +212,34 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertNotEqual(binding["resolution_status"], "RESOLVED")
         self.assertFalse(binding["resolved"])
 
+    def test_jsx_event_handler_binding_resolves_unique_named_handler(self):
+        (self.root / "PhotoPage.tsx").write_text(
+            "export function PhotoPage() { return <button onClick={loadPhotos}>Load</button>; }\\n"
+            "export function loadPhotos() { return fetch('/api/photos'); }\\n", encoding="utf-8")
+        out = self.root.parent / "jsx-event-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"] if edge.get("method") == "typescript-jsx-event-handler-binding")
+        self.assertEqual(binding["event_name"], "onClick")
+        self.assertEqual(binding["resolution_status"], "RESOLVED")
+        self.assertEqual(binding["target"], "symbol:PhotoPage.tsx#loadPhotos:2")
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"features": [], "entities": [], "endpoints": []})
+        rows = projected["business_understanding"]["frontend_interaction_bindings"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["handler_symbol_id"], "symbol:PhotoPage.tsx#loadPhotos:2")
+        self.assertEqual(rows[0]["verification_status"], "NOT_VERIFIED")
+
+    def test_jsx_inline_callback_is_not_misreported_as_resolved_symbol(self):
+        (self.root / "Inline.tsx").write_text(
+            "export function Page() { return <button onClick={() => save()}>Save</button>; }\\n", encoding="utf-8")
+        out = self.root.parent / "jsx-inline-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"] if edge.get("method") == "typescript-jsx-event-handler-binding")
+        self.assertEqual(binding["resolution_status"], "INLINE_CALLBACK_NOT_SYMBOL_LINKED")
+        self.assertFalse(binding["resolved"])
+
     def test_python_lambda_calls_do_not_inherit_outer_function_owner(self):
         source = "def run():\n    callback = lambda: helper()\n    helper()\n"
         (self.root / "lambda_scope.py").write_text(source, encoding="utf-8")
