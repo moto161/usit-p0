@@ -129,6 +129,8 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                                 f"      - {_cell(path or evidence_item.get('kind') or evidence_item.get('operation') or '结构化证据')}"
                                 f"{':' + _cell(line) if line is not None else ''}"
                             )
+                for limitation in _items(candidate.get("limitations")):
+                    lines.append(f"    - 候选限制：{_cell(limitation)}")
         lines.append("- 证据引用：")
         refs = _items(row.get("evidence_refs"))
         if refs:
