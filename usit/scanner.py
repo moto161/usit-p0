@@ -964,6 +964,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             row['symbols']=parsed.get('symbols',[])
             row['imports']=parsed.get('imports',[])
             row['calls']=parsed.get('calls',[])
+            row['route_handlers']=parsed.get('route_handlers',[])
             row['analysis_diagnostics']=parsed.get('diagnostics',[])
             row['syntax_status']=parsed.get('syntax_status','UNKNOWN')
             row['parser']={**js_ts_capabilities[row['language']],'parser_name':parsed.get('parser_name','typescript-compiler-api'),
