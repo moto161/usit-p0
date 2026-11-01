@@ -87,10 +87,10 @@ def _plan_business_tests(a) -> int:
     plan = plan_business_tests(semantics)
     out.mkdir(parents=True, exist_ok=False)
     (out / "business_semantics.json").write_text(
-        json.dumps(semantics, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8"
+        json.dumps(semantics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     (out / "business_test_plan.json").write_text(
-        json.dumps(plan, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8"
+        json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     summary = {
         "project_root": str(project),
