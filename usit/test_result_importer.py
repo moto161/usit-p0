@@ -12,6 +12,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from .test_report_adapters import parse_pytest_json
+
 SCHEMA_VERSION = "usit-test-execution-results-v1"
 MAX_REPORT_BYTES = 20 * 1024 * 1024
 MAX_TESTCASES = 200_000
@@ -85,6 +87,7 @@ def ingest_junit_results(
     report_path: str | Path,
     mapping_path: str | Path,
     business_graph_path: str | Path,
+    report_format: str = "junit-xml",
 ) -> dict[str, Any]:
     """Parse JUnit and compute function status using explicit testcase mappings.
 
@@ -145,7 +148,12 @@ def ingest_junit_results(
             raise ValueError(f"duplicate mapping for test_case_id: {case_id}")
         explicit_map[case_id] = function_id
 
-    cases = _parse_junit(report_bytes)
+    if report_format == "junit-xml":
+        cases = _parse_junit(report_bytes)
+    elif report_format == "pytest-json":
+        cases = parse_pytest_json(report_bytes)
+    else:
+        raise ValueError("report_format must be junit-xml or pytest-json")
     actual_ids = {item["test_case_id"] for item in cases}
     mapped_cases: dict[str, list[dict[str, Any]]] = defaultdict(list)
     unmapped = []
@@ -189,7 +197,7 @@ def ingest_junit_results(
     return {
         "schema_version": SCHEMA_VERSION,
         "model": "JUnitResultImporter",
-        "source_format": "JUNIT_XML",
+        "source_format": "JUNIT_XML" if report_format == "junit-xml" else "PYTEST_JSON",
         "source_hashes": {
             "junit_xml_sha256": _sha256(report_bytes),
             "mapping_json_sha256": _sha256(mapping_bytes),
