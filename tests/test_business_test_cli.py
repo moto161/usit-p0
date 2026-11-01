@@ -78,6 +78,13 @@ class BusinessTestCliTests(unittest.TestCase):
                 if edge.get("method") == "business-semantics-source-link"
             ))
             self.assertEqual(summary["business_graph_linked_records"], 2)
+            endpoint_edges = [
+                edge for edge in business_graph["edges"]
+                if edge.get("method") == "business-semantics-source-link"
+                and edge.get("evidence", {}).get("path") == "server/routes/photos.js"
+            ]
+            self.assertEqual(len(endpoint_edges), 1)
+            self.assertEqual(endpoint_edges[0]["evidence"].get("line"), 1)
             semantics = json.loads(semantics_path.read_text(encoding="utf-8"))
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             self.assertGreaterEqual(semantics["feature_count"], 1)
