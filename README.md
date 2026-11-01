@@ -103,6 +103,14 @@ When projecting into `business_knowledge_graph.json`, USIT associates a database
 Dynamic SQL, concatenation, multiline SQL, CTE/UNION statements, unsupported SQL forms, missing/ambiguous caller ownership, and undocumented tables are not guessed. This slice does not prove runtime execution, actual read/write effects, transaction commit, parameter values, field-level data flow, ORM model-to-table mapping, or authorization enforcement. All database links remain candidate/unverified static evidence.
 
 
+## S2.9 — Identity and resource-ownership evidence (partial)
+
+The business-semantics pass now extracts a deliberately narrow set of identity/resource patterns: recognizable authenticated-identity expressions (for example, `req.user.id`), request-controlled identity inputs (for example, `req.body.user_id`), explicit same-line owner comparisons, and same-line SQL owner predicates whose call expression also contains one of those identity expressions. Records retain source path/line, expression details, `STATIC_INFERENCE`, `NOT_VERIFIED` and `SAME_LINE_PATTERN`.
+
+The business graph projects these as `identity_evidence` candidate nodes. An identity record is attached to a database-access candidate only when source path and line match exactly; endpoint association receives it only through a database access already linked to its resolved bounded handler call chain. The security test planner can then propose verification candidates for request-controlled identity → SQL owner patterns and authenticated-identity → SQL owner patterns. Neither is treated as proof of a vulnerability or proof of correct enforcement.
+
+This is not yet general data-flow/taint analysis. It does not propagate values across lines, variables, parameters, returns, aliases, closures, imports, middleware, ORM abstractions or control-flow branches; it does not resolve actual SQL parameter arrays or prove that a textually co-occurring expression is the bound value. Missing evidence is UNKNOWN, not evidence of safety. No runtime requests, builds, database operations or target-project modifications are performed.
+
 ## S2.8 — Authorization-gap analysis → security test candidates (partial)
 
 When `plan-business-tests` receives an existing `knowledge_graph.json` through `--graph`, USIT now also emits `security_test_candidates.json`. The planner reuses endpoint handler associations, bounded call-chain evidence, reachable authorization indicators and function-owned SQL access evidence. Candidate categories include unauthenticated boundary verification, role-boundary verification, cross-user resource isolation, owner/user ID parameter-tampering checks, and alternate-entrypoint authorization review where two endpoints share the same statically linked database-access record but expose different authorization-signal statuses.
