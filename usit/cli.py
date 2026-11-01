@@ -24,6 +24,7 @@ from .business_traceability_report import render_business_traceability_markdown
 from .runtime_evidence import validate_runtime_evidence_files
 from .android_event_adapter import adapt_android_jsonl_file
 from .ai_gateway import Agent2APIClient, DEFAULT_BASE_URL, DEFAULT_API_KEY_ENV
+from .ai_orchestrator import load_model_registry, run_ensemble, registry_template
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -260,8 +261,43 @@ def main(argv=None):
     ac.add_argument('--api-key-env',default=DEFAULT_API_KEY_ENV,help='Environment variable containing the optional gateway key')
     ac.add_argument('--timeout',type=float,default=60.0,help='Request timeout in seconds')
     ac.add_argument('--max-tokens',type=int,default=1024,help='Maximum response tokens (1..8192)')
+    ai_init=sub.add_parser('ai-init-registry',help='Create a local model-role registry template; never overwrites existing files')
+    ai_init.add_argument('--out',required=True,help='New local JSON registry path')
+    ae=sub.add_parser('ai-ensemble',help='Run one explicit task across configured local models in parallel')
+    ae.add_argument('--config',required=True,help='Local model registry JSON path')
+    ae.add_argument('--task',required=True,choices=['architecture','defect','test_design','review','general'])
+    ae.add_argument('--prompt',required=True,help='Explicit prompt text; no project files are read automatically')
+    ae.add_argument('--max-models',type=int,default=3,help='Maximum enabled models to call (1..8)')
+    ae.add_argument('--base-url',default=DEFAULT_BASE_URL,help='Loopback Agent2API URL')
+    ae.add_argument('--api-key-env',default=DEFAULT_API_KEY_ENV,help='Environment variable containing the gateway key')
+    ae.add_argument('--timeout',type=float,default=60.0)
+    ae.add_argument('--max-tokens',type=int,default=2048)
+    ae.add_argument('--out',help='Optional new JSON result path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
+        if a.cmd=='ai-init-registry':
+            output=Path(a.out).expanduser()
+            if output.is_symlink() or output.exists():
+                raise ValueError('registry output already exists or is a symbolic link; refusing to overwrite')
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(registry_template(),ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            print(json.dumps({'registry_path':str(output.resolve()),'status':'TEMPLATE_CREATED',
+                'models_enabled_by_default':False},ensure_ascii=False,indent=2))
+            return 0
+        if a.cmd=='ai-ensemble':
+            registry=load_model_registry(a.config)
+            result=run_ensemble(registry,a.task,a.prompt,max_models=a.max_models,
+                timeout=a.timeout,max_tokens=a.max_tokens,base_url=a.base_url,
+                api_key_env=a.api_key_env)
+            if a.out:
+                output=Path(a.out).expanduser()
+                if output.is_symlink() or output.exists():
+                    raise ValueError('ensemble output already exists or is a symbolic link; refusing to overwrite')
+                output.parent.mkdir(parents=True,exist_ok=True)
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+                result['result_path']=str(output.resolve())
+            print(json.dumps(result,ensure_ascii=False,indent=2))
+            return 0 if result['status']=='SUCCEEDED' else 2 if result['status']=='PARTIAL' else 1
         if a.cmd=='ai-models':
             client=Agent2APIClient(a.base_url,api_key_env=a.api_key_env,timeout=a.timeout)
             models=client.list_models()
