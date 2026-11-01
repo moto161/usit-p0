@@ -436,3 +436,30 @@ python -m usit validate-runtime-evidence --events .\\runtime-events.json --graph
 Android 测试适配器应在明确的测试/观测授权下发出结构化事件，优先使用不含个人信息的 screen_id、control_id、route_template 与 opaque actor_ref。每个 UI 测试动作由采集端生成 event_id 和 correlation_id；父事件关系必须由采集端真实掌握后再写入 parent_event_id。禁止把完整 logcat、HTTP headers/body、访问令牌、用户手机号/邮箱或数据库原始值当作事件属性提交。
 
 适配器生成的文件可直接交给统一校验器，再通过 `trace-business --runtime-evidence` 回填业务追溯。转换成功只代表格式适配成功；校验通过只代表事件结构有效；两者都不代表 Android 功能测试通过或业务正确。
+
+
+### Android 测试端最小事件发射器示例
+
+仓库提供 `examples/android-test/UsitEventEmitter.kt`，可复制到目标应用的 `src/androidTest` 测试源集。它只把白名单元数据写入 logcat，输出前缀为 `USIT_ANDROID_EVENT `，不采集或输出 HTTP headers/body、密码、令牌、Cookie、用户资料或数据库原始值。
+
+测试代码示意：
+
+```kotlin
+val flowId = java.util.UUID.randomUUID().toString()
+val screenEvent = UsitEventEmitter.screenOpened(
+    correlationId = flowId,
+    screenId = "PhotoDetail",
+    businessFunctionId = "bf-photo-view"
+)
+val tapEvent = UsitEventEmitter.uiAction(
+    correlationId = flowId,
+    screenId = "PhotoDetail",
+    controlId = "openButton",
+    action = "tap",
+    result = "accepted",
+    businessFunctionId = "bf-photo-view",
+    parentEventId = screenEvent
+)
+```
+
+示例只定义采集端接口，不代表已在某个真实 Android 项目编译或运行。将受控 logcat 导出为 UTF-8 文件后，交给前述 `adapt-android-events` 离线转换。CI 当前验证 Python 适配器与证据链，不会伪称已验证 Android SDK 编译、设备兼容性或真实页面操作。
