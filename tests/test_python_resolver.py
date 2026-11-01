@@ -230,6 +230,29 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(rows[0]["handler_symbol_id"], "symbol:PhotoPage.tsx#loadPhotos:2")
         self.assertEqual(rows[0]["verification_status"], "NOT_VERIFIED")
 
+    def test_jsx_handler_fetch_literal_links_exact_backend_endpoint(self):
+        (self.root / "PhotoPage.tsx").write_text(
+            "export function PhotoPage() { return <button onClick={loadPhotos}>Load</button>; }\n"
+            "export function loadPhotos() { return fetch('/api/photos'); }\n", encoding="utf-8")
+        (self.root / "routes.ts").write_text(
+            "import { loadPhotos } from './PhotoPage';\n"
+            "router.get('/api/photos', loadPhotos);\n", encoding="utf-8")
+        out = self.root.parent / "jsx-api-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        from usit.business_graph import project_business_graph
+        semantics = {"features": [], "entities": [], "endpoints": [{
+            "method": "GET", "path": "/api/photos", "source": "routes.ts:2", "line": 2,
+            "handler_reference": "loadPhotos"}]}
+        projected = project_business_graph(graph, semantics)
+        summary = projected["business_understanding"]
+        self.assertEqual(summary["frontend_api_endpoint_link_count"], 1)
+        self.assertEqual(summary["frontend_api_endpoint_links"][0]["resolution_status"], "EXACT_MATCH")
+        self.assertEqual(summary["frontend_business_chain_count"], 1)
+        chain = summary["frontend_business_chains"][0]
+        self.assertEqual((chain["method"], chain["path"]), ("GET", "/api/photos"))
+        self.assertEqual(chain["verification_status"], "NOT_VERIFIED")
+
     def test_jsx_inline_callback_is_not_misreported_as_resolved_symbol(self):
         (self.root / "Inline.tsx").write_text(
             "export function Page() { return <button onClick={() => save()}>Save</button>; }\n", encoding="utf-8")
