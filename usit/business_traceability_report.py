@@ -52,6 +52,26 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             f"- 运行时关联 ID：{_cell(', '.join(map(str, correlation_ids)) if correlation_ids else '无')}",
             f"- 代码覆盖：{_cell(stages.get('code_coverage') if isinstance(stages, dict) else 'UNKNOWN')}",
             "- 证据引用："])
+        runtime_evidence = row.get("runtime_evidence")
+        runtime_evidence = runtime_evidence if isinstance(runtime_evidence, dict) else {}
+        execution_detail = runtime_evidence.get("test_execution_detail")
+        if isinstance(execution_detail, dict):
+            completeness = execution_detail.get("mapped_case_completeness") or "NOT_PROVIDED"
+            reason = execution_detail.get("execution_status_reason") or "未提供"
+            lines.append(f"- 测试报告完整性：{_cell(completeness)}；状态原因：{_cell(reason)}")
+            actual_cases = execution_detail.get("mapped_test_cases", [])
+            if isinstance(actual_cases, list) and actual_cases:
+                lines.append("- 已报告 testcase：")
+                for case in actual_cases:
+                    if isinstance(case, dict):
+                        lines.append(
+                            f"  - {_cell(case.get('test_case_id'))}：{_cell(case.get('status'))}"
+                        )
+            missing_cases = execution_detail.get("mapped_cases_missing_from_report", [])
+            if isinstance(missing_cases, list) and missing_cases:
+                lines.append("- 映射但未出现在报告中的 testcase：")
+                for case_id in missing_cases:
+                    lines.append(f"  - {_cell(case_id)}")
         refs = row.get("evidence_refs", [])
         if refs:
             for ref in refs:
