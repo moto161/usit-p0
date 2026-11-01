@@ -116,7 +116,7 @@ def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
     snapshot["attestation"] = None
     if attestation_path is None:
         return snapshot
-    if snapshot.get("status") in {"MANIFEST_MISSING", "MANIFEST_STALE", "MANIFEST_INVALID",
+    if snapshot.get("status") in {"NOT_PROVIDED", "MANIFEST_MISSING", "MANIFEST_STALE", "MANIFEST_INVALID",
                                   "INCOMPLETE_DECLARATION", "INVALID_DECLARATION"}:
         snapshot["attestation_status"] = "ATTESTATION_MANIFEST_NOT_VERIFIABLE"
         return snapshot
@@ -347,6 +347,7 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
     }
 
 
-def verify_evidence_bindings_file(ledger_path: str | Path, evidence_root: str | Path) -> dict[str, Any]:
+def verify_evidence_bindings_file(ledger_path: str | Path, evidence_root: str | Path,
+                                  trusted_public_keys: dict[str, bytes] | None = None) -> dict[str, Any]:
     ledger, digest = load_claim_ledger(ledger_path)
-    return verify_evidence_bindings(ledger, evidence_root, digest)
+    return verify_evidence_bindings(ledger, evidence_root, digest, trusted_public_keys)
