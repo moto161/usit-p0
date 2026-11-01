@@ -414,5 +414,19 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertFalse(any(e.get("method") == "route-handler-static-symbol-match" for e in result["edges"]))
 
 
+    def test_s214_endpoint_centric_function_view_preserves_unlinked_feature_and_test_unknowns(self):
+        source = graph()
+        result = project_business_graph(source, {"features": [{"name": "Photo gallery", "module": "photos",
+            "source": "requirements.md", "line": 4}], "endpoints": [{
+            "method": "GET", "path": "/photos", "source": "server/routes.js:3", "line": 3,
+            "handler_reference": "listPhotos"}]})
+        understanding = result["business_understanding"]
+        self.assertEqual(understanding["business_function_view_count"], 1)
+        view = understanding["business_function_views"][0]
+        self.assertEqual(view["coverage"]["test_execution"], "NOT_MEASURED")
+        self.assertEqual(view["coverage"]["frontend_static_linkage"], "NOT_LINKED")
+        self.assertEqual(understanding["documented_feature_linkage"][0]["linkage_status"],
+                         "NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION")
+
 if __name__ == "__main__":
     unittest.main()
