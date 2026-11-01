@@ -101,3 +101,12 @@ The business-semantics pass conservatively recognizes single-line SQL string lit
 When projecting into `business_knowledge_graph.json`, USIT associates a database call with a function only if exactly one existing call edge has the same source path and line and carries `caller_symbol_id`. It links a parsed table to a documented entity only on an exact unique table-name match. Resolved endpoint call chains can then include database-access evidence owned by a handler or downstream function.
 
 Dynamic SQL, concatenation, multiline SQL, CTE/UNION statements, unsupported SQL forms, missing/ambiguous caller ownership, and undocumented tables are not guessed. This slice does not prove runtime execution, actual read/write effects, transaction commit, parameter values, field-level data flow, ORM model-to-table mapping, or authorization enforcement. All database links remain candidate/unverified static evidence.
+
+
+## S2.7 — Authorization evidence along endpoint-to-database paths (partial)
+
+USIT records a bounded set of explicit authorization indicators: route middleware registrations (`router.use` and common route methods), named guard/permission calls (for example `authRequired`, `adminRequired`, `requirePermission`, `canAccess`), and simple role/owner comparisons. Each item retains source path/line and remains `STATIC_INFERENCE` / `NOT_VERIFIED`.
+
+A named permission call is attached to a function only when a call edge on the exact same source path and line yields one unique `caller_symbol_id`. An endpoint receives route-middleware candidates from its route file and function-level guard calls only when the owning function is present in the endpoint's already-resolved bounded call chain. This lets reports compare route/service authorization evidence with downstream database access evidence without inventing links.
+
+Important: `DETECTED` means only that a recognized source pattern was found. `NOT_DETECTED_STATIC_SCAN` is not proof of missing authorization. The current extractor does not prove middleware execution order, complete path coverage, correct deny behavior, authorization on every branch, tenant isolation, or runtime reachability. Dynamic middleware registration, wrappers, decorators, custom frameworks, and complex role/ownership conditions may be missed. No vulnerability is confirmed by absence alone.
