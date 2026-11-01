@@ -107,6 +107,28 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                             f"    - 证据要求：{_cell(requirement.get('evidence_type'))} / "
                             f"{_cell(requirement.get('requirement') or requirement.get('source_path'))}"
                         )
+                authorization_evidence = candidate.get("authorization_evidence")
+                if isinstance(authorization_evidence, dict):
+                    lines.append(
+                        f"    - 安全授权线索（静态）：{_cell(authorization_evidence.get('status') or 'UNKNOWN')}"
+                    )
+                for evidence_key, evidence_label in (
+                    ("call_chain_evidence", "调用链"),
+                    ("database_access_evidence", "数据库访问"),
+                    ("identity_dataflow_evidence", "身份数据流"),
+                ):
+                    evidence_items = _items(candidate.get(evidence_key))
+                    if evidence_items:
+                        lines.append(f"    - {evidence_label}证据：")
+                        for evidence_item in evidence_items:
+                            if not isinstance(evidence_item, dict):
+                                continue
+                            path = evidence_item.get("path")
+                            line = evidence_item.get("line")
+                            lines.append(
+                                f"      - {_cell(path or evidence_item.get('kind') or evidence_item.get('operation') or '结构化证据')}"
+                                f"{':' + _cell(line) if line is not None else ''}"
+                            )
         lines.append("- 证据引用：")
         refs = _items(row.get("evidence_refs"))
         if refs:
