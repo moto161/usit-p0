@@ -233,6 +233,24 @@ def build_business_traceability(
             "traceability_status": row_status, "stage_status": stages,
             "endpoint": {"method": view.get("method"), "path": view.get("endpoint")} if view else None,
             "test_candidate_ids": sorted(str(item.get("test_id")) for item in candidate_items if item.get("test_id") is not None),
+            "test_candidates": [
+                {
+                    "test_id": item.get("test_id"),
+                    "category": item.get("category"),
+                    "target": item.get("target"),
+                    "purpose": item.get("purpose"),
+                    "design_status": item.get("design_status", "UNKNOWN"),
+                    "execution_status": item.get("execution_status", "NOT_EXECUTED"),
+                    "preconditions": item.get("preconditions", []),
+                    "actions": item.get("actions", []),
+                    "expected_result": item.get("expected_result"),
+                    "expected_results_status": item.get("expected_results_status", "OWNER_CONFIRMATION_REQUIRED"),
+                    "evidence_requirements": item.get("evidence_requirements", []),
+                    "evidence_refs": item.get("evidence_refs", []),
+                    "limitations": item.get("limitations", []),
+                }
+                for item in sorted(candidate_items, key=lambda value: str(value.get("test_id", "")))
+            ],
             "runtime_evidence": runtime,
             "runtime_observation": {
                 "status": runtime_observation_status,
