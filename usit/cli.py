@@ -229,6 +229,7 @@ def main(argv=None):
     bt.add_argument('--mapping',required=True,help='Reviewed feature-to-business-function mapping manifest JSON')
     bt.add_argument('--test-plan',help='Optional business_test_plan.json')
     bt.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
+    bt.add_argument('--runtime-evidence',help='Optional validate-runtime-evidence output JSON')
     bt.add_argument('--out',required=True,help='New traceability matrix JSON path; existing files are never overwritten')
     bt.add_argument('--out-md',help='Optional new Markdown traceability report path; existing files are never overwritten')
     tt=sub.add_parser('init-traceability-template',help='Create an unapproved feature-to-function review template bound to the exact graph hash')
@@ -331,6 +332,7 @@ def main(argv=None):
             mapping_bytes,mapping_doc=read_trace_json(a.mapping,10*1024*1024)
             plan_pair=read_trace_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
             matrix_pair=read_trace_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
+            runtime_pair=read_trace_json(a.runtime_evidence,50*1024*1024) if a.runtime_evidence else (None,None)
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
@@ -347,8 +349,9 @@ def main(argv=None):
                     "mapping_manifest_sha256":hashlib.sha256(mapping_bytes).hexdigest()}
             if plan_pair[0] is not None: hashes["test_plan_sha256"]=hashlib.sha256(plan_pair[0]).hexdigest()
             if matrix_pair[0] is not None: hashes["evidence_matrix_sha256"]=hashlib.sha256(matrix_pair[0]).hexdigest()
+            if runtime_pair[0] is not None: hashes["runtime_evidence_validation_sha256"]=hashlib.sha256(runtime_pair[0]).hexdigest()
             result=build_business_traceability(sem_doc,graph_doc,mapping_doc,
-                plan_pair[1],matrix_pair[1],hashes)
+                plan_pair[1],matrix_pair[1],hashes,runtime_pair[1])
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             if markdown_output is not None:
