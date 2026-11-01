@@ -63,6 +63,34 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
         self.assertEqual(result["evidence_conflicts"][0]["kind"],"INVALID_TEST_STATUS")
 
+    def test_cli_writes_evidence_matrix_and_returns_conflict_exit_code(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from usit.cli import main
+        with tempfile.TemporaryDirectory() as td:
+            base=Path(td)
+            graph=base/"graph.json"; tests=base/"tests.json"; out=base/"evidence.json"
+            graph.write_bytes(self.graph_bytes)
+            tests.write_text(json.dumps({"schema_version":"usit-test-execution-results-v1",
+                "source_hashes":{"business_graph_sha256":self.graph_hash},
+                "business_function_results":[]}),encoding="utf-8")
+            output=StringIO()
+            with redirect_stdout(output):
+                code=main(["verify-evidence","--graph",str(graph),"--test-results",str(tests),"--out",str(out)])
+            self.assertEqual(code,0)
+            saved=json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(saved["business_function_count"],3)
+            bad=base/"bad.json"
+            tests.write_text(json.dumps({"schema_version":"usit-test-execution-results-v1",
+                "source_hashes":{"business_graph_sha256":"0"*64},
+                "business_function_results":[]}),encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                code=main(["verify-evidence","--graph",str(graph),"--test-results",str(tests),"--out",str(bad)])
+            self.assertEqual(code,1)
+            self.assertEqual(json.loads(bad.read_text(encoding="utf-8"))["evidence_conflict_count"],1)
+
     def test_missing_inputs_remain_not_measured(self):
         result=verify_business_function_evidence(self.graph)
         self.assertTrue(all(x["test_execution_status"]=="NOT_MEASURED" for x in result["business_function_evidence"]))
