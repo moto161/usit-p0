@@ -81,6 +81,24 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertIsNotNone(result.exit_code)
         self.assertTrue(result.manifest_valid)
 
+    def test_timeout_terminates_descendant_that_inherits_capture_pipes(self):
+        marker = self.base / "orphan-child-survived.txt"
+        child_code = (
+            "import time; time.sleep(1.2); "
+            f"open({str(marker)!r}, 'w', encoding='utf-8').write('survived')"
+        )
+        parent_code = (
+            "import subprocess, sys, time; "
+            f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+            "time.sleep(10)"
+        )
+        result = self.run_capture(parent_code, timeout=0.3, poll_interval=0.01)
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.status, "FAIL")
+        time.sleep(1.6)
+        self.assertFalse(marker.exists(), "timeout left a descendant process running")
+        self.assertTrue(result.manifest_valid)
+
     def test_interruption_terminates_child_and_records_real_returncode(self):
         event = threading.Event()
         timer = threading.Timer(0.15, event.set)
@@ -95,7 +113,17 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertTrue(result.manifest_valid)
 
     def test_keyboard_interrupt_terminates_child_and_records_returncode(self):
-        with patch.object(capture.time, "sleep", side_effect=KeyboardInterrupt):
+        real_sleep = time.sleep
+        interrupted_once = False
+
+        def interrupt_first_sleep(seconds):
+            nonlocal interrupted_once
+            if not interrupted_once:
+                interrupted_once = True
+                raise KeyboardInterrupt
+            return real_sleep(seconds)
+
+        with patch.object(capture.time, "sleep", side_effect=interrupt_first_sleep):
             result = self.run_capture("import time; time.sleep(10)", poll_interval=0.01)
         self.assertEqual(result.status, "INTERRUPTED")
         self.assertTrue(result.interrupted)
@@ -158,6 +186,10 @@ class VerificationCaptureTests(unittest.TestCase):
             )
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
 
+    def test_ntfs_alternate_data_stream_path_is_rejected(self):
+        with self.assertRaises(ValueError):
+            capture._safe_relative_file(self.project, "nested/file.txt:secret")
+
     def test_manifest_hash_mismatch_is_detected(self):
         result = self.run_capture("pass")
         log = Path(result.evidence_dir) / "stdout.log"
@@ -174,6 +206,17 @@ class VerificationCaptureTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         verified = capture.verify_manifest(result.evidence_dir)
         self.assertFalse(verified["valid"])
+
+    def test_manifest_rejects_ntfs_alternate_data_stream_path(self):
+        result = self.run_capture("pass")
+        manifest_path = Path(result.manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        stdout = next(item for item in manifest["artifacts"] if item["path"] == "stdout.log")
+        stdout["path"] = "stdout.log:secret"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        verified = capture.verify_manifest(result.evidence_dir)
+        self.assertFalse(verified["valid"])
+        self.assertTrue(any("unsafe artifact path" in error for error in verified["errors"]))
         self.assertTrue(any("omits required artifacts" in error for error in verified["errors"]))
 
     def test_evidence_parent_inside_project_is_rejected(self):

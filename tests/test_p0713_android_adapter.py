@@ -250,15 +250,31 @@ class SafeDegradationTests(unittest.TestCase):
         self.assertTrue(bad["encoding_issue"])
         self.assertTrue(bad["read_ok"])
 
-    def test_oversized_file_is_skipped_safely(self):
+    def test_oversized_file_blocks_android_analysis(self):
         p = _SyntheticAndroidProject(self)
         p.write("settings.gradle", "include ':app'\n")
         big = "x = 1\n" * 200000  # ~2 MiB, exceeds MAX_FILE_BYTES (1 MiB)
         p.write("app/build.gradle", big)
-        prof = p.profile()
-        # Analysis still completes; the oversized file is not read for content.
-        self.assertEqual(prof["detection_status"], "DETECTED_GRADLE_NO_ANDROID_MANIFEST")
-        self.assertTrue(any(b["rel_path"].endswith("build.gradle") for b in prof["build_files"]))
+        with self.assertRaises(AdapterBlocked) as blocked:
+            p.profile()
+        self.assertEqual(blocked.exception.code, "FILE_SIZE_LIMIT_EXCEEDED")
+
+    def test_android_scan_time_budget_fails_closed(self):
+        p = _SyntheticAndroidProject(self)
+        p.write("settings.gradle", "include ':app'\n")
+        with patch.object(adapter, "MAX_SCAN_SECONDS", -1):
+            with self.assertRaises(AdapterBlocked) as blocked:
+                p.profile()
+        self.assertEqual(blocked.exception.code, "SCAN_TIME_BUDGET_EXCEEDED")
+
+    def test_android_entry_budget_fails_closed(self):
+        p = _SyntheticAndroidProject(self)
+        p.write("settings.gradle", "include ':app'\n")
+        obj = AndroidProjectAdapter(p.root)
+        obj._entry_count = adapter.MAX_FILES
+        with self.assertRaises(AdapterBlocked) as blocked:
+            obj._check_budget()
+        self.assertEqual(blocked.exception.code, "FILE_BUDGET_EXCEEDED")
 
 
 class PathSafetyTests(unittest.TestCase):
@@ -285,6 +301,46 @@ class PathSafetyTests(unittest.TestCase):
         adapter_obj = AndroidProjectAdapter(p.root)
         with self.assertRaises(AdapterBlocked) as blocked:
             adapter_obj._read_text(link)
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
+
+    def test_gradle_module_path_traversal_is_rejected_before_probe(self):
+        p = _SyntheticAndroidProject(self)
+        outside = p.base / "outside"
+        outside.mkdir()
+        (outside / "build.gradle").write_text("android {}\n", encoding="utf-8")
+        adapter_obj = AndroidProjectAdapter(p.root)
+        for module_path in (":../outside", ":..:outside", ":nested/../../outside", r":nested\..\outside"):
+            with self.subTest(module_path=module_path):
+                with self.assertRaises(AdapterBlocked) as blocked:
+                    adapter_obj._module_dir(module_path)
+                self.assertEqual(blocked.exception.code, "INVALID_MODULE_PATH")
+
+    def test_root_gradle_file_symlink_is_rejected_before_stat_probe(self):
+        p = _SyntheticAndroidProject(self)
+        outside = p.base / "outside-settings.gradle"
+        outside.write_text("include ':app'\n", encoding="utf-8")
+        link = p.root / "settings.gradle"
+        if not _make_symlink(link, outside):
+            CAPABILITY_LOG["android_root_file_symlink"] = "NOT TESTED - OS denied symlink creation"
+            self.skipTest("OS denied symlink creation")
+        adapter_obj = AndroidProjectAdapter(p.root)
+        with self.assertRaises(AdapterBlocked) as blocked:
+            adapter_obj._detect_root_signals(adapter.AndroidProjectProfile())
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
+
+    def test_fallback_module_build_symlink_is_rejected_before_stat_probe(self):
+        p = _SyntheticAndroidProject(self)
+        app = p.root / "app"
+        app.mkdir()
+        outside = p.base / "outside-build.gradle"
+        outside.write_text("android {}\n", encoding="utf-8")
+        link = app / "build.gradle"
+        if not _make_symlink(link, outside):
+            CAPABILITY_LOG["android_module_build_symlink"] = "NOT TESTED - OS denied symlink creation"
+            self.skipTest("OS denied symlink creation")
+        adapter_obj = AndroidProjectAdapter(p.root)
+        with self.assertRaises(AdapterBlocked) as blocked:
+            adapter_obj._discover_modules([])
         self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
 
     def test_symlinked_project_root_is_rejected(self):
@@ -414,6 +470,52 @@ class CliIntegrationTests(unittest.TestCase):
         plan = json.loads((out / "android_test_plan.json").read_text(encoding="utf-8"))
         for c in plan["candidates"]:
             self.assertEqual(c["execution_status"], "NOT_EXECUTED")
+
+
+    def test_force_requires_explicit_overwrite_authorization(self):
+        p = _SyntheticAndroidProject(self)
+        p.write("settings.gradle", "include ':app'\n")
+        p.write("app/build.gradle", "android {}\n")
+        out = p.base / "inspect-out"
+        out.mkdir()
+        marker = out / "preserve.txt"
+        marker.write_text("keep", encoding="utf-8")
+        auth = authorization_record(p.root, out, now=_now())
+        auth["allowed_actions"] = ["static_read_only_scan"]
+        auth_file = p.base / "auth-no-overwrite.json"
+        auth_file.write_text(json.dumps(auth), encoding="utf-8")
+        rc = __import__("usit.cli", fromlist=["main"]).main([
+            "inspect-android", str(p.root), "--out", str(out),
+            "--authorization-file", str(auth_file), "--force",
+        ])
+        self.assertEqual(rc, 2)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+        self.assertFalse((out / "android_profile.json").exists())
+
+    def test_force_replaces_output_symlink_without_following_target(self):
+        p = _SyntheticAndroidProject(self)
+        p.write("settings.gradle", "include ':app'\n")
+        p.write("app/build.gradle", "android {}\n")
+        p.write("app/src/main/AndroidManifest.xml", '<manifest package="com.safe"/>\n')
+        out = p.base / "inspect-out"
+        out.mkdir()
+        outside = p.base / "outside.json"
+        outside.write_text("do-not-touch", encoding="utf-8")
+        link = out / "android_profile.json"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError, ValueError):
+            self.skipTest("OS denied symlink creation")
+        auth = authorization_record(p.root, out, now=_now())
+        auth_file = p.base / "auth.json"
+        auth_file.write_text(json.dumps(auth), encoding="utf-8")
+        rc = __import__("usit.cli", fromlist=["main"]).main([
+            "inspect-android", str(p.root), "--out", str(out),
+            "--authorization-file", str(auth_file), "--force",
+        ])
+        self.assertEqual(rc, 0)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(outside.read_text(encoding="utf-8"), "do-not-touch")
 
 
 class RegressionTests(unittest.TestCase):

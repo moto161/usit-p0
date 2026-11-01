@@ -159,6 +159,17 @@ class PathSafetyTests(unittest.TestCase):
             canonical_output(link)
         self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
 
+    def test_dangling_symlinked_output_is_rejected(self):
+        project = _SyntheticProject(self)
+        missing_target = project.external / "not-created"
+        link = project.base / "dangling-output"
+        if not _make_symlink(link, missing_target):
+            CAPABILITY_LOG["dangling_symlink_output"] = "NOT TESTED - OS denied symlink creation"
+            self.skipTest("OS denied symlink creation")
+        with self.assertRaises(ScanBlocked) as blocked:
+            canonical_output(link)
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
+
     def test_nested_and_deep_paths_stay_inside_the_root(self):
         project = _SyntheticProject(self)
         deep = project.root / "a" / "b" / "c" / "d" / "e"
@@ -214,9 +225,9 @@ class PathSafetyCapabilityTests(unittest.TestCase):
     def test_capability_log_is_complete(self):
         # Touches every capability key so the report can state NOT TESTED with a
         # concrete reason instead of silently passing.
-        for key in ("symlink_file", "symlink_dir", "junction", "symlink_root", "symlink_output"):
+        for key in ("symlink_file", "symlink_dir", "junction", "symlink_root", "symlink_output", "dangling_symlink_output"):
             CAPABILITY_LOG.setdefault(key, "NOT TESTED - not exercised in this run")
-        self.assertEqual(len(CAPABILITY_LOG), 5)
+        self.assertEqual(len(CAPABILITY_LOG), 6)
         with self.subTest():
             self.assertTrue(all(isinstance(v, str) and v for v in CAPABILITY_LOG.values()))
 

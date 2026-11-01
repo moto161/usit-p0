@@ -257,5 +257,94 @@ class FieldGapLocatorTests(unittest.TestCase):
         self.assertEqual(result["field_gap_count"], 0)
 
 
+class ResourceSafetyTests(unittest.TestCase):
+
+    def test_outside_project_file_is_rejected(self):
+        p = SyntheticProject(self)
+        outside = p.root.parent / (p.root.name + "-outside.txt")
+        outside.write_text("OUTSIDE_MARKER", encoding="utf-8")
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        adapter = BusinessSemanticsAdapter(p.root)
+        with self.assertRaises(SemanticsBlocked) as blocked:
+            adapter._read_text(outside)
+        self.assertEqual(blocked.exception.code, "PATH_TRAVERSAL_REJECTED")
+
+    def test_symlinked_file_is_rejected_before_read(self):
+        p = SyntheticProject(self)
+        outside = p.root.parent / (p.root.name + "-outside-file.txt")
+        outside.write_text("OUTSIDE_MARKER", encoding="utf-8")
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        link = p.root / "linked.txt"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError, ValueError):
+            self.skipTest("OS denied symlink creation")
+        adapter = BusinessSemanticsAdapter(p.root)
+        with self.assertRaises(SemanticsBlocked) as blocked:
+            adapter._read_text(link)
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
+
+    def test_symlinked_directory_is_rejected_during_discovery(self):
+        p = SyntheticProject(self)
+        outside = p.root.parent / (p.root.name + "-outside-dir")
+        outside.mkdir()
+        self.addCleanup(lambda: outside.rmdir())
+        (outside / "secret.js").write_text("const secret = true;\\n", encoding="utf-8")
+        self.addCleanup(lambda: (outside / "secret.js").unlink(missing_ok=True))
+        link = p.root / "external"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError, ValueError):
+            self.skipTest("OS denied directory symlink creation")
+        self.addCleanup(lambda: link.unlink(missing_ok=True))
+        adapter = BusinessSemanticsAdapter(p.root)
+        with self.assertRaises(SemanticsBlocked) as blocked:
+            adapter._project_files()
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
+    def test_repeated_file_reads_use_cached_verified_bytes(self):
+        p = SyntheticProject(self)
+        doc = p.root / "数据库设计文档.md"
+        _write(doc, DB_DOC)
+        adapter = BusinessSemanticsAdapter(p.root)
+        first = adapter._read_text(doc)
+        second = adapter._read_text(doc)
+        self.assertTrue(first["read_ok"])
+        self.assertEqual(first, second)
+        self.assertEqual(adapter._file_count, 1)
+
+    def test_oversized_business_input_blocks_instead_of_silent_skip(self):
+        p = SyntheticProject(self)
+        _write(p.root / "数据库设计文档.md", "x" * (1024 * 1024 + 1))
+        with self.assertRaises(SemanticsBlocked) as blocked:
+            BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(blocked.exception.code, "FILE_SIZE_LIMIT_EXCEEDED")
+
+    def test_business_scan_time_budget_fails_closed(self):
+        from unittest.mock import patch
+        p = SyntheticProject(self)
+        with patch("usit.business_semantics.MAX_SCAN_SECONDS", -1):
+            with self.assertRaises(SemanticsBlocked) as blocked:
+                BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(blocked.exception.code, "SCAN_TIME_BUDGET_EXCEEDED")
+
+    def test_business_discovery_budget_fails_closed(self):
+        from unittest.mock import patch
+        p = SyntheticProject(self)
+        p.route("server/routes/a.js", "router.get('/a', authRequired, () => {});")
+        p.route("server/routes/b.js", "router.get('/b', authRequired, () => {});")
+        with patch("usit.business_semantics.MAX_FILES", 1):
+            with self.assertRaises(SemanticsBlocked) as blocked:
+                BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(blocked.exception.code, "FILE_BUDGET_EXCEEDED")
+
+    def test_skipped_dependency_directories_do_not_consume_scan_budget(self):
+        from unittest.mock import patch
+        p = SyntheticProject(self)
+        _write(p.root / "node_modules" / "large" / "index.js", "x" * 20)
+        with patch("usit.business_semantics.MAX_FILES", 1):
+            result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["entity_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

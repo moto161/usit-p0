@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import os
 import re
+import stat
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,7 @@ CONF_CONFLICT = "CONFLICT"
 MAX_FILE_BYTES = safety.MAX_FILE_BYTES
 MAX_TOTAL_READ_BYTES = safety.MAX_TOTAL_READ_BYTES
 MAX_FILES = safety.MAX_FILES
+MAX_SCAN_SECONDS = safety.MAX_SCAN_SECONDS
 
 # Route-pattern matching for Node/Express style servers.
 _ROUTE_LINE = re.compile(
@@ -210,82 +213,163 @@ class BusinessSemanticsAdapter:
         self.root = safety.canonical_project(project_root)
         self._total_read_bytes = 0
         self._file_count = 0
+        self._started_at = time.monotonic()
+        self._discovered: set[str] = set()
+        self._read_cache: dict[str, dict[str, Any]] = {}
+        self._files_cache: tuple[Path, ...] | None = None
+
+    def _check_budget(self) -> None:
+        if time.monotonic() - self._started_at > MAX_SCAN_SECONDS:
+            raise SemanticsBlocked("SCAN_TIME_BUDGET_EXCEEDED", f"Business analysis exceeded {MAX_SCAN_SECONDS} seconds.")
+        if len(self._discovered) > MAX_FILES:
+            raise SemanticsBlocked("FILE_BUDGET_EXCEEDED", f"Business analysis exceeded {MAX_FILES} discovered entries.")
+
+    def _validate_project_path(self, path: Path) -> Path:
+        """Reject reparse components and paths resolving outside the project."""
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current = current / part
+            if safety.is_reparse_point(current):
+                raise SemanticsBlocked("REPARSE_POINT_REJECTED", f"{current} is a link/junction/reparse point.")
+        try:
+            resolved = path.resolve(strict=False)
+        except OSError as exc:
+            raise SemanticsBlocked("PATH_CHECK_FAILED", f"Could not resolve {path}: {type(exc).__name__}") from exc
+        if resolved != self.root and self.root not in resolved.parents:
+            raise SemanticsBlocked("PATH_TRAVERSAL_REJECTED", f"{path} is outside the authorised project root.")
+        return resolved
+
+    def _count_discovery(self, path: Path) -> None:
+        self._check_budget()
+        key = os.path.normcase(os.path.abspath(os.fspath(path)))
+        self._discovered.add(key)
+        if len(self._discovered) > MAX_FILES:
+            raise SemanticsBlocked("FILE_BUDGET_EXCEEDED", f"Business analysis exceeded {MAX_FILES} discovered entries.")
+        self._validate_project_path(path)
 
     # ------------------------------------------------------------------ reading
     def _read_text(self, path: Path) -> dict[str, Any]:
-        if not path.exists():
-            return {"text": None, "read_ok": False, "error": "MISSING"}
-        if safety.is_reparse_point(path):
-            raise SemanticsBlocked("REPARSE_POINT_REJECTED", f"{path} is a link/junction/reparse point.")
-        if not path.is_file():
+        self._check_budget()
+        self._validate_project_path(path)
+        if not path.exists() or not path.is_file():
             return {"text": None, "read_ok": False, "error": "MISSING"}
         try:
             resolved = path.resolve(strict=True)
         except OSError as exc:
-            return {"text": None, "read_ok": False, "error": f"RESOLVE_FAILED:{type(exc).__name__}"}
+            raise SemanticsBlocked("PATH_CHECK_FAILED", f"Could not resolve {path}: {type(exc).__name__}") from exc
         if resolved != self.root and self.root not in resolved.parents:
             raise SemanticsBlocked("PATH_TRAVERSAL_REJECTED", f"{path} is outside the authorised project root.")
-        size = resolved.stat().st_size
-        if size > MAX_FILE_BYTES:
-            return {"text": None, "read_ok": False, "too_large": True, "error": "TOO_LARGE"}
+        cache_key = os.path.normcase(os.fspath(resolved))
+        if cache_key in self._read_cache:
+            return dict(self._read_cache[cache_key])
         if self._file_count >= MAX_FILES:
-            return {"text": None, "read_ok": False, "error": "FILE_BUDGET_EXCEEDED"}
-        if self._total_read_bytes + size > MAX_TOTAL_READ_BYTES:
-            return {"text": None, "read_ok": False, "error": "BYTE_BUDGET_EXCEEDED"}
+            raise SemanticsBlocked("FILE_BUDGET_EXCEEDED", f"Business analysis exceeds {MAX_FILES} file reads.")
         try:
             fd = open_no_follow(resolved)
         except OSError as exc:
-            return {"text": None, "read_ok": False, "error": f"OPEN_FAILED:{type(exc).__name__}"}
+            raise SemanticsBlocked("SAFE_OPEN_FAILED", f"Could not safely open {path}: {type(exc).__name__}") from exc
         try:
-            raw = os.read(fd, MAX_FILE_BYTES)
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_FILE_BYTES:
+                raise SemanticsBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeds {MAX_FILE_BYTES} regular-file limit.")
+            self._validate_project_path(path)
+            path_before = os.stat(resolved, follow_symlinks=False)
+            identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            if identity != (path_before.st_dev, path_before.st_ino, path_before.st_size,
+                            path_before.st_mtime_ns, path_before.st_ctime_ns):
+                raise SemanticsBlocked("FILE_CHANGED_DURING_OPEN", f"{path} changed while being opened.")
+            if self._total_read_bytes + before.st_size > MAX_TOTAL_READ_BYTES:
+                raise SemanticsBlocked("BYTE_BUDGET_EXCEEDED", f"Business analysis exceeds {MAX_TOTAL_READ_BYTES} total bytes.")
+            chunks = []
+            remaining = MAX_FILE_BYTES + 1
+            while remaining > 0:
+                block = os.read(fd, min(65536, remaining))
+                if not block:
+                    break
+                chunks.append(block)
+                remaining -= len(block)
+            raw = b"".join(chunks)
+            after = os.fstat(fd)
+            self._validate_project_path(path)
+            path_after = os.stat(resolved, follow_symlinks=False)
+            before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            path_identity = (path_after.st_dev, path_after.st_ino, path_after.st_size,
+                             path_after.st_mtime_ns, path_after.st_ctime_ns)
+            if before_identity != after_identity or after_identity != path_identity:
+                raise SemanticsBlocked("FILE_CHANGED_DURING_READ", f"{path} changed while being read.")
+            if len(raw) != before.st_size or len(raw) > MAX_FILE_BYTES:
+                raise SemanticsBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeded its size budget during read.")
         finally:
             os.close(fd)
         self._file_count += 1
-        self._total_read_bytes += size
+        self._total_read_bytes += len(raw)
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             text = raw.decode("utf-8", errors="replace")
-        return {"text": text, "read_ok": True, "size": size, "error": None}
+        result = {"text": text, "read_ok": True, "size": len(raw), "error": None}
+        self._read_cache[cache_key] = result
+        return dict(result)
 
     def _rel(self, path: Path) -> str:
         return path.resolve().relative_to(self.root).as_posix()
 
     # --------------------------------------------------------------- discovery
+    def _project_files(self) -> tuple[Path, ...]:
+        """Discover project files once, pruning skipped directories before descent."""
+        if self._files_cache is not None:
+            return self._files_cache
+
+        found: list[Path] = []
+
+        def on_walk_error(exc: OSError) -> None:
+            raise SemanticsBlocked("DIRECTORY_READ_FAILED", f"Could not enumerate project directory: {type(exc).__name__}") from exc
+
+        for current, dirnames, filenames in os.walk(
+            self.root, topdown=True, followlinks=False, onerror=on_walk_error
+        ):
+            self._check_budget()
+            base = Path(current)
+            kept_dirs: list[str] = []
+            for name in dirnames:
+                child = base / name
+                rel = child.relative_to(self.root)
+                if _is_skipped(rel):
+                    continue
+                self._count_discovery(child)
+                kept_dirs.append(name)
+            dirnames[:] = kept_dirs
+
+            for name in filenames:
+                path = base / name
+                rel = path.relative_to(self.root)
+                if _is_skipped(rel):
+                    continue
+                self._count_discovery(path)
+                found.append(path)
+
+        self._files_cache = tuple(found)
+        return self._files_cache
+
     def _find_docs(self) -> list[Path]:
-        out: list[Path] = []
-        for p in self.root.rglob("*.md"):
-            if p.is_file() and not _is_skipped(p.relative_to(self.root)):
-                out.append(p)
-        return out
+        return [p for p in self._project_files() if p.suffix.lower() == ".md"]
 
     def _find_route_files(self) -> list[Path]:
         out: list[Path] = []
-        for p in self.root.rglob("*"):
-            if not p.is_file():
+        for path in self._project_files():
+            if path.suffix.lower() not in (".js", ".ts"):
                 continue
-            rel = p.relative_to(self.root)
-            if _is_skipped(rel):
-                continue
-            if p.suffix not in (".js", ".ts"):
-                continue
-            posix = rel.as_posix().lower()
-            if "routes" in rel.parts or rel.name in ("auth.js", "auth.ts", "mediaauth.js", "ratelimit.js"):
-                out.append(p)
+            rel = path.relative_to(self.root)
+            if "routes" in rel.parts or path.name in ("auth.js", "auth.ts", "mediaauth.js", "ratelimit.js"):
+                out.append(path)
         return out
 
     def _find_code_files(self) -> list[Path]:
         """All source files whose contents we may grep for field references."""
-        out: list[Path] = []
-        for p in self.root.rglob("*"):
-            if not p.is_file():
-                continue
-            rel = p.relative_to(self.root)
-            if _is_skipped(rel):
-                continue
-            if p.suffix in (".js", ".ts", ".kt", ".java", ".py", ".sql", ".rb", ".go", ".cs", ".php"):
-                out.append(p)
-        return out
+        suffixes = {".js", ".ts", ".kt", ".java", ".py", ".sql", ".rb", ".go", ".cs", ".php"}
+        return [p for p in self._project_files() if p.suffix.lower() in suffixes]
 
     # ------------------------------------------------- markdown table parsing
     def _parse_md_tables(self, text: str) -> list[dict[str, Any]]:
@@ -552,6 +636,7 @@ class BusinessSemanticsAdapter:
         return gap
 
     def analyze(self) -> dict[str, Any]:
+        self._check_budget()
         docs = self._find_docs()
         route_files = self._find_route_files()
         code_files = self._find_code_files()

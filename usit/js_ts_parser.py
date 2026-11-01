@@ -186,6 +186,12 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
     root = project_root.resolve(strict=True)
     supervisor = supervisor if supervisor is not None else ParserTaskSupervisor()
     availability = parser_availability(root)
+    # Absolute executable and compiler-install paths are useful for local
+    # diagnostics, but must not be copied into project-derived artifacts.
+    public_availability = {
+        key: value for key, value in availability.items()
+        if key not in {"node", "ts_lib", "ts_lib_real_path"}
+    }
     if js_ts_source is not None:
         # Memory mode (P0.7.5): the relative path set is derived from the
         # already-verified source map (project-relative strings).  We never
@@ -205,7 +211,7 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
             "parser_name": PARSER_NAME,
             "parser_version": "UNAVAILABLE",
             "available": False,
-            "availability": availability,
+            "availability": public_availability,
             "project_diagnostics": [{"code": availability["reason"], "severity": "UNKNOWN"}],
             "files": {}, "records": [],
         }
@@ -240,7 +246,7 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
         return {
             "contract_version": "usit-parser-result-v1", "parser_name": PARSER_NAME,
             "parser_version": availability["version"], "available": True,
-            "availability": availability,
+            "availability": public_availability,
             "project_diagnostics": [{"code": code, "severity": "ERROR", "cancellation":
                 "killed_and_verified" if code == "ADAPTER_TIMEOUT" else "unverified"}],
             "files": {}, "records": [],
@@ -250,7 +256,7 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
         return {
             "contract_version": "usit-parser-result-v1", "parser_name": PARSER_NAME,
             "parser_version": availability["version"], "available": True,
-            "availability": availability,
+            "availability": public_availability,
             "project_diagnostics": [{"code": "ADAPTER_FAILED", "severity": "ERROR", "message": "Node analyzer exited with code " + str(returncode)}],
             "stderr_excerpt": (completed.get("stderr") or "")[:500], "files": {}, "records": [],
         }
@@ -264,5 +270,5 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
             "project_diagnostics": [{"code": "ADAPTER_INVALID_JSON", "severity": "ERROR"}],
             "files": {}, "records": [],
         }
-    result["availability"] = availability
+    result["availability"] = public_availability
     return result

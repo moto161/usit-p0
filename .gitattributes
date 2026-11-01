@@ -1,0 +1,2 @@
+tests/test_graph_validation.py text eol=lf
+tests/test_p073_budget_race.py text eol=lf

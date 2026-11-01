@@ -1,5 +1,5 @@
 from __future__ import annotations
-import argparse, json, sys, tempfile
+import argparse, json, os, secrets, sys, tempfile
 from pathlib import Path
 from .scanner import scan_project
 from .safety import load_authorization_file, authorization_record, canonical_project, canonical_output
@@ -39,6 +39,47 @@ def selftest() -> int:
     print(f"RESULT: {'PASS' if all(ok for _,ok in checks) else 'FAIL'} ({sum(ok for _,ok in checks)}/{len(checks)})")
     return 0 if all(ok for _,ok in checks) else 1
 
+def _write_exclusive_bytes(path: Path, payload: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write while creating Android output")
+            view = view[written:]
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    else:
+        os.close(fd)
+
+
+def _write_json_output(path: Path, value, *, overwrite: bool) -> None:
+    """Write one JSON artifact without following an existing output symlink."""
+    payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if not overwrite:
+        _write_exclusive_bytes(path, payload)
+        return
+
+    # Atomic replacement replaces a symlink itself rather than opening its target.
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    _write_exclusive_bytes(temporary, payload)
+    try:
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _inspect_android(a) -> int:
     """Read-only Android inspection: static profile + command candidates.
 
@@ -46,6 +87,8 @@ def _inspect_android(a) -> int:
     (android_profile.json, android_test_plan.json) and prints a summary.
     """
     auth = load_authorization_file(a.authorization_file, a.project, a.out)
+    if a.force and "overwrite_existing_output" not in auth.allowed_actions:
+        raise ValueError("--force requires explicit overwrite_existing_output authorization.")
     # Reuse the existing fail-closed canonicalisation so scope/overlap checks
     # are identical to `scan`.
     project = canonical_project(a.project)
@@ -57,8 +100,8 @@ def _inspect_android(a) -> int:
     out.mkdir(parents=True, exist_ok=True)
     profile = AndroidProjectAdapter(project).analyze().to_dict()
     plan = CommandPlanner(profile).to_dict()
-    (out / "android_profile.json").write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (out / "android_test_plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_json_output(out / "android_profile.json", profile, overwrite=a.force)
+    _write_json_output(out / "android_test_plan.json", plan, overwrite=a.force)
     summary = {
         "project_root": str(project),
         "detection_status": profile["detection_status"],
@@ -87,6 +130,7 @@ def main(argv=None):
     v.add_argument('--project-root',help='Optional project root for file/line evidence checks')
     v.add_argument('--out-json',help='Machine-readable validation report (must not already exist)')
     v.add_argument('--out-md',help='Human-readable validation report (must not already exist)')
+    v.add_argument('--allow-untrusted-embedded-line-counts', action='store_true', help='Explicitly allow line-range checks to rely on editable source_line_counts embedded in the graph (not a trust anchor)')
     # P0.7.13-F1: read-only Android structural inspection + command-candidate
     # generation.  The name "inspect" is deliberate — this command NEVER executes
     # Gradle, ADB, or any test/build command; it only reads project files and
@@ -138,7 +182,9 @@ def main(argv=None):
             # (validate_graph_file supplies it), so this command never re-opens
             # the target project.  project_root is retained only for the
             # path-escape and existence guards, which read no content.
-            result=validate_graph_file(graph_path,project_root,json_out,md_out)
+            if a.allow_untrusted_embedded_line_counts:
+                print("WARNING: line-range checks rely on editable graph-embedded source_line_counts; results are not independently trusted.", file=sys.stderr)
+            result=validate_graph_file(graph_path,project_root,json_out,md_out,require_trusted=not a.allow_untrusted_embedded_line_counts)
             print(json.dumps(result,ensure_ascii=False,indent=2))
             return 0 if result['is_valid'] else 1
         if a.cmd=='inspect-android':

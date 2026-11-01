@@ -68,7 +68,9 @@ def reject_reparse_components(path: Path) -> None:
     absolute = Path(os.path.abspath(os.fspath(path)))
     parts = list(reversed(absolute.parents)) + [absolute]
     for part in parts:
-        if part.exists() and is_reparse_point(part):
+        # Do not gate on Path.exists(): it follows links and returns False for a
+        # dangling symlink, which must still be rejected before resolve/open.
+        if is_reparse_point(part):
             raise ScanBlocked("REPARSE_POINT_REJECTED", "Symbolic links, junctions and reparse points are not accepted.")
 
 

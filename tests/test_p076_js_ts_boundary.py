@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -71,6 +72,14 @@ def _is_link(path: Path) -> bool:
         try:
             if is_junction():
                 return True
+        except OSError:
+            return False
+    # pathlib.Path.is_junction() was added after Python 3.11. On older
+    # supported Windows runners, inspect the lstat reparse attribute instead.
+    if os.name == "nt":
+        try:
+            attributes = os.lstat(path).st_file_attributes
+            return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
         except OSError:
             return False
     return False
