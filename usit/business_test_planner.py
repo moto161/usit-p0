@@ -336,6 +336,14 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
             ],
         ))
 
+    function_views = []
+    if isinstance(business_graph, Mapping):
+        understanding = business_graph.get("business_understanding")
+        if isinstance(understanding, Mapping) and isinstance(understanding.get("business_function_views", []), list):
+            function_views = [item for item in understanding.get("business_function_views", []) if isinstance(item, Mapping)]
+    function_view_by_endpoint = {str(item.get("endpoint_id")): item for item in function_views
+                                 if isinstance(item.get("endpoint_id"), str)}
+
     # S2.13-C: synthesize a reviewable test candidate only for a resolved UI → API → endpoint chain.
     frontend_chains = understanding.get("frontend_business_chains", []) if isinstance(understanding, Mapping) else []
     if not isinstance(frontend_chains, list):
@@ -405,7 +413,8 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
         }
         refs = [unique_refs[key] for key in sorted(unique_refs)]
         stage_status = flow.get("stage_status") if isinstance(flow.get("stage_status"), Mapping) else {}
-        candidates.append(_candidate(
+        function_view = function_view_by_endpoint.get(endpoint_id)
+        candidate = _candidate(
             "frontend_backend_flow", f"{chain.get('event_name') or 'UI event'} → {method} {endpoint_path}",
             f"验证前端交互是否按已确认需求正确触发并完成后端接口流程：{method} {endpoint_path}",
             refs,
@@ -422,7 +431,12 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
                 "静态数据库/授权/身份线索仅用于确定测试检查点，不证明实际读写、权限正确性或资源隔离。",
                 "缺少需求、角色矩阵、请求/响应契约或测试数据时，预期结果必须由负责人确认。",
             ],
-        ))
+        )
+        if isinstance(function_view, Mapping):
+            candidate["business_function_id"] = function_view.get("business_function_id")
+            candidate["function_coverage_linkage"] = "TEST_DESIGN_CANDIDATE_LINKED"
+            candidate["test_execution_coverage"] = "NOT_MEASURED"
+        candidates.append(candidate)
 
     if len(candidates) > _PLAN_LIMIT:
         raise ValueError(f"candidate limit exceeded: {len(candidates)} > {_PLAN_LIMIT}")
@@ -438,6 +452,12 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
         "project_root": _text(semantics.get("project_root")) or None,
         "candidate_count": len(candidates),
         "category_counts": dict(sorted(counts.items())),
+        "business_function_coverage": {
+            "function_view_count": len(function_views),
+            "function_views_with_test_design_candidate": len({item.get("business_function_id") for item in candidates if item.get("business_function_id")}),
+            "test_execution_coverage": "NOT_MEASURED",
+            "note": "候选测试关联仅表示已生成测试设计，不表示测试执行或代码覆盖率。",
+        },
         "execution_status": "NOT_EXECUTED",
         "design_note": "候选测试需经需求确认和用户授权后才能执行；本模块不执行命令。",
         "warnings": warnings,
