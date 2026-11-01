@@ -12,6 +12,7 @@ from typing import Any
 
 from .ai_claim_review import load_claim_ledger
 from .test_result_importer import _parse_junit
+from .scan_attestation import verify_scan_attestation
 
 BINDING_SCHEMA = "usit-ai-evidence-binding-v1"
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
@@ -42,8 +43,8 @@ def _artifact_path(root: Path, relative: Any) -> Path:
     return resolved
 
 
-def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
-                          source_sha256: str) -> dict[str, Any]:
+def _verify_scan_manifest_integrity(root: Path, entry: dict[str, Any], source_path: str,
+                                    source_sha256: str) -> dict[str, Any]:
     manifest_path = entry.get("snapshot_manifest_path")
     manifest_sha = entry.get("snapshot_manifest_sha256")
     if manifest_path is None and manifest_sha is None:
@@ -106,8 +107,46 @@ def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
             "detail": "Manifest bytes match the declared digest and its exact file entry matches the verified source bytes."}
 
 
+def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
+                          source_sha256: str,
+                          trusted_public_keys: dict[str, bytes] | None = None) -> dict[str, Any]:
+    snapshot = _verify_scan_manifest_integrity(root, entry, source_path, source_sha256)
+    attestation_path = entry.get("snapshot_attestation_path")
+    snapshot["attestation_status"] = "ATTESTATION_NOT_PROVIDED"
+    snapshot["attestation"] = None
+    if attestation_path is None:
+        return snapshot
+    if snapshot.get("status") in {"MANIFEST_MISSING", "MANIFEST_STALE", "MANIFEST_INVALID",
+                                  "INCOMPLETE_DECLARATION", "INVALID_DECLARATION"}:
+        snapshot["attestation_status"] = "ATTESTATION_MANIFEST_NOT_VERIFIABLE"
+        return snapshot
+    try:
+        manifest_file = _artifact_path(root, entry.get("snapshot_manifest_path"))
+        sidecar_file = _artifact_path(root, attestation_path)
+    except FileNotFoundError:
+        snapshot["attestation_status"] = "ATTESTATION_MISSING"
+        return snapshot
+    if sidecar_file.stat().st_size > 64 * 1024:
+        snapshot["attestation_status"] = "ATTESTATION_INVALID_FORMAT"
+        snapshot["attestation"] = {"status": "ATTESTATION_INVALID_FORMAT",
+                                   "detail": "Attestation exceeds 64 KiB."}
+        return snapshot
+    attestation = verify_scan_attestation(
+        manifest_file.read_bytes(), sidecar_file.read_bytes(),
+        trusted_public_keys or {},
+    )
+    if (attestation.get("manifest_path") is not None and
+            attestation["manifest_path"] != entry.get("snapshot_manifest_path")):
+        attestation = {**attestation, "status": "ATTESTATION_MANIFEST_PATH_MISMATCH",
+                       "detail": "Signed manifest path does not match the evidence catalog path."}
+    snapshot["attestation"] = attestation
+    snapshot["attestation_status"] = attestation["status"]
+    return snapshot
+
+
 def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
-                             ledger_sha256: str | None = None) -> dict[str, Any]:
+                             ledger_sha256: str | None = None,
+                             trusted_public_keys: dict[str, bytes] | None = None) -> dict[str, Any]:
     from .ai_claim_review import validate_claim_ledger
 
     validate_claim_ledger(ledger)
@@ -132,6 +171,8 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
             "detail": "No local artifact_path was supplied; catalog presence is not artifact verification.",
             "snapshot_binding_status": "NOT_APPLICABLE",
             "snapshot_binding": None,
+            "attestation_status": "NOT_APPLICABLE",
+            "snapshot_attestation": None,
         }
         relative = entry.get("artifact_path")
         if relative is None:
@@ -168,9 +209,11 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
                 if line_count < 0 or int(line_text) > line_count:
                     row.update(binding_status="INVALID_LOCATOR", detail="Source line is outside the UTF-8 artifact.")
                 else:
-                    snapshot = _verify_scan_manifest(root, entry, relative, actual)
+                    snapshot = _verify_scan_manifest(root, entry, relative, actual, trusted_public_keys)
                     row["snapshot_binding"] = snapshot
                     row["snapshot_binding_status"] = snapshot["status"]
+                    row["attestation_status"] = snapshot["attestation_status"]
+                    row["snapshot_attestation"] = snapshot["attestation"]
                     row.update(binding_status="ARTIFACT_HASH_MATCH_AND_LOCATOR_VALID",
                                detail="Exact source bytes match SHA-256 and the referenced line exists.")
         elif kind == "TEST_RESULT":
@@ -227,10 +270,10 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
         else:
             status = "UNVERIFIED_REFERENCE"
         claim_counts[status] = claim_counts.get(status, 0) + 1
-        source_snapshot_states = [
-            bindings[x].get("snapshot_binding_status", "NOT_PROVIDED")
-            for x in refs if x in bindings and bindings[x]["evidence_type"] == "SOURCE_CODE"
+        source_bindings = [
+            bindings[x] for x in refs if x in bindings and bindings[x]["evidence_type"] == "SOURCE_CODE"
         ]
+        source_snapshot_states = [x.get("snapshot_binding_status", "NOT_PROVIDED") for x in source_bindings]
         if not source_snapshot_states:
             snapshot_status = "NOT_APPLICABLE"
         elif all(x == "MATCHED_SCAN_MANIFEST_ENTRY" for x in source_snapshot_states):
@@ -239,9 +282,31 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
             snapshot_status = "NOT_PROVIDED"
         else:
             snapshot_status = "CHECK_REQUIRED"
+        provenance = []
+        for item in source_bindings:
+            snap = item.get("snapshot_binding") or {}
+            provenance.append({
+                "evidence_id": item["evidence_id"],
+                "manifest_path": snap.get("manifest_path"),
+                "manifest_sha256": snap.get("manifest_sha256"),
+                "snapshot_binding_status": item.get("snapshot_binding_status"),
+                "attestation_status": item.get("attestation_status", "ATTESTATION_NOT_PROVIDED"),
+                "snapshot_id": (item.get("snapshot_attestation") or {}).get("snapshot_id"),
+            })
+        attestation_states = [x["attestation_status"] for x in provenance]
+        if not attestation_states:
+            provenance_status = "NOT_APPLICABLE"
+        elif all(x == "ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY" for x in attestation_states):
+            provenance_status = "ALL_SOURCE_ATTESTATIONS_TRUSTED"
+        elif all(x == "ATTESTATION_NOT_PROVIDED" for x in attestation_states):
+            provenance_status = "NOT_PROVIDED"
+        else:
+            provenance_status = "CHECK_REQUIRED"
         claims.append({
             "claim_id": claim["claim_id"],
             "snapshot_binding_status": snapshot_status,
+            "snapshot_provenance_status": provenance_status,
+            "snapshot_provenance": provenance,
             "evidence_refs": list(refs),
             "unknown_evidence_refs": unknown,
             "binding_status": status,
@@ -256,6 +321,11 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
         "evidence_count": len(bindings),
         "binding_status_counts": {key: evidence_counts[key] for key in sorted(evidence_counts)},
         "evidence_bindings": list(bindings.values()),
+        "attestation_status_counts": {
+            key: sum(1 for item in bindings.values() if item.get("attestation_status") == key)
+            for key in sorted({item.get("attestation_status") for item in bindings.values()
+                               if item.get("attestation_status") not in (None, "NOT_APPLICABLE")})
+        },
         "snapshot_binding_status_counts": {
             key: sum(1 for item in bindings.values() if item.get("snapshot_binding_status") == key)
             for key in sorted({item.get("snapshot_binding_status") for item in bindings.values()
@@ -268,6 +338,7 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
             "A matching SHA-256 proves byte identity against the supplied catalog digest, not artifact provenance or authenticity.",
             "SOURCE_CODE verification checks an exact UTF-8 file and line existence; it does not prove runtime execution or semantic support.",
             "An optional usit-manifest-v1 binding checks the manifest digest and exact path-to-file SHA-256 entry; it does not authenticate who produced the manifest or prove the project snapshot was independently captured.",
+            "A detached Ed25519 attestation is trusted only when its key is independently supplied by the caller; missing, unknown, or invalid attestations never promote claims to facts.",
             "TEST_RESULT verification checks an exact JUnit testcase and optional expected outcome; it does not prove test adequacy or business correctness.",
             "Unsupported evidence types and references without artifact_path remain UNVERIFIED_REFERENCE.",
             "No model claim or reviewer attestation is promoted to VERIFIED_FACT.",
