@@ -198,9 +198,9 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
 
     def test_typescript_dynamic_or_unresolved_route_handler_is_not_guessed(self):
         (self.root / "routes.js").write_text(
-            "const router = require('express').Router();\\n"
-            "const handler = registry[name];\\n"
-            "router.get('/dynamic', handler);\\n",
+            "const router = require('express').Router();\n"
+            "const handler = registry[name];\n"
+            "router.get('/dynamic', handler);\n",
             encoding="utf-8",
         )
         out = self.root.parent / "dynamic-handler-output"
@@ -214,8 +214,8 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
 
     def test_jsx_event_handler_binding_resolves_unique_named_handler(self):
         (self.root / "PhotoPage.tsx").write_text(
-            "export function PhotoPage() { return <button onClick={loadPhotos}>Load</button>; }\\n"
-            "export function loadPhotos() { return fetch('/api/photos'); }\\n", encoding="utf-8")
+            "export function PhotoPage() { return <button onClick={loadPhotos}>Load</button>; }\n"
+            "export function loadPhotos() { return fetch('/api/photos'); }\n", encoding="utf-8")
         out = self.root.parent / "jsx-event-output"
         scan_project(str(self.root), str(out), force=True)
         graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
@@ -232,7 +232,7 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
 
     def test_jsx_inline_callback_is_not_misreported_as_resolved_symbol(self):
         (self.root / "Inline.tsx").write_text(
-            "export function Page() { return <button onClick={() => save()}>Save</button>; }\\n", encoding="utf-8")
+            "export function Page() { return <button onClick={() => save()}>Save</button>; }\n", encoding="utf-8")
         out = self.root.parent / "jsx-inline-output"
         scan_project(str(self.root), str(out), force=True)
         graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
