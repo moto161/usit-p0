@@ -24,6 +24,6 @@ jobs:
       - name: Install the pinned local TypeScript parser
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run business understanding and call-ownership tests
-        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_business_graph tests.test_python_resolver -v
+        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_business_graph tests.test_database_access tests.test_python_resolver -v
       - name: Run USIT self-test
         run: python -m usit selftest
