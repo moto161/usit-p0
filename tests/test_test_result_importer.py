@@ -54,7 +54,8 @@ class TestResultImporterTests(unittest.TestCase):
               <testcase classname="tests.PhotoTests" name="test_upload"><skipped/></testcase>
             </testsuite>""")
             result = ingest_junit_results(report, mapping, graph)
-            self.assertEqual(result["business_function_results"][0]["execution_status"], "UNKNOWN")
+            upload = next(x for x in result["business_function_results"] if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["execution_status"], "UNKNOWN")
 
     def test_duplicate_case_ids_and_duplicate_mapping_are_rejected(self):
         with tempfile.TemporaryDirectory() as td:
