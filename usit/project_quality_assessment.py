@@ -77,10 +77,14 @@ def assess_project_quality(
     status_counts = Counter()
     coverage_counts = Counter()
     conflict_ids = []
+    invalid_status_ids = []
     for fid in sorted(functions):
         row = runtime.get(fid)
         status = row.get("test_execution_status", "NOT_MEASURED") if row else "NOT_MEASURED"
         coverage = row.get("code_coverage_status", "NOT_MEASURED") if row else "NOT_MEASURED"
+        invalid_status = status not in {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"} or coverage not in {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}
+        if invalid_status:
+            invalid_status_ids.append(fid)
         if status not in {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"}:
             status = "INVALID"
         if coverage not in {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}:
@@ -170,7 +174,9 @@ def assess_project_quality(
             "business_function_evidence_conflict_ids": conflict_ids,
             "unknown_test_design_business_function_ids": unknown_design_ids,
             "unknown_runtime_evidence_business_function_ids": unknown_runtime_ids,
-            "status": "CONFLICTS_OR_UNLINKED_RECORDS_PRESENT" if conflict_ids or unknown_design_ids or unknown_runtime_ids else "NO_DETECTED_LINKAGE_CONFLICTS",
+            "invalid_runtime_status_business_function_ids": invalid_status_ids,
+            "source_hash_conflicts": source_hash_conflicts,
+            "status": "CONFLICTS_OR_UNLINKED_RECORDS_PRESENT" if conflict_ids or unknown_design_ids or unknown_runtime_ids or invalid_status_ids or source_hash_conflicts else "NO_DETECTED_LINKAGE_CONFLICTS",
         },
         "limitations": [
             "本报告不计算单一质量总分，避免把未知、静态推断和运行时证据混为一谈。",
