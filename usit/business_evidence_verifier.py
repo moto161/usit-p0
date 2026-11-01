@@ -89,6 +89,99 @@ def verify_business_function_evidence(
             conflicts.append({"kind":"INVALID_TEST_STATUS","business_function_id":function_id,"status":ts})
         if cs not in {"COVERED","PARTIAL","NOT_COVERED","UNKNOWN","NOT_MEASURED"}:
             conflicts.append({"kind":"INVALID_COVERAGE_STATUS","business_function_id":function_id,"status":cs})
+
+        test_case_evidence = []
+        missing_test_case_ids = []
+        completeness_status = "NOT_PROVIDED"
+        if test is not None:
+            raw_missing = test.get("mapped_cases_missing_from_report")
+            if raw_missing is not None:
+                if not isinstance(raw_missing, list) or any(
+                    not isinstance(item, str) or not item.strip() for item in raw_missing
+                ):
+                    conflicts.append({
+                        "kind": "INVALID_TEST_COMPLETENESS_METADATA",
+                        "business_function_id": function_id,
+                        "field": "mapped_cases_missing_from_report",
+                    })
+                else:
+                    missing_test_case_ids = sorted(set(raw_missing))
+            raw_cases = test.get("mapped_test_cases")
+            if raw_cases is not None:
+                if not isinstance(raw_cases, list):
+                    conflicts.append({
+                        "kind": "INVALID_TEST_CASE_EVIDENCE",
+                        "business_function_id": function_id,
+                    })
+                else:
+                    for index, item in enumerate(raw_cases):
+                        if (not isinstance(item, dict)
+                                or not isinstance(item.get("test_case_id"), str)
+                                or not item["test_case_id"].strip()
+                                or item.get("status") not in {"PASSED", "FAILED", "SKIPPED"}):
+                            conflicts.append({
+                                "kind": "INVALID_TEST_CASE_EVIDENCE",
+                                "business_function_id": function_id,
+                                "index": index,
+                            })
+                            continue
+                        test_case_evidence.append({
+                            "test_case_id": item["test_case_id"],
+                            "status": item["status"],
+                            "classname": item.get("classname"),
+                            "name": item.get("name"),
+                        })
+            expected_count = test.get("expected_mapped_test_case_count")
+            reported_count = test.get("reported_mapped_test_case_count")
+            counts_valid = True
+            for field_name, count in (
+                ("expected_mapped_test_case_count", expected_count),
+                ("reported_mapped_test_case_count", reported_count),
+            ):
+                if count is not None and (
+                    not isinstance(count, int) or isinstance(count, bool) or count < 0
+                ):
+                    conflicts.append({
+                        "kind": "INVALID_TEST_COMPLETENESS_METADATA",
+                        "business_function_id": function_id,
+                        "field": field_name,
+                    })
+                    counts_valid = False
+            claimed_completeness = test.get("mapped_case_completeness")
+            if claimed_completeness not in {None, "COMPLETE", "INCOMPLETE", "NO_EXPECTED_MAPPED_CASES"}:
+                conflicts.append({
+                    "kind": "INVALID_TEST_COMPLETENESS_METADATA",
+                    "business_function_id": function_id,
+                    "field": "mapped_case_completeness",
+                    "status": claimed_completeness,
+                })
+            inferred_incomplete = bool(missing_test_case_ids) or claimed_completeness == "INCOMPLETE"
+            if counts_valid and expected_count is not None and reported_count is not None:
+                if reported_count > expected_count:
+                    conflicts.append({
+                        "kind": "INVALID_TEST_COMPLETENESS_METADATA",
+                        "business_function_id": function_id,
+                        "field": "reported_mapped_test_case_count",
+                    })
+                elif expected_count > reported_count:
+                    inferred_incomplete = True
+            if claimed_completeness == "COMPLETE" and inferred_incomplete:
+                conflicts.append({
+                    "kind": "CONFLICTING_TEST_COMPLETENESS_METADATA",
+                    "business_function_id": function_id,
+                })
+            if ts == "PASSED" and inferred_incomplete:
+                conflicts.append({
+                    "kind": "TEST_PASS_WITH_INCOMPLETE_MAPPED_CASES",
+                    "business_function_id": function_id,
+                    "missing_test_case_ids": missing_test_case_ids,
+                })
+            if inferred_incomplete:
+                completeness_status = "INCOMPLETE"
+            elif claimed_completeness in {"COMPLETE", "NO_EXPECTED_MAPPED_CASES"}:
+                completeness_status = claimed_completeness
+            elif raw_missing is not None:
+                completeness_status = "COMPLETE"
         if ts=="FAILED": conclusion="TEST_FAILURE_OBSERVED"
         elif ts=="PASSED" and cs=="COVERED": conclusion="TEST_PASS_AND_CODE_LINES_COVERED"
         elif ts=="PASSED" and cs in {"PARTIAL","NOT_COVERED"}: conclusion="TEST_PASS_WITH_COVERAGE_GAP"
@@ -103,6 +196,14 @@ def verify_business_function_evidence(
             "test_case_count":test.get("mapped_test_case_count",0) if test else 0,
             "failed_test_count":test.get("failed",0) if test else 0,
             "skipped_test_count":test.get("skipped",0) if test else 0,
+            "test_execution_detail": {
+                "execution_status_reason": test.get("execution_status_reason"),
+                "expected_mapped_test_case_count": test.get("expected_mapped_test_case_count"),
+                "reported_mapped_test_case_count": test.get("reported_mapped_test_case_count"),
+                "mapped_case_completeness": completeness_status,
+                "mapped_cases_missing_from_report": missing_test_case_ids,
+                "mapped_test_cases": test_case_evidence,
+            } if test else None,
             "code_coverage_status":cs,
             "line_coverage_percent":cov.get("line_coverage_percent") if cov else None,
             "verification_conclusion":conclusion,"business_correctness":"NOT_PROVEN",
@@ -129,6 +230,7 @@ def verify_business_function_evidence(
             "代码行覆盖率不证明断言有效、分支覆盖完整、权限正确或端到端用户流程可用。",
             "静态业务功能视图仍是 STATIC_INFERENCE；本报告不会把它升级为 VERIFIED_FACT。",
             "测试结果与覆盖率必须引用同一份业务图；图哈希不一致时标记证据冲突。",
+            "已映射 testcase 的报告完整性会被单独保留；缺失预期 testcase 的 PASSED 工件会被标记为证据冲突。",
             "未提供的测试或覆盖率证据标记 NOT_MEASURED，不推断为失败或零覆盖。",
         ],
     }
