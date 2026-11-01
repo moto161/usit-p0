@@ -158,10 +158,12 @@ def review_claim_ledger(ledger: dict[str, Any], ledger_sha256: str | None = None
         decision = review.get("decision") if review else "NOT_REVIEWED"
         if not review:
             review_status = "REVIEW_REQUIRED"
-        elif unknown_review_refs:
+        elif unknown_refs or unknown_review_refs:
             review_status = "REVIEW_REQUIRED_UNKNOWN_EVIDENCE_REFERENCE"
-        elif decision == "SUPPORTS_CLAIM":
+        elif decision == "SUPPORTS_CLAIM" and review_refs:
             review_status = "REVIEWED_SUPPORT_CANDIDATE"
+        elif decision == "SUPPORTS_CLAIM":
+            review_status = "NEEDS_MORE_EVIDENCE"
         elif decision == "CONTRADICTS_CLAIM":
             review_status = "REVIEWED_CONTRADICTION_CANDIDATE"
         elif decision == "CONFLICTING_EVIDENCE":
@@ -208,8 +210,10 @@ def review_claim_ledger(ledger: dict[str, Any], ledger_sha256: str | None = None
         normalized_texts = {" ".join(row["claim_text"].split()) for row in members}
         if len(members) == 1:
             comparison = "SINGLE_CLAIM"
-        elif len(normalized_texts) == 1:
+        elif len(normalized_texts) == 1 and len(model_ids) > 1:
             comparison = "TEXT_IDENTICAL_MULTI_MODEL_ALIGNMENT_NOT_VERIFICATION"
+        elif len(normalized_texts) == 1:
+            comparison = "SAME_MODEL_REPEATED_CLAIM_REQUIRES_REVIEW"
         else:
             comparison = "DIVERGENT_TEXT_REQUIRES_HUMAN_REVIEW"
         evidence_sets = [set(row["resolved_evidence_refs"]) for row in members]
@@ -239,7 +243,11 @@ def review_claim_ledger(ledger: dict[str, Any], ledger_sha256: str | None = None
         "comparison_group_count": len(group_results),
         "reviewed_claim_count": sum(row["review_status"] != "REVIEW_REQUIRED" for row in reviewed_claims),
         "review_required_count": sum(row["review_status"].startswith("REVIEW_REQUIRED") for row in reviewed_claims),
-        "unknown_evidence_reference_count": sum(len(row["unknown_evidence_refs"]) for row in reviewed_claims),
+        "unknown_evidence_reference_count": sum(
+            len(row["unknown_evidence_refs"]) +
+            len((row["review_attestation"] or {}).get("unknown_evidence_refs", []))
+            for row in reviewed_claims
+        ),
         "claims": reviewed_claims,
         "comparison_groups": group_results,
         "fusion_policy": {
