@@ -66,10 +66,39 @@ def _candidate(kind: str, endpoint: str, purpose: str, evidence: list[dict[str, 
             "测试请求与数据变更均须在可销毁的专用测试数据集内进行",
         ],
         "steps": steps,
+        "actions": [
+            {
+                "step": index,
+                "action": action,
+                "expected_result": (
+                    "由需求负责人依据已批准的身份、角色、资源所有权和接口验收标准填写；"
+                    "当前静态证据不足以确定，不得将占位内容作为 PASS 判据。"
+                ),
+                "evidence_to_collect": [
+                    "原始请求与响应",
+                    "服务端授权/审计日志",
+                    "测试前后数据快照及实际副作用",
+                ],
+            }
+            for index, action in enumerate(steps, start=1)
+        ],
         "expected_result": (
             "以经确认的身份、角色、资源所有权和接口策略为准；当前静态证据不能确定"
             "具体 HTTP 状态码或响应内容，未确认需求前不得判定 PASS/FAIL。"
         ),
+        "expected_results_status": "OWNER_CONFIRMATION_REQUIRED",
+        "evidence_requirements": [
+            {
+                "evidence_type": item.get("evidence_type", "SOURCE_REFERENCE"),
+                "source_path": item.get("path"),
+                "line": item.get("line"),
+            }
+            for item in evidence
+        ] + [
+            {"evidence_type": "RUNTIME_TEST_RESULT", "requirement": "保存原始测试报告及 testcase ID"},
+            {"evidence_type": "AUTHORIZATION_DECISION", "requirement": "记录实际身份、角色、资源归属与授权决策"},
+            {"evidence_type": "BUSINESS_ORACLE", "requirement": "保存与已批准验收标准逐项比较的结果"},
+        ],
         "design_status": "CANDIDATE_NEEDS_REQUIREMENTS",
         "execution_status": "NOT_EXECUTED",
         "limitations": limitations,
