@@ -96,6 +96,13 @@ class AndroidEventAdapterTests(unittest.TestCase):
             document = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(len(document["events"]), 5)
             self.assertEqual(document["session"]["platform"], "ANDROID")
+            validation_path = base / "validated.json"
+            with redirect_stdout(StringIO()):
+                validation_code = main(["validate-runtime-evidence", "--events", str(out_path),
+                    "--graph", str(graph_path), "--out", str(validation_path)])
+            self.assertEqual(validation_code, 0)
+            validated = json.loads(validation_path.read_text(encoding="utf-8"))
+            self.assertEqual(validated["event_count"], 5)
             with redirect_stdout(StringIO()):
                 overwrite = main(args)
             self.assertEqual(overwrite, 2)
