@@ -89,6 +89,48 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertIs(relation["verified"], False)
         self.assertIs(relation["candidate"], True)
 
+    def test_handler_association_collects_only_calls_owned_by_that_symbol(self):
+        source = graph()
+        source["nodes"].extend([
+            {
+                "id": "symbol:server/routes/photos.js#uploadPhoto:35",
+                "type": "function", "label": "uploadPhoto",
+                "evidence": {"path": "server/routes/photos.js", "line": 35},
+            },
+            {
+                "id": "symbol:server/services/photo_store.js#savePhoto:8",
+                "type": "function", "label": "savePhoto",
+                "evidence": {"path": "server/services/photo_store.js", "line": 8},
+            },
+        ])
+        source["edges"].append({
+            "source": "file:server/routes/photos.js",
+            "target": "symbol:server/services/photo_store.js#savePhoto:8",
+            "type": "calls", "caller_symbol_id": "symbol:server/routes/photos.js#uploadPhoto:35",
+            "resolution_status": "RESOLVED", "resolved": True,
+            "evidence": {"path": "server/routes/photos.js", "line": 39},
+            "target_location": {"path": "server/services/photo_store.js", "line": 8},
+            "method": "python-ast-project", "confidence": "high",
+        })
+        source["edges"].append({
+            "source": "file:server/routes/photos.js",
+            "target": "symbol:server/services/photo_store.js#savePhoto:8",
+            "type": "calls", "caller_symbol_id": "symbol:server/routes/photos.js#anotherHandler:50",
+            "resolution_status": "RESOLVED", "resolved": True,
+            "evidence": {"path": "server/routes/photos.js", "line": 52},
+            "target_location": {"path": "server/services/photo_store.js", "line": 8},
+            "method": "python-ast-project", "confidence": "high",
+        })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        downstream = endpoint["handler_association"]["downstream_call_evidence"]
+        self.assertEqual(len(downstream), 1)
+        self.assertEqual(downstream[0]["call_site"]["line"], 39)
+        self.assertEqual(result["business_understanding"]["handler_downstream_call_evidence"], 1)
+
     def test_duplicate_same_file_handler_symbols_remain_ambiguous(self):
         source = graph()
         for line in (30, 45):
