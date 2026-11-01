@@ -69,6 +69,25 @@ class SecurityTestPlannerTests(unittest.TestCase):
                             .issubset(evidence_types))
             self.assertEqual(candidate["execution_status"], "NOT_EXECUTED")
 
+    def test_links_security_candidates_only_to_unique_endpoint_business_function_view(self):
+        node = endpoint()
+        graph = {"nodes": [node], "business_understanding": {"business_function_views": [{
+            "business_function_id": "bf-photos", "endpoint_id": node["id"]}]}}
+        result = plan_security_tests(graph)
+        self.assertTrue(result["candidates"])
+        self.assertTrue(all(item["business_function_id"] == "bf-photos" for item in result["candidates"]))
+        self.assertEqual(result["unlinked_business_function_candidate_count"], 0)
+
+    def test_ambiguous_endpoint_business_function_views_remain_unlinked(self):
+        node = endpoint()
+        graph = {"nodes": [node], "business_understanding": {"business_function_views": [
+            {"business_function_id": "bf-one", "endpoint_id": node["id"]},
+            {"business_function_id": "bf-two", "endpoint_id": node["id"]}]}}
+        result = plan_security_tests(graph)
+        self.assertTrue(result["candidates"])
+        self.assertTrue(all(item["business_function_id"] is None for item in result["candidates"]))
+        self.assertEqual(result["unlinked_business_function_candidate_count"], result["candidate_count"])
+
     def test_missing_auth_evidence_is_not_called_a_vulnerability(self):
         result = plan_security_tests({"nodes": [endpoint()]})
         auth = next(item for item in result["candidates"]
