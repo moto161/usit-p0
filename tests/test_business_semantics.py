@@ -110,6 +110,24 @@ class DatabaseAccessSemanticsTests(unittest.TestCase):
         self.assertEqual(dynamic["tables"], [])
 
 
+class AuthorizationSemanticsTests(unittest.TestCase):
+    def test_analyze_emits_authorization_check_candidates(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.js", (
+            "const { authRequired, adminRequired } = require('../middleware/auth');\n"
+            "router.use(authRequired);\n"
+            "router.get('/photos', adminRequired, listPhotos);\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertGreaterEqual(result["authorization_check_count"], 2)
+        self.assertTrue(any(
+            row["kind"] == "route_middleware" and "authRequired" in row["guard_names"]
+            for row in result["authorization_checks"]
+        ))
+        endpoint = next(row for row in result["endpoints"] if row["path"] == "/photos")
+        self.assertEqual(endpoint["authorization_status"], "DETECTED")
+
+
 class EndpointAuthTests(unittest.TestCase):
     def test_module_level_router_use_applies_admin_auth(self):
         p = SyntheticProject(self)
