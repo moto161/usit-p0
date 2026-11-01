@@ -270,6 +270,24 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertIn("tests.PhotoTests::test_upload_permissions", markdown)
         self.assertIn("MAPPED_TEST_CASES_MISSING_FROM_REPORT", markdown)
 
+    def test_markdown_renderer_tolerates_malformed_optional_candidate_collections(self):
+        report = build_business_traceability(
+            self.semantics, self.graph,
+            {"schema_version": "usit-feature-function-mapping-v1",
+             "source_graph_sha256": self.graph_hash, "mappings": []},
+            input_hashes=self.hashes,
+        )
+        report["rows"][0]["test_candidates"] = [{
+            "test_id": "malformed-candidate",
+            "preconditions": None,
+            "actions": "not-a-list",
+            "evidence_requirements": None,
+        }]
+        report["rows"][0]["test_candidate_ids"] = None
+        markdown = render_business_traceability_markdown(report)
+        self.assertIn("malformed-candidate", markdown)
+        self.assertIn("测试设计候选详情", markdown)
+
     def test_markdown_renderer_rejects_wrong_schema_and_escapes_cells(self):
         report = build_business_traceability(self.semantics, self.graph,
             {"schema_version": "usit-feature-function-mapping-v1",
