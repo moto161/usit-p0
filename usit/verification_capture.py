@@ -131,8 +131,10 @@ def _safe_relative_file(root: Path, rel: str) -> Path:
     pure = PurePosixPath(rel)
     if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts):
         raise ValueError(f"snapshot path escapes or is not normalised: {rel!r}")
-    if pure.as_posix() != rel or ":" in pure.parts[0]:
-        raise ValueError(f"snapshot path is not a normalised relative path: {rel!r}")
+    # Reject drive prefixes and NTFS alternate-data-stream syntax in every
+    # component, not only the first path segment.
+    if pure.as_posix() != rel or any(":" in part for part in pure.parts):
+        raise ValueError(f"snapshot path is not a normalised relative file path: {rel!r}")
     path = root.joinpath(*pure.parts)
     _reject_reparse_components(path)
     resolved = path.resolve(strict=False)
