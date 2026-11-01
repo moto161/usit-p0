@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -28,6 +29,9 @@ def _source_path(record: Mapping[str, Any]) -> str:
     if not isinstance(source, str):
         return ""
     path = source.strip().replace("\\", "/")
+    # Code endpoint records encode source as "relative/path:line". Strip only
+    # a numeric trailing line suffix before matching the graph file node.
+    path = re.sub(r":([1-9][0-9]*)$", "", path)
     if not path or path.startswith("/") or ":" in path:
         return ""
     parts = path.split("/")
