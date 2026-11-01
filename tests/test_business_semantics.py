@@ -178,14 +178,14 @@ class EndpointContractAlignmentTests(unittest.TestCase):
     def test_exact_documented_route_match_and_unmatched_contracts_are_explicit(self):
         p = SyntheticProject(self)
         p.api_doc(
-            "# API contracts\\n"
-            "GET /api/photos\\n"
-            "POST /api/photos\\n"
-            "GET /api/missing\\n"
+            "# API contracts\n"
+            "GET /api/photos\n"
+            "POST /api/photos\n"
+            "GET /api/missing\n"
         )
         p.route("server/routes/photos.js", (
-            "router.get('/api/photos', authRequired, listPhotos);\\n"
-            "router.delete('/api/internal', authRequired, deleteInternal);\\n"
+            "router.get('/api/photos', authRequired, listPhotos);\n"
+            "router.delete('/api/internal', authRequired, deleteInternal);\n"
         ))
         result = BusinessSemanticsAdapter(p.root).analyze()
         rows = result["endpoint_contract_alignment"]
