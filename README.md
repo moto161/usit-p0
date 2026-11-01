@@ -103,6 +103,12 @@ When projecting into `business_knowledge_graph.json`, USIT associates a database
 Dynamic SQL, concatenation, multiline SQL, CTE/UNION statements, unsupported SQL forms, missing/ambiguous caller ownership, and undocumented tables are not guessed. This slice does not prove runtime execution, actual read/write effects, transaction commit, parameter values, field-level data flow, ORM model-to-table mapping, or authorization enforcement. All database links remain candidate/unverified static evidence.
 
 
+## S2.10 — Evidence-backed endpoint execution-path reconstruction (partial)
+
+The business graph now emits `business_understanding.endpoint_execution_paths`, a deterministic per-endpoint summary assembled only from existing explicit evidence: route source, resolved handler, bounded call-chain steps, linked database accesses, route/function authorization indicators, and exact-line identity/resource evidence. Each stage is reported separately (entrypoint, handler, calls, database, authorization, identity/resource), with unresolved/external steps and call-chain truncation retained as unknowns. Every path remains `STATIC_INFERENCE` / `NOT_VERIFIED`.
+
+This is a technical execution-path view, not a claimed business workflow. It does not infer undocumented feature-to-endpoint mappings, runtime branch order, actual request reachability, database effects, permission correctness or successful outcomes. Missing stages remain `UNKNOWN` / not linked, not silently filled by AI. This view is intended to support later function understanding, evidence-based test planning, defect localization and authorized regression—not to replace those stages.
+
 ## S2.9 — Identity and resource-ownership evidence (partial)
 
 The business-semantics pass now extracts a deliberately narrow set of identity/resource patterns: recognizable authenticated-identity expressions (for example, `req.user.id`), request-controlled identity inputs (for example, `req.body.user_id`), explicit same-line owner comparisons, and same-line SQL owner predicates whose call expression also contains one of those identity expressions. Records retain source path/line, expression details, `STATIC_INFERENCE`, `NOT_VERIFIED` and `SAME_LINE_PATTERN`.
