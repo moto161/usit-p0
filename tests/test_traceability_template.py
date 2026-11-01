@@ -46,10 +46,11 @@ class TraceabilityTemplateTests(unittest.TestCase):
             self.assertEqual(code, 0)
             result = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(result["source_graph_sha256"], hashlib.sha256(graph_bytes).hexdigest())
-            with self.assertRaisesRegex(ValueError, "already exists"):
-                with redirect_stdout(StringIO()):
-                    main(["init-traceability-template", "--semantics", str(sem_path),
-                        "--graph", str(graph_path), "--out", str(out_path)])
+            with redirect_stdout(StringIO()):
+                second_code = main(["init-traceability-template", "--semantics", str(sem_path),
+                    "--graph", str(graph_path), "--out", str(out_path)])
+            self.assertEqual(second_code, 2)
+            self.assertEqual(json.loads(out_path.read_text(encoding="utf-8")), result)
 
 
 if __name__ == "__main__":
