@@ -128,6 +128,147 @@ def _collect_call_chains(edges: list[dict[str, Any]], root_symbol_id: str,
     return chains, truncated
 
 
+def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Summarize only explicit endpoint → handler → call → DB/auth/identity evidence."""
+    paths: list[dict[str, Any]] = []
+    for node in nodes:
+        if node.get("business_kind") != "endpoint":
+            continue
+        details = node.get("business_details")
+        details = details if isinstance(details, Mapping) else {}
+        evidence = node.get("evidence")
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        association = node.get("handler_association")
+        association = association if isinstance(association, Mapping) else {}
+        authorization = node.get("authorization_evidence")
+        authorization = authorization if isinstance(authorization, Mapping) else {}
+        chains = association.get("call_chain_evidence")
+        chains = chains if isinstance(chains, list) else []
+        database = association.get("database_access_evidence")
+        database = database if isinstance(database, list) else []
+        identity = association.get("identity_dataflow_evidence")
+        identity = identity if isinstance(identity, list) else []
+        route_guards = authorization.get("route_middleware")
+        route_guards = route_guards if isinstance(route_guards, list) else []
+        function_guards = authorization.get("reachable_function_checks")
+        function_guards = function_guards if isinstance(function_guards, list) else []
+
+        call_steps: list[dict[str, Any]] = []
+        unresolved_steps: list[dict[str, Any]] = []
+        for chain_index, chain in enumerate(chains):
+            if not isinstance(chain, Mapping):
+                continue
+            for step_index, step in enumerate(chain.get("steps", [])):
+                if not isinstance(step, Mapping):
+                    continue
+                item = {
+                    "chain_index": chain_index,
+                    "step_index": step_index,
+                    "caller_symbol_id": step.get("caller_symbol_id"),
+                    "target_id": step.get("target_id"),
+                    "resolution_status": step.get("resolution_status") or "UNKNOWN",
+                    "call_site": step.get("call_site") or {},
+                    "target_location": step.get("target_location"),
+                    "method": step.get("method"),
+                    "confidence": "STATIC_INFERENCE",
+                }
+                call_steps.append(item)
+                if item["resolution_status"] != "RESOLVED":
+                    unresolved_steps.append(item)
+        call_steps.sort(key=lambda item: (
+            item["chain_index"], item["step_index"],
+            str(item["call_site"].get("path") or ""),
+            int(item["call_site"].get("line") or 0),
+            str(item.get("target_id") or ""),
+        ))
+        db_refs = [
+            {"database_access_id": item.get("database_access_id"),
+             "path": item.get("path"), "line": item.get("line"),
+             "operation": item.get("operation"), "tables": item.get("tables", []),
+             "columns": item.get("columns", []),
+             "verification_status": item.get("verification_status") or "NOT_VERIFIED"}
+            for item in database if isinstance(item, Mapping)
+        ]
+        auth_refs = [
+            {"authorization_check_id": item.get("authorization_check_id"),
+             "path": item.get("path"), "line": item.get("line"),
+             "guard_names": item.get("guard_names", []),
+             "kind": "route_middleware", "verification_status": "NOT_VERIFIED"}
+            for item in route_guards if isinstance(item, Mapping)
+        ] + [
+            {"authorization_check_id": item.get("authorization_check_id"),
+             "path": item.get("path"), "line": item.get("line"),
+             "guard_names": item.get("guard_names", []),
+             "kind": "reachable_function_check", "verification_status": "NOT_VERIFIED"}
+            for item in function_guards if isinstance(item, Mapping)
+        ]
+        identity_refs = [
+            {"identity_evidence_id": item.get("identity_evidence_id"),
+             "kind": item.get("kind"), "path": item.get("path"),
+             "line": item.get("line"), "scope": item.get("scope"),
+             "verification_status": item.get("verification_status") or "NOT_VERIFIED"}
+            for item in identity if isinstance(item, Mapping)
+        ]
+        handler_status = association.get("resolution_status") or "UNKNOWN"
+        if association.get("call_chain_truncated"):
+            call_status = "TRUNCATED"
+        elif unresolved_steps:
+            call_status = "PARTIAL"
+        elif call_steps:
+            call_status = "RESOLVED_STATIC_CHAIN"
+        else:
+            call_status = "NO_CALL_CHAIN_EVIDENCE"
+        flow = {
+            "endpoint_id": node.get("id"),
+            "method": details.get("method"),
+            "endpoint": details.get("endpoint") or node.get("label"),
+            "source": {"path": evidence.get("path"), "line": evidence.get("line")},
+            "handler": {
+                "reference": association.get("reference"),
+                "symbol_id": association.get("target_symbol_id"),
+                "path": association.get("target_path"),
+                "line": association.get("target_line"),
+                "resolution_status": handler_status,
+            },
+            "call_chain": call_steps,
+            "database_accesses": db_refs,
+            "authorization": {
+                "status": authorization.get("status") or "UNKNOWN",
+                "evidence": auth_refs,
+            },
+            "identity_resource_flow": identity_refs,
+            "stage_status": {
+                "entrypoint": "SOURCE_IDENTIFIED",
+                "handler": handler_status,
+                "calls": call_status,
+                "database": "LINKED" if db_refs else "NOT_LINKED_OR_UNKNOWN",
+                "authorization": authorization.get("status") or "UNKNOWN",
+                "identity_resource": "DETECTED" if identity_refs else "NOT_DETECTED_STATIC_SCAN",
+            },
+            "unknowns": [
+                "静态调用链不证明运行时执行、路由注册顺序或请求可达。",
+                "数据库关联只证明有限静态调用点与函数符号的候选关联，不证明实际读写或事务结果。",
+                "授权/身份线索不证明检查执行、身份可信、资源归属正确或拒绝行为有效。",
+            ] + (["调用链包含未解析/外部/动态终止步骤，后续路径未知。"] if unresolved_steps else [])
+              + (["调用链达到分析上限，后续调用未展开。"] if association.get("call_chain_truncated") else []),
+            "confidence": "STATIC_INFERENCE",
+            "verification_status": "NOT_VERIFIED",
+        }
+        flow["execution_path_id"] = _stable_id("endpoint-execution-path", {
+            "endpoint_id": flow["endpoint_id"],
+            "source": flow["source"],
+            "handler": flow["handler"],
+        })
+        paths.append(flow)
+    paths.sort(key=lambda item: (
+        str(item.get("source", {}).get("path") or ""),
+        int(item.get("source", {}).get("line") or 0),
+        str(item.get("endpoint") or ""),
+        str(item.get("execution_path_id") or ""),
+    ))
+    return paths
+
+
 def project_business_graph(graph: Mapping[str, Any],
                            semantics: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copied graph with evidence-linked business candidate nodes.
@@ -697,9 +838,12 @@ def project_business_graph(graph: Mapping[str, Any],
             ],
         }
 
+    endpoint_execution_paths = _build_endpoint_execution_paths(nodes)
     result["nodes"] = nodes
     result["edges"] = edges
     result["business_understanding"] = {
+        "endpoint_execution_paths": endpoint_execution_paths,
+        "endpoint_execution_path_count": len(endpoint_execution_paths),
         "schema_version": _SCHEMA,
         "status": "PARTIAL_EVIDENCE_LINKS",
         "linked_record_counts": linked_counts,
