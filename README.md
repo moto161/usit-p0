@@ -613,3 +613,21 @@ python -m usit verify-evidence-bindings --input .\\ai-claim-ledger.json --eviden
 - `UNKNOWN_REFERENCE` / `UNVERIFIED_REFERENCE`：未知 ID、缺少 artifact 或暂不支持的证据类型。
 
 即使所有绑定均为 `ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED`，也只证明字节与定位符符合提供的目录声明；不证明来源可信、审阅者身份真实、代码语义支持主张或业务功能正确。所有主张的 `truth_status` 固定为 `NOT_ESTABLISHED`，不会提升为 `VERIFIED_FACT`。报告为新文件，不覆盖已有结果。
+
+
+## S2.27-B — SOURCE_CODE 与 USIT 扫描快照交叉绑定
+
+在 S2.27-A 的原始 artifact 字节校验之上，`SOURCE_CODE` 证据可选增加两个字段：
+- `snapshot_manifest_path`：相对于 `--evidence-root` 的 `scan_manifest.json` 路径。
+- `snapshot_manifest_sha256`：该 manifest 原始字节的 SHA-256。
+
+验证器读取真实 manifest 字节，核对其 SHA-256、`schema_version=usit-manifest-v1`、精确文件相对路径以及 manifest 中记录的文件 SHA-256 是否与已读取源码字节一致。可选 `snapshot_file_path` 用于 manifest 中的路径与 `artifact_path` 不同的受控场景；默认等于 `artifact_path`。
+
+快照状态：
+- `MATCHED_SCAN_MANIFEST_ENTRY`：manifest 字节摘要、schema、精确路径和源码文件摘要均匹配。
+- `MANIFEST_MISSING` / `MANIFEST_STALE` / `MANIFEST_INVALID`：manifest 缺失、摘要不匹配或格式/schema 无效。
+- `FILE_NOT_IN_MANIFEST` / `MANIFEST_DUPLICATE_PATH` / `FILE_HASH_MISMATCH`：manifest 中没有唯一匹配路径，或记录的源码摘要与真实字节不一致。
+- `NOT_PROVIDED`：未提供快照 manifest 身份；源码字节本身即使匹配，也不能声称已绑定到 USIT 扫描快照。
+- `INCOMPLETE_DECLARATION` / `INVALID_DECLARATION`：manifest 路径与摘要字段不完整或摘要格式非法。
+
+该检查仍不是数字签名、可信时间戳或来源认证；攻击者若能同时替换 manifest 和调用方声明的摘要，仍可构造一致但不可信的输入。因此报告明确保留 provenance 限制，不提升 `truth_status`。新增合成测试覆盖 manifest 成功绑定、manifest 摘要过期、manifest 内文件摘要不匹配和 manifest 缺失。
