@@ -57,6 +57,43 @@ class TestResultImporterTests(unittest.TestCase):
             upload = next(x for x in result["business_function_results"] if x["business_function_id"] == "bf-upload")
             self.assertEqual(upload["execution_status"], "UNKNOWN")
 
+    def test_partial_mapped_report_is_unknown_and_never_false_pass(self):
+        from usit.business_evidence_verifier import verify_business_function_evidence
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            expected = [
+                {"test_case_id": "tests.PhotoTests::test_upload", "business_function_id": "bf-upload"},
+                {"test_case_id": "tests.PhotoTests::test_upload_permissions", "business_function_id": "bf-upload"},
+            ]
+            report, mapping, graph = self._inputs(
+                base,
+                `<testsuite>
+                  <testcase classname="tests.PhotoTests" name="test_upload"/>
+                </testsuite>`,
+                expected,
+            )
+            result = ingest_junit_results(report, mapping, graph)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["execution_status"], "UNKNOWN")
+            self.assertEqual(upload["execution_status_reason"], "MAPPED_TEST_CASES_MISSING_FROM_REPORT")
+            self.assertEqual(upload["expected_mapped_test_case_count"], 2)
+            self.assertEqual(upload["reported_mapped_test_case_count"], 1)
+            self.assertEqual(upload["mapped_case_completeness"], "INCOMPLETE")
+            self.assertEqual(
+                upload["mapped_cases_missing_from_report"],
+                ["tests.PhotoTests::test_upload_permissions"],
+            )
+            graph_doc = json.loads(graph.read_text(encoding="utf-8"))
+            matrix = verify_business_function_evidence(
+                graph_doc, result, business_graph_sha256=result["source_hashes"]["business_graph_sha256"]
+            )
+            verified_upload = next(x for x in matrix["business_function_evidence"]
+                                   if x["business_function_id"] == "bf-upload")
+            self.assertEqual(verified_upload["test_execution_status"], "UNKNOWN")
+            self.assertEqual(verified_upload["verification_conclusion"], "TEST_EVIDENCE_INCONCLUSIVE")
+            self.assertFalse(verified_upload["evidence_conflict"])
+
     def test_duplicate_case_ids_and_duplicate_mapping_are_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
