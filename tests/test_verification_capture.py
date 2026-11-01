@@ -95,19 +95,7 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertTrue(result.manifest_valid)
 
     def test_keyboard_interrupt_terminates_child_and_records_returncode(self):
-        # Raise only for the capture polling loop. subprocess.wait() also uses
-        # the shared time module and must be allowed to wait for child exit.
-        original_sleep = capture.time.sleep
-        should_interrupt = True
-
-        def interrupt_once(delay):
-            nonlocal should_interrupt
-            if should_interrupt:
-                should_interrupt = False
-                raise KeyboardInterrupt
-            return original_sleep(delay)
-
-        with patch.object(capture.time, "sleep", side_effect=interrupt_once):
+        with patch.object(capture.time, "sleep", side_effect=KeyboardInterrupt):
             result = self.run_capture("import time; time.sleep(10)", poll_interval=0.01)
         self.assertEqual(result.status, "INTERRUPTED")
         self.assertTrue(result.interrupted)
