@@ -66,6 +66,52 @@ class AIEvidenceBindingTests(unittest.TestCase):
         self.assertEqual(result["overall_truth_status"], "NOT_ESTABLISHED")
         self.assertEqual(result["claims"][0]["truth_status"], "NOT_ESTABLISHED")
 
+    def _attach_scan_manifest(self, *, recorded_sha=None, manifest_path="scan_manifest.json"):
+        source_sha = self.ledger["evidence_catalog"][0]["source_sha256"]
+        manifest = {
+            "schema_version": "usit-manifest-v1",
+            "project_root": "fixture-project",
+            "files": [{
+                "path": "src/photo.py",
+                "sha256": recorded_sha or source_sha,
+            }],
+        }
+        raw = __import__("json").dumps(manifest, sort_keys=True).encode("utf-8")
+        (self.root / manifest_path).write_bytes(raw)
+        entry = self.ledger["evidence_catalog"][0]
+        entry["snapshot_manifest_path"] = manifest_path
+        entry["snapshot_manifest_sha256"] = hashlib.sha256(raw).hexdigest()
+
+    def test_source_is_bound_to_exact_scan_manifest_entry(self):
+        self._attach_scan_manifest()
+        result = verify_evidence_bindings(self.ledger, self.root)
+        binding = result["evidence_bindings"][0]
+        self.assertEqual(binding["snapshot_binding_status"], "MATCHED_SCAN_MANIFEST_ENTRY")
+        self.assertEqual(result["claims"][0]["snapshot_binding_status"],
+                         "ALL_SOURCE_ENTRIES_MATCHED_SCAN_MANIFEST")
+
+    def test_scan_manifest_file_digest_mismatch_is_stale(self):
+        self._attach_scan_manifest()
+        self.ledger["evidence_catalog"][0]["snapshot_manifest_sha256"] = "0" * 64
+        result = verify_evidence_bindings(self.ledger, self.root)
+        self.assertEqual(result["evidence_bindings"][0]["snapshot_binding_status"],
+                         "MANIFEST_STALE")
+        self.assertEqual(result["claims"][0]["snapshot_binding_status"], "CHECK_REQUIRED")
+
+    def test_scan_manifest_recorded_source_digest_mismatch_is_rejected(self):
+        self._attach_scan_manifest(recorded_sha="0" * 64)
+        result = verify_evidence_bindings(self.ledger, self.root)
+        self.assertEqual(result["evidence_bindings"][0]["snapshot_binding_status"],
+                         "FILE_HASH_MISMATCH")
+
+    def test_missing_scan_manifest_is_not_treated_as_verified(self):
+        entry = self.ledger["evidence_catalog"][0]
+        entry["snapshot_manifest_path"] = "missing-manifest.json"
+        entry["snapshot_manifest_sha256"] = "0" * 64
+        result = verify_evidence_bindings(self.ledger, self.root)
+        self.assertEqual(result["evidence_bindings"][0]["snapshot_binding_status"],
+                         "MANIFEST_MISSING")
+
     def test_hash_mismatch_is_stale(self):
         self.ledger["evidence_catalog"][0]["source_sha256"] = "0" * 64
         result = verify_evidence_bindings(self.ledger, self.root)
