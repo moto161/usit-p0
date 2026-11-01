@@ -18,6 +18,7 @@ from .business_evidence_verifier import verify_business_function_evidence
 from .verification_gap_analyzer import build_verification_gap_backlog
 from .project_quality_assessment import assess_project_quality
 from .project_quality_report import render_project_quality_markdown
+from .business_traceability import build_business_traceability
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -219,6 +220,13 @@ def main(argv=None):
     qa.add_argument('--gap-backlog',help='Optional analyze-gaps output JSON')
     qa.add_argument('--out',required=True,help='New JSON assessment path; existing files are never overwritten')
     qa.add_argument('--out-md',help='Optional new Markdown report path; existing files are never overwritten')
+    bt=sub.add_parser('trace-business',help='Build an explicit review-gated requirements-to-runtime-evidence traceability matrix')
+    bt.add_argument('--semantics',required=True,help='business_semantics.json')
+    bt.add_argument('--graph',required=True,help='business_knowledge_graph.json')
+    bt.add_argument('--mapping',required=True,help='Reviewed feature-to-business-function mapping manifest JSON')
+    bt.add_argument('--test-plan',help='Optional business_test_plan.json')
+    bt.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
+    bt.add_argument('--out',required=True,help='New traceability matrix JSON path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
         if a.cmd=='selftest': return selftest()
@@ -268,6 +276,43 @@ def main(argv=None):
             return _inspect_android(a)
         if a.cmd=='plan-business-tests':
             return _plan_business_tests(a)
+        if a.cmd=='trace-business':
+            import hashlib
+            def read_trace_json(path, limit):
+                source=Path(path).expanduser()
+                if source.is_symlink(): raise ValueError("input must not be a symbolic link")
+                resolved=source.resolve(strict=True)
+                if not resolved.is_file(): raise ValueError("input must be a regular file")
+                raw=resolved.read_bytes()
+                if len(raw)>limit: raise ValueError("business traceability input exceeds size limit")
+                return raw,json.loads(raw)
+            sem_bytes,sem_doc=read_trace_json(a.semantics,20*1024*1024)
+            graph_bytes,graph_doc=read_trace_json(a.graph,50*1024*1024)
+            mapping_bytes,mapping_doc=read_trace_json(a.mapping,10*1024*1024)
+            plan_pair=read_trace_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
+            matrix_pair=read_trace_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
+            output=Path(a.out).expanduser()
+            if output.is_symlink(): raise ValueError("output must not be a symbolic link")
+            output=output.resolve()
+            if output.exists(): raise ValueError("traceability output already exists; choose a new path to preserve prior evidence")
+            hashes={"business_semantics_sha256":hashlib.sha256(sem_bytes).hexdigest(),
+                    "business_graph_sha256":hashlib.sha256(graph_bytes).hexdigest(),
+                    "mapping_manifest_sha256":hashlib.sha256(mapping_bytes).hexdigest()}
+            if plan_pair[0] is not None: hashes["test_plan_sha256"]=hashlib.sha256(plan_pair[0]).hexdigest()
+            if matrix_pair[0] is not None: hashes["evidence_matrix_sha256"]=hashlib.sha256(matrix_pair[0]).hexdigest()
+            result=build_business_traceability(sem_doc,graph_doc,mapping_doc,
+                plan_pair[1],matrix_pair[1],hashes)
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            summary={"schema_version":result["schema_version"],
+                     "feature_count":result["feature_count"],
+                     "business_function_view_count":result["business_function_view_count"],
+                     "reviewed_mapping_count":result["reviewed_mapping_count"],
+                     "unmapped_feature_count":result["unmapped_feature_count"],
+                     "traceability_status_counts":result["traceability_status_counts"],
+                     "result_path":str(output)}
+            print(json.dumps(summary,ensure_ascii=False,indent=2))
+            return 0
         if a.cmd=='assess-quality':
             import hashlib
             def read_quality_json(path, limit):
