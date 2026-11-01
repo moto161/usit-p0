@@ -423,8 +423,7 @@ def project_business_graph(graph: Mapping[str, Any],
             "columns": raw.get("columns", []), "owner": owner_id,
         }
         access_id = _stable_id("database-access", identity)
-        if access_id not in existing_ids:
-            details = {
+        details = {
                 "operation": raw.get("operation") or "UNKNOWN",
                 "tables": raw.get("tables") if isinstance(raw.get("tables"), list) else [],
                 "columns": raw.get("columns") if isinstance(raw.get("columns"), list) else [],
@@ -434,6 +433,7 @@ def project_business_graph(graph: Mapping[str, Any],
                 "parse_status": raw.get("parse_status") or "UNKNOWN",
                 "parser": raw.get("parser") or "UNKNOWN",
             }
+        if access_id not in existing_ids:
             nodes.append({
                 "id": access_id, "type": "candidate", "label": f"DB {details['operation']} @ {path}:{line}",
                 "business_kind": "database_access", "business_details": details,
