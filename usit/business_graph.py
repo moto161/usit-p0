@@ -944,6 +944,61 @@ def project_business_graph(graph: Mapping[str, Any],
         str(item.get("method") or ""), str(item.get("path") or ""),
     ))
     endpoint_execution_paths = _build_endpoint_execution_paths(nodes)
+
+    # S2.14: endpoint-centred functional slices; never infer PRD feature relations.
+    node_by_id = {item.get("id"): item for item in nodes if isinstance(item, Mapping)}
+    entity_links_by_access: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        if edge.get("method") == "database-access-to-documented-entity" and edge.get("verification_status") == "NOT_VERIFIED":
+            entity_links_by_access.setdefault(str(edge.get("source")), []).append({
+                "entity_node_id": edge.get("target"),
+                "entity_name": node_by_id.get(edge.get("target"), {}).get("label"),
+                "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), Mapping) else {},
+                "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+            })
+    frontend_by_endpoint: dict[str, list[dict[str, Any]]] = {}
+    for chain in frontend_business_chains:
+        if isinstance(chain.get("endpoint_node_id"), str):
+            frontend_by_endpoint.setdefault(chain["endpoint_node_id"], []).append(chain)
+    business_function_views = []
+    for flow in endpoint_execution_paths:
+        endpoint_id = flow.get("endpoint_id")
+        frontend = sorted(frontend_by_endpoint.get(str(endpoint_id), []), key=lambda item: (
+            str(item.get("source_file") or ""), int(item.get("event_line") or 0),
+            str(item.get("api_call_file") or ""), int(item.get("api_call_line") or 0)))
+        entity_links = []
+        for access in flow.get("database_accesses", []):
+            if isinstance(access, Mapping):
+                entity_links.extend(entity_links_by_access.get(str(access.get("database_access_id")), []))
+        unique_entities = {(item.get("entity_node_id"), json.dumps(item.get("evidence", {}), sort_keys=True)): item for item in entity_links}
+        entity_links = [unique_entities[k] for k in sorted(unique_entities, key=lambda x: (str(x[0]), x[1]))]
+        stages = flow.get("stage_status") if isinstance(flow.get("stage_status"), Mapping) else {}
+        identity = {"endpoint_id": endpoint_id, "method": flow.get("method"), "endpoint": flow.get("endpoint"), "source": flow.get("source")}
+        business_function_views.append({
+            "business_function_id": _stable_id("business-function-view", identity),
+            "basis": "ENDPOINT_CENTRED_STATIC_SLICE",
+            "endpoint_id": endpoint_id, "method": flow.get("method"), "endpoint": flow.get("endpoint"),
+            "source": flow.get("source"), "frontend_entrypoints": frontend,
+            "frontend_entrypoint_count": len(frontend), "handler": flow.get("handler"),
+            "call_chain": flow.get("call_chain", []), "database_accesses": flow.get("database_accesses", []),
+            "documented_entity_links": entity_links, "authorization": flow.get("authorization"),
+            "identity_resource_flow": flow.get("identity_resource_flow", []), "stage_status": dict(stages),
+            "coverage": {"frontend_static_linkage": "LINKED" if frontend else "NOT_LINKED",
+                         "database_entity_linkage": "LINKED" if entity_links else "NOT_LINKED_OR_UNKNOWN",
+                         "test_design": "NOT_ASSESSED_BY_GRAPH", "test_execution": "NOT_MEASURED"},
+            "unlinked_requirements": ["PRD feature ↔ endpoint mapping: NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION",
+                                      "Runtime page reachability and event execution: UNKNOWN",
+                                      "Executed test coverage: NOT_MEASURED"],
+            "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+        })
+    business_function_views.sort(key=lambda item: (
+        str(item.get("source", {}).get("path") or ""), int(item.get("source", {}).get("line") or 0),
+        str(item.get("endpoint") or ""), str(item.get("business_function_id") or "")))
+    documented_feature_linkage = [{
+        "feature_name": item.get("name"), "module": item.get("module"), "source": item.get("source"),
+        "line": item.get("line"), "linkage_status": "NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION",
+        "confidence": "UNKNOWN", "verification_status": "NOT_VERIFIED",
+    } for item in semantics.get("features", []) if isinstance(item, Mapping)]
     endpoint_contract_alignment = semantics.get("endpoint_contract_alignment", [])
     if not isinstance(endpoint_contract_alignment, list):
         raise ValueError("semantics.endpoint_contract_alignment must be a list")
@@ -956,6 +1011,10 @@ def project_business_graph(graph: Mapping[str, Any],
         "frontend_api_endpoint_link_count": len(api_endpoint_links),
         "frontend_business_chains": frontend_business_chains,
         "frontend_business_chain_count": len(frontend_business_chains),
+        "business_function_views": business_function_views,
+        "business_function_view_count": len(business_function_views),
+        "documented_feature_linkage": documented_feature_linkage,
+        "documented_feature_linkage_count": len(documented_feature_linkage),
         "endpoint_execution_paths": endpoint_execution_paths,
         "endpoint_execution_path_count": len(endpoint_execution_paths),
         "endpoint_contract_alignment_count": len(endpoint_contract_alignment),
