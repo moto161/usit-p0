@@ -174,6 +174,35 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertFalse(any(d["kind"] == "missing_auth" for d in result["discrepancies"]))
 
 
+class EndpointContractAlignmentTests(unittest.TestCase):
+    def test_exact_documented_route_match_and_unmatched_contracts_are_explicit(self):
+        p = SyntheticProject(self)
+        p.api_doc(
+            "# API contracts\\n"
+            "GET /api/photos\\n"
+            "POST /api/photos\\n"
+            "GET /api/missing\\n"
+        )
+        p.route("server/routes/photos.js", (
+            "router.get('/api/photos', authRequired, listPhotos);\\n"
+            "router.delete('/api/internal', authRequired, deleteInternal);\\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        rows = result["endpoint_contract_alignment"]
+        exact = next(row for row in rows
+                     if row["method"] == "GET" and row["path"] == "/api/photos")
+        missing = next(row for row in rows
+                       if row["method"] == "POST" and row["path"] == "/api/photos")
+        undocumented = next(row for row in rows
+                            if row["method"] == "DELETE" and row["path"] == "/api/internal")
+        self.assertEqual(exact["status"], "EXACT_MATCH")
+        self.assertEqual(exact["document_evidence"]["line"], 2)
+        self.assertEqual(exact["code_evidence"][0]["line"], 1)
+        self.assertEqual(missing["status"], "DOCUMENTED_NOT_FOUND_IN_CODE")
+        self.assertEqual(undocumented["status"], "CODE_ENDPOINT_NOT_DOCUMENTED")
+        self.assertTrue(all(row["verification_status"] == "NOT_VERIFIED" for row in rows))
+
+
 class PermissionFieldDetectionTests(unittest.TestCase):
     def test_documented_field_without_code_reference_is_flagged(self):
         p = SyntheticProject(self)
