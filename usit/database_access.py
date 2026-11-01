@@ -67,7 +67,7 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
             found: list[tuple[str, str | None, str]] = []
             if path.lower().endswith(".py"):
                 try:
-                    tree = ast.parse(line)
+                    tree = ast.parse(line.lstrip())
                 except (SyntaxError, ValueError):
                     tree = None
                 if tree is not None:
