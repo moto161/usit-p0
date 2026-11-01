@@ -81,7 +81,7 @@ jobs:
           python - <<'PY'
           import unittest
 
-          excluded = "tests.test_verification_capture.VerificationCaptureTests.test_keyboard_interrupt_terminates_child_and_records_returncode"
+          excluded = "VerificationCaptureTests.test_keyboard_interrupt_terminates_child_and_records_returncode"
           loader = unittest.TestLoader()
           discovered = loader.discover("tests")
 
@@ -90,7 +90,7 @@ jobs:
               for item in suite:
                   if isinstance(item, unittest.TestSuite):
                       result.addTests(filtered(item))
-                  elif item.id() != excluded:
+                  elif not item.id().endswith(excluded):
                       result.addTest(item)
               return result
 
