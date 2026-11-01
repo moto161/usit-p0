@@ -67,8 +67,13 @@ class BusinessTestPlannerTests(unittest.TestCase):
             "document_evidence": {"source": "docs/api.md", "line": 7},
             "code_evidence": [{"source": "server/routes/photos.js", "line": 18}],
         }]}
-        graph = {"business_understanding": {"endpoint_execution_paths": [{
-            "method": "GET", "endpoint": "/api/photos",
+        graph = {"business_understanding": {
+            "business_function_views": [{
+                "business_function_id": "bf-photo-list", "endpoint_id": "ep-photo-list",
+                "method": "GET", "endpoint": "/api/photos",
+            }],
+            "endpoint_execution_paths": [{
+            "endpoint_id": "ep-photo-list", "method": "GET", "endpoint": "/api/photos",
             "source": {"path": "server/routes/photos.js", "line": 18},
             "handler": {"path": "server/photos.js", "line": 30, "symbol_id": "sym-handler"},
             "call_chain": [{"call_site": {"path": "server/photos.js", "line": 34}, "target_id": "sym-db"}],
@@ -80,9 +85,37 @@ class BusinessTestPlannerTests(unittest.TestCase):
         candidate = next(x for x in result["candidates"] if x["category"] == "api_contract_verification")
         self.assertEqual(candidate["execution_status"], "NOT_EXECUTED")
         self.assertEqual(candidate["design_status"], "CANDIDATE_NEEDS_REQUIREMENTS")
+        self.assertEqual(candidate["business_function_id"], "bf-photo-list")
+        self.assertEqual(candidate["function_coverage_linkage"], "TEST_DESIGN_CANDIDATE_LINKED")
+        self.assertEqual(candidate["test_execution_coverage"], "NOT_MEASURED")
+        self.assertEqual(candidate["expected_results_status"], "OWNER_CONFIRMATION_REQUIRED")
+        self.assertTrue(candidate["actions"])
+        self.assertTrue(all(item["expected_result"] for item in candidate["actions"]))
+        self.assertTrue(candidate["evidence_requirements"])
         kinds = {x.get("evidence_kind") for x in candidate["evidence_refs"]}
         self.assertTrue({"documented_api_contract", "code_route", "resolved_handler", "call_chain", "database_access", "authorization", "identity_resource"}.issubset(kinds))
         self.assertTrue(all(x["confidence"] == "STATIC_INFERENCE" for x in candidate["evidence_refs"]))
+
+    def test_exact_api_candidate_does_not_link_ambiguous_function_views(self):
+        semantics = {"endpoint_contract_alignment": [{
+            "status": "EXACT_MATCH", "method": "GET", "path": "/api/photos",
+            "document_evidence": {"source": "api.md", "line": 3},
+            "code_evidence": [{"source": "routes.py", "line": 9}],
+        }]}
+        graph = {"business_understanding": {
+            "business_function_views": [
+                {"business_function_id": "bf-a", "method": "GET", "endpoint": "/api/photos"},
+                {"business_function_id": "bf-b", "method": "GET", "endpoint": "/api/photos"},
+            ],
+            "endpoint_execution_paths": [{
+                "method": "GET", "endpoint": "/api/photos",
+                "source": {"path": "routes.py", "line": 9},
+            }],
+        }}
+        result = plan_business_tests(semantics, graph)
+        candidate = next(x for x in result["candidates"] if x["category"] == "api_contract_verification")
+        self.assertNotIn("business_function_id", candidate)
+        self.assertTrue(any("multiple business function views" in warning for warning in result["warnings"]))
 
     def test_unmatched_contracts_are_review_candidates_not_defect_verdicts(self):
         semantics = {"endpoint_contract_alignment": [
