@@ -141,7 +141,7 @@ def verify_business_function_evidence(
     return {
         "schema_version": "usit-business-evidence-verification-v1",
         "model": "BusinessFunctionEvidenceVerifier",
-        "business_graph_sha256_normalized": graph_hash,
+        "business_graph_sha256": graph_hash,
         "business_function_count": len(matrix),
         "verification_conclusion_counts": dict(sorted(conclusions.items())),
         "evidence_conflict_count": len(conflicts),
