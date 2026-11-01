@@ -489,7 +489,7 @@ class BusinessSemanticsAdapter:
         for m in re.finditer(r"\b(GET|POST|PUT|DELETE|PATCH)\s+(/api/[\w/:{}_.-]+)", text):
             out.append({"method": m.group(1).upper(), "path": m.group(2),
                         "source": self._rel(doc_path),
-                        "line": text.count("\\n", 0, m.start()) + 1})
+                        "line": text.count("\n", 0, m.start()) + 1})
         return out
 
     def _extract_code_endpoints(self, route_path: Path, text: str) -> list[Endpoint]:
