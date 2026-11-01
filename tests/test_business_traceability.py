@@ -115,20 +115,31 @@ class BusinessTraceabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             sem_path, graph_path = base / "sem.json", base / "graph.json"
-            mapping_path, out_path, md_path = base / "mapping.json", base / "trace.json", base / "trace.md"
+            mapping_path, out_path, md_path, runtime_path = base / "mapping.json", base / "trace.json", base / "trace.md", base / "runtime.json"
             sem_path.write_text(json.dumps(self.semantics), encoding="utf-8")
             graph_bytes = json.dumps(self.graph).encode("utf-8")
             graph_path.write_bytes(graph_bytes)
-            mapping = dict(self.mapping, source_graph_sha256=hashlib.sha256(graph_bytes).hexdigest())
+            graph_hash = hashlib.sha256(graph_bytes).hexdigest()
+            mapping = dict(self.mapping, source_graph_sha256=graph_hash)
             mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+            runtime_path.write_text(json.dumps({
+                "schema_version": "usit-runtime-evidence-validation-v1",
+                "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+                "source_hashes": {"business_graph_sha256": graph_hash, "runtime_evidence_sha256": "c" * 64},
+                "business_function_ids_observed": ["bf-list"],
+                "correlations": [{"correlation_id": "corr-cli", "business_function_ids": ["bf-list"]}],
+            }), encoding="utf-8")
             with redirect_stdout(StringIO()):
                 code = main(["trace-business", "--semantics", str(sem_path), "--graph", str(graph_path),
-                    "--mapping", str(mapping_path), "--out", str(out_path), "--out-md", str(md_path)])
+                    "--mapping", str(mapping_path), "--runtime-evidence", str(runtime_path),
+                    "--out", str(out_path), "--out-md", str(md_path)])
             self.assertEqual(code, 0)
             report = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(report["schema_version"], "usit-business-traceability-matrix-v1")
             self.assertEqual(report["input_hashes"]["business_graph_sha256"], hashlib.sha256(graph_bytes).hexdigest())
             self.assertEqual(report["reviewed_mapping_count"], 2)
+            self.assertEqual(report["input_hashes"]["runtime_evidence_validation_sha256"], hashlib.sha256(runtime_path.read_bytes()).hexdigest())
+            self.assertEqual(next(row for row in report["rows"] if row["feature_name"] == "查看照片")["stage_status"]["runtime_observation"], "RUNTIME_OBSERVED")
             markdown = md_path.read_text(encoding="utf-8")
             self.assertIn("# USIT 业务需求跨层追溯报告", markdown)
             self.assertIn("查看照片", markdown)
