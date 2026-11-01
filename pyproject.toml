@@ -6,7 +6,7 @@ name = "usit-p0"
 version = "0.1.0"
 description = "Read-only universal software scanning and test planning engine"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["cryptography==50.0.2"]
 [project.scripts]
 usit = "usit.cli:main"
 [tool.setuptools.packages.find]
