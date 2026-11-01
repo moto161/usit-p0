@@ -170,6 +170,33 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertTrue(chains[0]["cycle_detected"])
         self.assertEqual(result["business_understanding"]["handler_call_chains"], 1)
 
+    def test_handler_call_chain_stops_at_configured_depth(self):
+        source = graph()
+        symbols = [f"symbol:module_{index}.py#step_{index}:{index + 1}"
+                   for index in range(10)]
+        for index, symbol in enumerate(symbols):
+            source["nodes"].append({
+                "id": symbol, "type": "function", "label": f"step_{index}",
+                "evidence": {"path": f"module_{index}.py", "line": index + 1},
+            })
+        for index in range(len(symbols) - 1):
+            source["edges"].append({
+                "source": "file:module.py", "target": symbols[index + 1],
+                "type": "calls", "caller_symbol_id": symbols[index],
+                "resolution_status": "RESOLVED", "resolved": True,
+                "evidence": {"path": f"module_{index}.py", "line": index + 20},
+                "method": "typescript-compiler-api", "confidence": "high",
+            })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        association = endpoint["handler_association"]
+        self.assertTrue(association["call_chain_truncated"])
+        self.assertEqual(len(association["call_chain_evidence"][0]["steps"]), 8)
+        self.assertTrue(association["call_chain_evidence"][0]["depth_limit_reached"])
+
     def test_duplicate_same_file_handler_symbols_remain_ambiguous(self):
         source = graph()
         for line in (30, 45):
