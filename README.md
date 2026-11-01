@@ -631,3 +631,17 @@ python -m usit verify-evidence-bindings --input .\\ai-claim-ledger.json --eviden
 - `INCOMPLETE_DECLARATION` / `INVALID_DECLARATION`：manifest 路径与摘要字段不完整或摘要格式非法。
 
 该检查仍不是数字签名、可信时间戳或来源认证；攻击者若能同时替换 manifest 和调用方声明的摘要，仍可构造一致但不可信的输入。因此报告明确保留 provenance 限制，不提升 `truth_status`。新增合成测试覆盖 manifest 成功绑定、manifest 摘要过期、manifest 内文件摘要不匹配和 manifest 缺失。
+
+
+## S2.27-C: detached scan attestation (core API)
+
+The optional provenance layer is implemented in `usit.scan_attestation` using the pinned `cryptography==50.0.2` Ed25519 provider.
+
+- `create_scan_attestation(...)` signs the exact manifest bytes and binds the snapshot ID, UTC timestamp string, scanner version/revision, manifest path, and manifest SHA-256.
+- `verify_scan_attestation(...)` validates the signature using the public key embedded in the sidecar, then checks that exact key against a caller-supplied independent trust mapping (`key_id -> 32-byte raw public key`).
+- A valid signature from a key absent from the trust mapping is reported as `ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY`, never trusted.
+- The verifier reports freshness as `NOT_ASSESSED`; timestamps are signer-provided metadata, not trusted timestamps.
+- This is currently a library/API core. Scanner auto-signing, CLI commands, trust-store persistence/enrollment/revocation, OS-backed private-key custody, and integration into `verify-evidence-bindings` remain pending.
+- Private keys must be kept outside the project and evidence artifacts. Tests use ephemeral keys only.
+
+Install the project dependencies with `python -m pip install .`. Synthetic tests: `python -m unittest tests.test_scan_attestation -v`.
