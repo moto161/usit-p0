@@ -72,6 +72,11 @@ class BusinessTestCliTests(unittest.TestCase):
             security_path = output / "security_test_candidates.json"
             self.assertTrue(security_path.is_file())
             security_plan = json.loads(security_path.read_text(encoding="utf-8"))
+            import hashlib
+            self.assertEqual(
+                security_plan["source_business_graph_sha256"],
+                hashlib.sha256(business_graph_path.read_bytes()).hexdigest(),
+            )
             self.assertEqual(summary["security_test_candidate_count"], security_plan["candidate_count"])
             self.assertGreaterEqual(security_plan["candidate_count"], 1)
             self.assertTrue(all(item["execution_status"] == "NOT_EXECUTED"
