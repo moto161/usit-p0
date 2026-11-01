@@ -230,3 +230,25 @@ python -m usit ingest-test-results --format pytest-json --junit .\\reports\\pyte
 python -m usit ingest-coverage --format coverage-py-json --coverage .\\reports\\coverage.json --mapping .\\coverage-mapping.json --graph .\\business_knowledge_graph.json --out .\\coverage-results.json
 python -m usit ingest-coverage --format jacoco-xml --coverage .\\app\\build\\reports\\jacoco\\testDebugUnitTestCoverage\\testDebugUnitTestCoverage.xml --mapping .\\coverage-mapping.json --graph .\\business_knowledge_graph.json --out .\\jacoco-results.json
 ```
+
+
+## S2.17 — 业务功能测试与覆盖证据交叉验证
+
+`verify-evidence` merges an existing `usit-graph-v1` business graph with optional imported test-result and code-coverage artifacts. It emits one evidence row per `business_function_id`, validates artifact schemas and graph SHA-256 identity, and flags unknown function IDs, duplicate IDs, invalid statuses and graph-hash mismatches.
+
+The conclusion vocabulary is deliberately limited:
+- `TEST_FAILURE_OBSERVED`: imported runtime report contains at least one failed mapped test.
+- `TEST_PASS_AND_CODE_LINES_COVERED`: mapped tests passed and explicitly mapped executable lines are covered.
+- `TEST_PASS_WITH_COVERAGE_GAP`: mapped tests passed but mapped code lines are partial or uncovered.
+- `TEST_PASS_COVERAGE_NOT_MEASURED`: tests passed but no usable coverage evidence exists.
+- `TEST_EVIDENCE_INCONCLUSIVE`: mapped tests were skipped/unknown.
+- `NO_RUNTIME_TEST_EVIDENCE`: no imported runtime test evidence exists.
+- `EVIDENCE_CONFLICT`: source graph identity or business-function linkage conflicts.
+
+Example:
+
+```powershell
+python -m usit verify-evidence --graph .\\business_knowledge_graph.json --test-results .\\test-execution-results.json --coverage-results .\\coverage-results.json --out .\\business-evidence-verification.json
+```
+
+Omit either optional result input when that evidence is unavailable. Missing evidence remains `NOT_MEASURED`. A zero-conflict report is not a certification: test pass does not prove requirement completeness or business correctness; line coverage does not prove assertion quality, branch coverage, authorization correctness or end-to-end behavior. Static business-function views remain `STATIC_INFERENCE` / `NOT_VERIFIED`.
