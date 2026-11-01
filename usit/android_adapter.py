@@ -158,10 +158,21 @@ class AndroidProjectAdapter:
             if safety.is_reparse_point(current):
                 raise AdapterBlocked("REPARSE_POINT_REJECTED", f"{current} is a link/junction/reparse point.")
 
+    def _validate_project_path(self, path: Path) -> Path:
+        """Validate a candidate before any is_file/is_dir/stat operation."""
+        self._reject_reparse_path(path)
+        try:
+            resolved = path.resolve(strict=False)
+        except OSError as exc:
+            raise AdapterBlocked("PATH_CHECK_FAILED", f"Could not resolve {path}: {type(exc).__name__}") from exc
+        if resolved != self.root and self.root not in resolved.parents:
+            raise AdapterBlocked("PATH_TRAVERSAL_REJECTED", f"{path} is outside the authorised project root.")
+        return resolved
+
     def _count_entry(self, path: Path) -> None:
         self._check_budget()
         self._entry_count += 1
-        self._reject_reparse_path(path)
+        self._validate_project_path(path)
 
     # ------------------------------------------------------------------
     # Safe, no-follow reading
@@ -175,7 +186,7 @@ class AndroidProjectAdapter:
         """
         self._check_budget()
         # Check the directory entry itself before exists()/is_file(), including dangling links.
-        self._reject_reparse_path(path)
+        self._validate_project_path(path)
         if not path.exists() or not path.is_file():
             return {"text": None, "read_ok": False, "error": "MISSING"}
         try:
@@ -234,6 +245,7 @@ class AndroidProjectAdapter:
         for name in ANDROID_ROOT_FILES:
             self._check_budget()
             p = self.root / name
+            self._validate_project_path(p)
             if p.is_file():
                 found[name] = p
                 profile.evidence_refs.append({
@@ -242,6 +254,8 @@ class AndroidProjectAdapter:
                 })
         wrapper_props = self.root / "gradle" / "wrapper" / "gradle-wrapper.properties"
         gradlew = self.root / "gradlew"
+        self._validate_project_path(wrapper_props)
+        self._validate_project_path(gradlew)
         if wrapper_props.is_file():
             found["gradle-wrapper.properties"] = wrapper_props
         if gradlew.is_file():
@@ -254,6 +268,8 @@ class AndroidProjectAdapter:
 
     def _find_manifest(self) -> Path | None:
         candidates = [self.root / MANIFEST_NAME, self.root / "app" / MANIFEST_NAME]
+        for candidate in candidates:
+            self._validate_project_path(candidate)
         for sub in self.root.iterdir():
             self._count_entry(sub)
             if sub.is_dir():
@@ -288,9 +304,18 @@ class AndroidProjectAdapter:
         return modules
 
     def _module_dir(self, gradle_path: str) -> Path:
-        # ':app' -> 'app', ':feature:login' -> 'feature/login'
-        rel = gradle_path.lstrip(":").replace(":", os.sep)
-        return self.root / rel
+        # Gradle project paths are colon-delimited identifiers. Never interpret
+        # a slash, backslash, dot-segment or drive-like token as a filesystem path.
+        if not isinstance(gradle_path, str) or not gradle_path.startswith(":"):
+            raise AdapterBlocked("INVALID_MODULE_PATH", "Gradle module path must start with ':'.")
+        parts = gradle_path[1:].split(":")
+        if (not parts or any(not part or part in (".", "..") or
+                             "/" in part or "\\\\" in part or "\x00" in part
+                             for part in parts)):
+            raise AdapterBlocked("INVALID_MODULE_PATH", f"Unsafe Gradle module path refused: {gradle_path!r}")
+        candidate = self.root.joinpath(*parts)
+        self._validate_project_path(candidate)
+        return candidate
 
     def _discover_modules(self, settings_modules: list[str]) -> list[Path]:
         dirs: list[Path] = []
@@ -320,16 +345,20 @@ class AndroidProjectAdapter:
     # Per-module analysis
     # ------------------------------------------------------------------
     def _module_build_file(self, module_dir: Path) -> Path | None:
+        self._validate_project_path(module_dir)
         for name in ("build.gradle", "build.gradle.kts"):
             p = module_dir / name
+            self._validate_project_path(p)
             if p.is_file():
                 return p
         return None
 
     def _detect_source_sets(self, module_dir: Path) -> dict[str, Path]:
         sets: dict[str, Path] = {}
+        self._validate_project_path(module_dir)
         for name in ("main", "test", "androidTest"):
             d = module_dir / "src" / name
+            self._validate_project_path(d)
             if d.is_dir():
                 sets[name] = d
         return sets
