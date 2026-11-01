@@ -58,6 +58,44 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertEqual(second["traceability_status"], "REVIEW_REQUIRED")
         self.assertIsNone(second["business_function_id"])
 
+    def test_structured_test_candidate_is_carried_into_requirement_traceability(self):
+        plan = {
+            "schema_version": "usit-business-test-plan-v1",
+            "candidates": [{
+                "test_id": "bt-api-123",
+                "business_function_id": "bf-list",
+                "category": "api_contract_verification",
+                "target": "GET /api/photos",
+                "purpose": "验证照片列表接口",
+                "design_status": "CANDIDATE_NEEDS_REQUIREMENTS",
+                "execution_status": "NOT_EXECUTED",
+                "preconditions": ["隔离测试环境", "已批准验收标准"],
+                "actions": [{
+                    "step": 1,
+                    "action": "发起已批准的列表请求",
+                    "expected_result": "由负责人确认的结果",
+                    "evidence_to_collect": ["请求/响应", "服务端日志"],
+                }],
+                "expected_result": "由负责人确认的结果",
+                "expected_results_status": "OWNER_CONFIRMATION_REQUIRED",
+                "evidence_requirements": [{"evidence_type": "RUNTIME_TEST_RESULT", "requirement": "保留原始报告"}],
+                "evidence_refs": [{"path": "server/photos.py", "line": 10, "evidence_kind": "resolved_handler"}],
+                "limitations": ["静态分析不证明运行时成功"],
+            }],
+        }
+        result = build_business_traceability(
+            self.semantics, self.graph, self.mapping,
+            test_plan=plan, input_hashes=self.hashes,
+        )
+        linked = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(linked["test_candidate_ids"], ["bt-api-123"])
+        self.assertEqual(linked["test_candidates"][0]["execution_status"], "NOT_EXECUTED")
+        self.assertEqual(linked["test_candidates"][0]["expected_results_status"], "OWNER_CONFIRMATION_REQUIRED")
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("发起已批准的列表请求", markdown)
+        self.assertIn("保留原始报告", markdown)
+        self.assertIn("OWNER_CONFIRMATION_REQUIRED", markdown)
+
     def test_no_mapping_never_uses_feature_name_or_module_to_guess(self):
         result = build_business_traceability(self.semantics, self.graph,
             {"schema_version": "usit-feature-function-mapping-v1", "source_graph_sha256": self.graph_hash, "mappings": []},
