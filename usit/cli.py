@@ -244,7 +244,7 @@ def main(argv=None):
             if output.exists(): raise ValueError('test-result output already exists; choose a new path to preserve prior evidence')
             result=ingest_junit_results(a.junit,a.mapping,a.graph)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             summary={key:result[key] for key in ('schema_version','test_case_count','test_case_status_counts','unmapped_test_case_count','business_function_count','business_function_status_counts')}
             summary['result_path']=str(output)
             summary['code_coverage']='NOT_MEASURED'
