@@ -150,7 +150,7 @@ This is not yet general data-flow/taint analysis. It does not propagate values a
 
 ## Security test traceability integration
 
-`trace-business` accepts optional `--security-test-plan security_test_candidates.json`. Security candidates link to a business-function view only when the endpoint node ID matches exactly one view's `endpoint_id`; zero or multiple matches remain unlinked and are listed in `unlinked_security_test_candidate_ids`. The artifact SHA-256 is retained in the traceability matrix. Linked security candidates appear alongside ordinary test-design candidates in requirement rows and Markdown reports, retaining authorization, database, identity-flow and call-chain evidence. This is design-only: candidates remain `NOT_EXECUTED` and expected results require owner confirmation.
+`trace-business` accepts optional `--security-test-plan security_test_candidates.json`. Security candidates link to a business-function view only when the endpoint node ID matches exactly one view's `endpoint_id`; zero or multiple matches remain unlinked and are listed in `unlinked_security_test_candidate_ids`. The security plan carries `source_business_graph_sha256`; `trace-business` rejects a security plan whose digest differs from the exact graph bytes supplied to the trace command. The security-plan artifact SHA-256 is also retained in the traceability matrix. Linked security candidates appear alongside ordinary test-design candidates in requirement rows and Markdown reports, retaining authorization, database, identity-flow and call-chain evidence. This is design-only: candidates remain `NOT_EXECUTED` and expected results require owner confirmation.
 
 Example:
 
