@@ -96,6 +96,7 @@ def project_business_graph(graph: Mapping[str, Any],
     linked = 0
     unlinked: list[dict[str, str]] = []
     handler_counts = {"RESOLVED": 0, "AMBIGUOUS": 0, "UNKNOWN": 0, "NOT_ANALYZED": 0}
+    handler_downstream_calls = 0
     for kind in _ALLOWED_BUSINESS:
         records = semantics.get(kind, [])
         if not isinstance(records, list):
@@ -187,12 +188,35 @@ def project_business_graph(graph: Mapping[str, Any],
                     handler_counts["RESOLVED"] += 1
                     if endpoint_node is not None:
                         target_evidence = target.get("evidence") or {}
+                        downstream = []
+                        for call_edge in edges:
+                            if call_edge.get("type") != "calls" or call_edge.get("caller_symbol_id") != target["id"]:
+                                continue
+                            call_evidence = call_edge.get("evidence") or {}
+                            downstream.append({
+                                "target_id": call_edge.get("target"),
+                                "resolution_status": call_edge.get("resolution_status") or "UNKNOWN",
+                                "call_site": {
+                                    "path": call_evidence.get("path"),
+                                    "line": call_evidence.get("line"),
+                                },
+                                "target_location": call_edge.get("target_location"),
+                                "method": call_edge.get("method"),
+                                "confidence": call_edge.get("confidence"),
+                            })
+                        downstream.sort(key=lambda item: (
+                            item["call_site"].get("path") or "",
+                            item["call_site"].get("line") or 0,
+                            item.get("target_id") or "",
+                        ))
+                        handler_downstream_calls += len(downstream)
                         endpoint_node["handler_association"] = {
                             "reference": handler_ref, "resolution_status": "RESOLVED",
                             "target_symbol_id": target["id"],
                             "target_path": target_evidence.get("path"),
                             "target_line": target_evidence.get("line"),
                             "confidence": "STATIC_INFERENCE",
+                            "downstream_call_evidence": downstream,
                         }
                     relation = {
                         "source": node_id, "target": target["id"], "type": "references",
@@ -230,6 +254,7 @@ def project_business_graph(graph: Mapping[str, Any],
         "linked_records": linked,
         "unlinked_records": unlinked,
         "route_handler_associations": handler_counts,
+        "handler_downstream_call_evidence": handler_downstream_calls,
         "limitations": [
             "业务记录只与精确来源文件关联；命名路由 handler 仅在同一文件且唯一符号匹配时建立候选引用。",
             "跨文件导入、对象成员、内联回调、多行路由注册和动态 handler 暂不解析，保留 UNKNOWN/NOT_ANALYZED。",
