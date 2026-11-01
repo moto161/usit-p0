@@ -280,7 +280,7 @@ def main(argv=None):
             if output.is_symlink() or output.exists():
                 raise ValueError('registry output already exists or is a symbolic link; refusing to overwrite')
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(registry_template(),ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            output.write_text(json.dumps(registry_template(),ensure_ascii=False,indent=2),encoding='utf-8')
             print(json.dumps({'registry_path':str(output.resolve()),'status':'TEMPLATE_CREATED',
                 'models_enabled_by_default':False},ensure_ascii=False,indent=2))
             return 0
@@ -294,7 +294,7 @@ def main(argv=None):
                 if output.is_symlink() or output.exists():
                     raise ValueError('ensemble output already exists or is a symbolic link; refusing to overwrite')
                 output.parent.mkdir(parents=True,exist_ok=True)
-                output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
                 result['result_path']=str(output.resolve())
             print(json.dumps(result,ensure_ascii=False,indent=2))
             return 0 if result['status']=='SUCCEEDED' else 2 if result['status']=='PARTIAL' else 1
@@ -321,7 +321,7 @@ def main(argv=None):
             if output.exists(): raise ValueError('benchmark output already exists; choose a new path to avoid overwriting')
             output.parent.mkdir(parents=True,exist_ok=True)
             result=run_fixture_benchmark()
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             print(json.dumps({'result_path':str(output),'languages':result['languages']},ensure_ascii=False,indent=2))
             return 0 if all(x['false_resolved_nonresolved_count']==0 for x in result['languages']) else 1
         if a.cmd=='benchmark-associations':
@@ -329,7 +329,7 @@ def main(argv=None):
             if output.exists(): raise ValueError('benchmark output already exists; choose a new path to avoid overwriting')
             output.parent.mkdir(parents=True,exist_ok=True)
             result=run_association_invalidation_benchmark()
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             print(json.dumps({'result_path':str(output),'status':result['status'],'passed':result['passed'],'total':result['total']},ensure_ascii=False,indent=2))
             return 0 if result['status']=='PASS' and result['false_current_links_after_evidence_change']==0 else 1
         if a.cmd=='validate-graph':
@@ -385,7 +385,7 @@ def main(argv=None):
             result["input_hashes"]={"business_semantics_sha256":hashlib.sha256(sem_bytes).hexdigest(),
                                     "business_graph_sha256":graph_hash}
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             print(json.dumps({"template_status":result["template_status"],
                 "mapping_count":result["mapping_count"],"source_graph_sha256":graph_hash,
                 "result_path":str(output)},ensure_ascii=False,indent=2))
@@ -426,7 +426,7 @@ def main(argv=None):
             result=build_business_traceability(sem_doc,graph_doc,mapping_doc,
                 plan_pair[1],matrix_pair[1],hashes,runtime_pair[1])
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             if markdown_output is not None:
                 markdown_output.parent.mkdir(parents=True,exist_ok=True)
                 markdown_output.write_text(render_business_traceability_markdown(result),encoding='utf-8')
@@ -472,7 +472,7 @@ def main(argv=None):
             if gaps_pair[0] is not None: hashes["gap_backlog_sha256"]=hashlib.sha256(gaps_pair[0]).hexdigest()
             result=assess_project_quality(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],gaps_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             if markdown_output is not None:
                 markdown_output.parent.mkdir(parents=True,exist_ok=True)
                 markdown_output.write_text(render_project_quality_markdown(result),encoding='utf-8')
@@ -506,7 +506,7 @@ def main(argv=None):
             if matrix_pair[0] is not None: hashes["evidence_matrix_sha256"]=hashlib.sha256(matrix_pair[0]).hexdigest()
             result=build_verification_gap_backlog(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","business_function_count","gap_count","gap_kind_counts","priority_counts")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
@@ -518,7 +518,7 @@ def main(argv=None):
             if output.exists(): raise ValueError("Android adapter output already exists; choose a new path to preserve prior evidence")
             result=adapt_android_jsonl_file(a.input,a.graph,a.session_id,a.captured_at)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             print(json.dumps({"schema_version":result["schema_version"],"event_count":len(result["events"]),
                 "session_id":result["session"]["session_id"],"platform":"ANDROID","result_path":str(output)},ensure_ascii=False,indent=2))
             return 0
@@ -529,7 +529,7 @@ def main(argv=None):
             if output.exists(): raise ValueError("runtime validation output already exists; choose a new path to preserve prior evidence")
             result=validate_runtime_evidence_files(a.events,a.graph)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","assessment_status","event_count","correlation_count","business_function_observation_count","evidence_conflict_count")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
@@ -553,7 +553,7 @@ def main(argv=None):
             if output.exists(): raise ValueError("evidence output already exists; choose a new path to preserve prior evidence")
             result=verify_business_function_evidence(graph_doc,test_doc,coverage_doc,hashlib.sha256(graph_bytes).hexdigest())
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","business_function_count","verification_conclusion_counts","evidence_conflict_count")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
@@ -565,7 +565,7 @@ def main(argv=None):
             if output.exists(): raise ValueError("coverage output already exists; choose a new path to preserve prior evidence")
             result=ingest_coverage_results(a.coverage,a.mapping,a.graph,a.format)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding="utf-8")
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","source_format","business_function_count","coverage_status_counts")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
@@ -577,7 +577,7 @@ def main(argv=None):
             if output.exists(): raise ValueError('test-result output already exists; choose a new path to preserve prior evidence')
             result=ingest_junit_results(a.junit,a.mapping,a.graph,a.format)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ('schema_version','test_case_count','test_case_status_counts','unmapped_test_case_count','business_function_count','business_function_status_counts')}
             summary['result_path']=str(output)
             summary['code_coverage']='NOT_MEASURED'
