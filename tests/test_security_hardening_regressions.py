@@ -128,6 +128,18 @@ class VerificationCaptureBoundsTests(unittest.TestCase):
                             approval_ref="unit-test-approval", timeout=value,
                         )
 
+    def test_capture_rejects_unresponsive_poll_interval(self):
+        from usit import verification_capture as capture
+        with tempfile.TemporaryDirectory() as td:
+            project, parent = self._project_and_parent(td)
+            with self.assertRaises(ValueError):
+                capture.capture_run(
+                    ["python", "-c", "pass"], project_root=project,
+                    evidence_parent=parent, files=["stable.py"],
+                    approval_ref="unit-test-approval",
+                    poll_interval=capture.MAX_POLL_INTERVAL_SECONDS + 1,
+                )
+
     def test_capture_bounds_command_arguments_and_approval_reference(self):
         from usit import verification_capture as capture
         with tempfile.TemporaryDirectory() as td:
