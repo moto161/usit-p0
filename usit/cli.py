@@ -23,6 +23,7 @@ from .traceability_template import create_feature_mapping_template
 from .business_traceability_report import render_business_traceability_markdown
 from .runtime_evidence import validate_runtime_evidence_files
 from .android_event_adapter import adapt_android_jsonl_file
+from .ai_gateway import Agent2APIClient, DEFAULT_BASE_URL, DEFAULT_API_KEY_ENV
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -247,8 +248,37 @@ def main(argv=None):
     aa.add_argument('--session-id',required=True,help='Opaque session identifier')
     aa.add_argument('--captured-at',required=True,help='Session capture timestamp with timezone')
     aa.add_argument('--out',required=True,help='New usit-runtime-evidence-v1 JSON path; existing files are never overwritten')
+    am=sub.add_parser('ai-models',help='List models exposed by the local Agent2API gateway; never prints credentials')
+    am.add_argument('--base-url',default=DEFAULT_BASE_URL,help='Loopback gateway URL (default: http://127.0.0.1:3065/v1)')
+    am.add_argument('--api-key-env',default=DEFAULT_API_KEY_ENV,help='Environment variable containing the optional gateway key')
+    am.add_argument('--timeout',type=float,default=20.0,help='Request timeout in seconds')
+    ac=sub.add_parser('ai-chat',help='Send an explicitly supplied prompt to one local Agent2API model')
+    ac.add_argument('--model',required=True,help='Exact model ID returned by ai-models')
+    ac.add_argument('--prompt',required=True,help='Explicit prompt text; project files are never read automatically')
+    ac.add_argument('--system',help='Optional system instruction')
+    ac.add_argument('--base-url',default=DEFAULT_BASE_URL,help='Loopback gateway URL')
+    ac.add_argument('--api-key-env',default=DEFAULT_API_KEY_ENV,help='Environment variable containing the optional gateway key')
+    ac.add_argument('--timeout',type=float,default=60.0,help='Request timeout in seconds')
+    ac.add_argument('--max-tokens',type=int,default=1024,help='Maximum response tokens (1..8192)')
     a=parser.parse_args(argv)
     try:
+        if a.cmd=='ai-models':
+            client=Agent2APIClient(a.base_url,api_key_env=a.api_key_env,timeout=a.timeout)
+            models=client.list_models()
+            print(json.dumps({"gateway":"Agent2API","base_url":client.base_url,
+                "model_count":len(models),"models":models,
+                "credential_source":a.api_key_env if client.api_key else "NOT_CONFIGURED",
+                "network_scope":"LOOPBACK_ONLY"},ensure_ascii=False,indent=2))
+            return 0
+        if a.cmd=='ai-chat':
+            client=Agent2APIClient(a.base_url,api_key_env=a.api_key_env,timeout=a.timeout)
+            result=client.chat(a.model,a.prompt,a.system,a.max_tokens)
+            # Prompt, system text and credentials are deliberately omitted from output.
+            print(json.dumps({"gateway":"Agent2API","model":result["model"],
+                "content":result["content"],"finish_reason":result["finish_reason"],
+                "usage":result["usage"],"request_id":result["request_id"],
+                "prompt_content_logged":False},ensure_ascii=False,indent=2))
+            return 0
         if a.cmd=='selftest': return selftest()
         if a.cmd=='benchmark-fixtures':
             output=Path(a.out).expanduser().resolve()
