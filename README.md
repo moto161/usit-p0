@@ -80,3 +80,10 @@ Duplicate same-file symbol names are marked `AMBIGUOUS`. Missing declarations, i
 ## S2.2 — Function-owned call evidence (partial)
 
 For Python AST calls and TypeScript Compiler API calls, USIT records the enclosing named function/method identity as caller metadata on each call edge (caller_symbol_id and caller_location). The edge source remains the containing file node because the current usit-graph-v1 validator requires all relationship sources to be file nodes. Calls outside a named function, anonymous callbacks without a symbol, and other languages without equivalent scope evidence retain file-only attribution. When a route handler is uniquely linked, the business endpoint node also collects only call edges whose caller_symbol_id equals that handler symbol. The original graph-v1 call edges remain file-sourced; the endpoint stores a compact, sorted list of downstream call-site evidence. This enables route → handler → direct-call inspection without changing graph-v1 semantics; it does not prove runtime execution order or data flow.
+
+
+## S2.3 — API handler → direct-call evidence (partial)
+
+When a route handler is uniquely associated with a same-file symbol, the business graph collects only call records whose `caller_symbol_id` exactly matches that handler symbol. Each evidence item preserves the call-site path/line, target symbol/location, resolver method and resolution status. The evidence is sorted deterministically and remains static inference; it is not a recursively expanded call chain, runtime reachability proof, execution order, authorization-flow proof or database data-flow proof.
+
+S2.2 ownership guard: Python lambdas and anonymous JavaScript/TypeScript callbacks are treated as callable-scope boundaries. Because the current graph model has no stable symbol for these anonymous scopes, calls inside them deliberately omit `caller_symbol_id` instead of inheriting a misleading enclosing named-function identity. Assigned named arrow/function expressions retain their declared owner when the symbol is represented in the graph.
