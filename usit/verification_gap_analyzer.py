@@ -165,10 +165,10 @@ def build_verification_gap_backlog(
                     "导入的运行时测试报告记录至少一个失败用例；失败原因尚需复核。",
                     "检查失败日志、复现步骤、测试数据和预期标准；确认是否为产品缺陷或测试环境问题。",
                     refs,fid)
-            elif runtime.get("test_execution_status") in {"NOT_MEASURED","NOT_EXECUTED","UNKNOWN"}:
+            elif runtime.get("test_execution_status") != "PASSED":
                 add("INCONCLUSIVE_TEST_EVIDENCE","BUSINESS_FUNCTION",fid,"P1",
-                    "测试未执行、被跳过或结果未知，不能形成通过结论。",
-                    "补齐测试前置条件并在获批环境执行；保留跳过原因和原始报告。",
+                    "测试执行状态缺失、无效、未执行、被跳过或结果未知，不能形成通过结论。",
+                    "核对测试结果工件及状态映射；补齐测试前置条件后在获批环境执行，并保留原始报告。",
                     refs,fid)
         if runtime.get("code_coverage_status") in {None,"NOT_MEASURED","UNKNOWN"}:
             add("CODE_COVERAGE_NOT_MEASURED","BUSINESS_FUNCTION",fid,"P2",
