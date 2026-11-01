@@ -164,5 +164,51 @@ class AIClaimReviewTests(unittest.TestCase):
                 load_claim_ledger(link)
 
 
+    def test_support_decision_without_resolved_review_evidence_stays_unverified(self):
+        ledger = json.loads(json.dumps(self.ledger))
+        ledger["reviews"][0]["evidence_refs"] = []
+        result = review_claim_ledger(ledger)
+        claim = next(row for row in result["claims"] if row["claim_id"] == "claim-a")
+        self.assertEqual(claim["review_status"], "NEEDS_MORE_EVIDENCE")
+        self.assertEqual(claim["truth_status"], "NOT_ESTABLISHED")
+
+    def test_unknown_review_reference_is_counted_and_blocks_support_candidate(self):
+        ledger = json.loads(json.dumps(self.ledger))
+        ledger["reviews"][0]["evidence_refs"] = ["not-in-catalog"]
+        result = review_claim_ledger(ledger)
+        claim = next(row for row in result["claims"] if row["claim_id"] == "claim-a")
+        self.assertEqual(claim["review_status"], "REVIEW_REQUIRED_UNKNOWN_EVIDENCE_REFERENCE")
+        self.assertEqual(result["unknown_evidence_reference_count"], 2)
+
+    def test_same_model_repeated_claim_is_not_called_multi_model_alignment(self):
+        ledger = json.loads(json.dumps(self.ledger))
+        ledger["claims"] = [dict(self.ledger["claims"][0]), dict(self.ledger["claims"][0])]
+        ledger["claims"][1]["claim_id"] = "claim-a-copy"
+        result = review_claim_ledger(ledger)
+        self.assertEqual(
+            result["comparison_groups"][0]["comparison_status"],
+            "SAME_MODEL_REPEATED_CLAIM_REQUIRES_REVIEW",
+        )
+
+    def test_cli_writes_report_and_refuses_overwrite(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from usit import cli
+
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "ledger.json"
+            output = Path(td) / "review.json"
+            source.write_text(json.dumps(self.ledger), encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                code = cli.main(["review-ai-claims", "--input", str(source), "--out", str(output)])
+            self.assertEqual(code, 2)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["schema"], REVIEW_SCHEMA)
+            self.assertEqual(report["overall_truth_status"], "NOT_ESTABLISHED")
+            with redirect_stdout(StringIO()):
+                code = cli.main(["review-ai-claims", "--input", str(source), "--out", str(output)])
+            self.assertEqual(code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
