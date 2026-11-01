@@ -303,3 +303,43 @@ python -m usit assess-quality --semantics .\\business_semantics.json --graph .\\
 ```
 
 Both output paths must be distinct, non-symlink paths that do not already exist. The Markdown report is a presentation of the JSON assessment, not an independent verification result.
+
+
+## S2.20 — 审阅门控的跨层业务追溯
+
+`trace-business` produces a requirements-to-evidence matrix spanning an explicitly reviewed requirement feature → endpoint-centred business-function view → statically linked UI entrypoint/API/backend handler/call chain/database/authorization/identity evidence → test-design candidate → imported runtime result.
+
+**No automatic feature-to-endpoint guessing is performed.** The only allowed requirement-to-function edge comes from a separate, reviewable mapping manifest. Every mapping decision must include a reviewer attestation, timestamp and rationale. An `APPROVED_LINK` must name an exact existing `business_function_id`; `NEEDS_REVIEW` and `REJECTED_LINK` never create a link. Feature identity is the exact tuple `feature_name + source_path + source_line`; duplicate or unknown identities are rejected.
+
+The manifest is bound to the exact graph bytes using SHA-256. When the graph changes, the manifest must be reviewed again; stale mapping manifests and mismatched runtime-evidence graph hashes are rejected. The reviewer fields are audit metadata, not cryptographic identity authentication.
+
+### Mapping manifest example
+
+```json
+{
+  "schema_version": "usit-feature-function-mapping-v1",
+  "source_graph_sha256": "<SHA-256 of the exact business graph file>",
+  "mappings": [
+    {
+      "feature_name": "查看照片",
+      "source_path": "docs/requirements.md",
+      "source_line": 12,
+      "decision": "APPROVED_LINK",
+      "business_function_id": "business-function-view-...",
+      "reviewed_by": "reviewer identifier",
+      "reviewed_at": "2026-11-01T12:00:00+08:00",
+      "rationale": "Explain the approved requirement-to-function relationship and its evidence."
+    }
+  ]
+}
+```
+
+Decision values: `APPROVED_LINK`, `REJECTED_LINK`, `NEEDS_REVIEW`. A missing mapping remains `NOT_LINKED_NO_REVIEWED_MAPPING`.
+
+### Generate the matrix
+
+```powershell
+python -m usit trace-business --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --mapping .\\feature-function-mapping.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --out .\\business-traceability-matrix.json
+```
+
+The test plan and runtime evidence are optional. Missing evidence remains `NOT_MEASURED`; a static relationship remains `STATIC_INFERENCE / NOT_VERIFIED`. This command reads artifacts only and does not run target-project code, tests, builds, database operations or network requests.
