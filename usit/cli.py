@@ -10,6 +10,7 @@ from .android_adapter import AndroidProjectAdapter
 from .command_planner import CommandPlanner
 from .business_semantics import analyze_business
 from .business_test_planner import plan_business_tests
+from .business_graph import project_business_graph
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -85,6 +86,21 @@ def _plan_business_tests(a) -> int:
         raise ValueError("business test-plan output already exists; choose a new path to preserve prior evidence")
     semantics = analyze_business(project)
     plan = plan_business_tests(semantics)
+    business_graph = None
+    graph_path = None
+    if a.graph:
+        supplied_graph = Path(a.graph).expanduser()
+        if supplied_graph.is_symlink():
+            raise ValueError("graph input must not be a symbolic link")
+        graph_path = supplied_graph.resolve(strict=True)
+        if not graph_path.is_file():
+            raise ValueError("graph input must be a regular file")
+        if graph_path.is_relative_to(project):
+            raise ValueError("graph input must be outside the target project")
+        if graph_path.is_relative_to(out):
+            raise ValueError("graph input must be outside the output directory")
+        source_graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        business_graph = project_business_graph(source_graph, semantics)
     out.mkdir(parents=True, exist_ok=False)
     (out / "business_semantics.json").write_text(
         json.dumps(semantics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -92,6 +108,11 @@ def _plan_business_tests(a) -> int:
     (out / "business_test_plan.json").write_text(
         json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    if business_graph is not None:
+        (out / "business_knowledge_graph.json").write_text(
+            json.dumps(business_graph, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     summary = {
         "project_root": str(project),
         "entity_count": semantics["entity_count"],
@@ -100,8 +121,22 @@ def _plan_business_tests(a) -> int:
         "discrepancy_count": semantics["discrepancy_count"],
         "test_candidate_count": plan["candidate_count"],
         "execution_status": "NOT_EXECUTED",
-        "outputs": [str(out / "business_semantics.json"), str(out / "business_test_plan.json")],
-        "note": "Static business understanding and candidate design only; no build, test, database or network operation was executed.",
+        "business_graph_linked_records": (
+            business_graph.get("business_understanding", {}).get("linked_records", 0)
+            if business_graph is not None else None
+        ),
+        "business_graph_unlinked_records": (
+            len(business_graph.get("business_understanding", {}).get("unlinked_records", []))
+            if business_graph is not None else None
+        ),
+        "graph_input": str(graph_path) if graph_path is not None else None,
+        "execution_status": "NOT_EXECUTED",
+        "outputs": [
+            str(out / "business_semantics.json"),
+            str(out / "business_test_plan.json"),
+            *([str(out / "business_knowledge_graph.json")] if business_graph is not None else []),
+        ],
+        "note": "Static business understanding and candidate design only; graph links require exact source-file matches. No build, test, database or network operation was executed.",
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -134,6 +169,7 @@ def main(argv=None):
     bt.add_argument('project',help='Authorized absolute project root')
     bt.add_argument('--out',required=True,help='New output directory outside the project root')
     bt.add_argument('--authorization-file',required=True,help='External authorization record for static read-only analysis')
+    bt.add_argument('--graph',help='Optional existing knowledge_graph.json from a completed USIT scan; emits business_knowledge_graph.json')
     a=parser.parse_args(argv)
     try:
         if a.cmd=='selftest': return selftest()
