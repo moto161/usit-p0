@@ -354,3 +354,14 @@ python -m usit init-traceability-template --semantics .\\business_semantics.json
 ```
 
 命令为每项需求生成精确的 `feature_name + source_path + source_line` 标识，自动绑定当前图谱的 SHA-256。所有条目初始为 `NEEDS_REVIEW`，`business_function_id` 为空，审阅者/时间/理由也留空；这份模板**不能直接用于建立链接**。必须由实际审阅者逐项填写并保存后，再运行 `trace-business`。模板输出路径不得已存在。
+
+
+### S2.20-C — Markdown 追溯审查报告
+
+`trace-business` 可同时输出 JSON 矩阵和 Markdown 审查报告：
+
+```powershell
+python -m usit trace-business --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --mapping .\\feature-function-mapping.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --out .\\business-traceability-matrix.json --out-md .\\business-traceability-report.md
+```
+
+Markdown 按需求功能展开审阅决策、业务功能/API、各层证据状态、测试候选、运行时状态、源码证据引用和输入哈希。它只是 JSON 矩阵的可读投影，不产生额外验证结论；两个输出路径必须不同且均不得覆盖已有文件。
