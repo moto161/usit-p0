@@ -148,6 +148,16 @@ The business graph projects these as `identity_evidence` candidate nodes. An ide
 
 This is not yet general data-flow/taint analysis. It does not propagate values across lines, variables, parameters, returns, aliases, closures, imports, middleware, ORM abstractions or control-flow branches; it does not resolve actual SQL parameter arrays or prove that a textually co-occurring expression is the bound value. Missing evidence is UNKNOWN, not evidence of safety. No runtime requests, builds, database operations or target-project modifications are performed.
 
+## Security test traceability integration
+
+`trace-business` accepts optional `--security-test-plan security_test_candidates.json`. Security candidates link to a business-function view only when the endpoint node ID matches exactly one view's `endpoint_id`; zero or multiple matches remain unlinked and are listed in `unlinked_security_test_candidate_ids`. The artifact SHA-256 is retained in the traceability matrix. Linked security candidates appear alongside ordinary test-design candidates in requirement rows and Markdown reports, retaining authorization, database, identity-flow and call-chain evidence. This is design-only: candidates remain `NOT_EXECUTED` and expected results require owner confirmation.
+
+Example:
+
+```powershell
+python -m usit trace-business --semantics .\business_semantics.json --graph .\business_knowledge_graph.json --mapping .\feature-function-mapping.json --test-plan .\business_test_plan.json --security-test-plan .\security_test_candidates.json --out .\business-traceability-matrix.json --out-md .\business-traceability-report.md
+```
+
 ## S2.8 — Authorization-gap analysis → security test candidates (partial)
 
 When `plan-business-tests` receives an existing `knowledge_graph.json` through `--graph`, USIT now also emits `security_test_candidates.json`. The planner reuses endpoint handler associations, bounded call-chain evidence, reachable authorization indicators and function-owned SQL access evidence. Candidate categories include unauthenticated boundary verification, role-boundary verification, cross-user resource isolation, owner/user ID parameter-tampering checks, and alternate-entrypoint authorization review where two endpoints share the same statically linked database-access record but expose different authorization-signal statuses.
