@@ -180,8 +180,10 @@ def build_business_traceability(
             "code_coverage": coverage_status,
             "runtime_observation": runtime_observation_status,
         }
-        row_status = "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} else (
-            "TRACEABLE_TO_STATIC_FUNCTION_VIEW" if view else linkage)
+        row_status = "EVIDENCE_CONFLICT" if view and runtime_global_conflict else (
+            "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} else (
+            "TRACEABLE_WITH_RUNTIME_OBSERVATION" if view and runtime_observation_status == "RUNTIME_OBSERVED" else (
+            "TRACEABLE_TO_STATIC_FUNCTION_VIEW" if view else linkage)))
         status_counts[row_status] += 1
         refs = []
         if isinstance(feature.get("source"), str):
