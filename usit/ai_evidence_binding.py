@@ -136,8 +136,10 @@ def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
         trusted_public_keys or {},
         expected_snapshot_id=entry.get("expected_snapshot_id"),
     )
-    if (attestation.get("manifest_path") is not None and
-            attestation["manifest_path"] != entry.get("snapshot_manifest_path")):
+    if (attestation.get("signature_valid") and
+            attestation.get("status") in {"ATTESTATION_SIGNATURE_VALID_TRUSTED_KEY",
+                                          "ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY"} and
+            attestation.get("manifest_path") != entry.get("snapshot_manifest_path")):
         attestation = {**attestation, "status": "ATTESTATION_MANIFEST_PATH_MISMATCH",
                        "detail": "Signed manifest path does not match the evidence catalog path."}
     snapshot["attestation"] = attestation
