@@ -418,11 +418,8 @@ class CliIntegrationTests(unittest.TestCase):
 
 class RegressionTests(unittest.TestCase):
     def test_usit_selftest_still_passes(self):
-        from contextlib import redirect_stdout
-        from io import StringIO
         from usit.cli import selftest
-        with redirect_stdout(StringIO()):
-            self.assertEqual(selftest(), 0)
+        self.assertEqual(selftest(), 0)
 
 
 class CapabilityLogTests(unittest.TestCase):
