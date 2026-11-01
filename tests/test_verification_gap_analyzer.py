@@ -60,6 +60,27 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
         self.assertEqual(feature_gap["target"],"照片上传")
         self.assertIsNone(feature_gap["business_function_id"])
 
+    def test_same_name_requirements_are_matched_by_source_and_line(self):
+        semantics = {"features": [
+            {"name": "照片上传", "source": "docs/admin.md", "line": 8, "priority": "P1"},
+            {"name": "照片上传", "source": "docs/member.md", "line": 20, "priority": "P1"},
+        ], "endpoint_contract_alignment": []}
+        graph = {"schema_version": "usit-graph-v1", "business_understanding": {
+            "documented_feature_linkage": [
+                {"feature_name": "照片上传", "source": "docs/admin.md", "line": 8,
+                 "linkage_status": "EXPLICIT_REVIEWED_LINK"},
+                {"feature_name": "照片上传", "source": "docs/member.md", "line": 20,
+                 "linkage_status": "NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION"},
+            ],
+            "business_function_views": [],
+        }}
+        result = build_verification_gap_backlog(semantics, graph)
+        feature_gaps = [item for item in result["gaps"]
+                        if item["gap_kind"] == "REQUIREMENT_TRACEABILITY_GAP"]
+        self.assertEqual(len(feature_gaps), 1)
+        self.assertEqual(feature_gaps[0]["evidence_refs"][0]["path"], "docs/member.md")
+        self.assertEqual(feature_gaps[0]["evidence_refs"][0]["line"], 20)
+
     def test_unlinked_function_without_runtime_and_coverage_is_unknown_gap(self):
         result=build_verification_gap_backlog({"features":[],"endpoint_contract_alignment":[]},
             {"schema_version":"usit-graph-v1","business_understanding":{"business_function_views":[
