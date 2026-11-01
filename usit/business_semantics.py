@@ -224,28 +224,34 @@ class BusinessSemanticsAdapter:
         if len(self._discovered) > MAX_FILES:
             raise SemanticsBlocked("FILE_BUDGET_EXCEEDED", f"Business analysis exceeded {MAX_FILES} discovered entries.")
 
+    def _validate_project_path(self, path: Path) -> Path:
+        """Reject reparse components and paths resolving outside the project."""
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current = current / part
+            if safety.is_reparse_point(current):
+                raise SemanticsBlocked("REPARSE_POINT_REJECTED", f"{current} is a link/junction/reparse point.")
+        try:
+            resolved = path.resolve(strict=False)
+        except OSError as exc:
+            raise SemanticsBlocked("PATH_CHECK_FAILED", f"Could not resolve {path}: {type(exc).__name__}") from exc
+        if resolved != self.root and self.root not in resolved.parents:
+            raise SemanticsBlocked("PATH_TRAVERSAL_REJECTED", f"{path} is outside the authorised project root.")
+        return resolved
+
     def _count_discovery(self, path: Path) -> None:
         self._check_budget()
         key = os.path.normcase(os.path.abspath(os.fspath(path)))
         self._discovered.add(key)
         if len(self._discovered) > MAX_FILES:
             raise SemanticsBlocked("FILE_BUDGET_EXCEEDED", f"Business analysis exceeded {MAX_FILES} discovered entries.")
-        absolute = Path(os.path.abspath(os.fspath(path)))
-        current = Path(absolute.anchor)
-        for part in absolute.parts[1:]:
-            current = current / part
-            if safety.is_reparse_point(current):
-                raise SemanticsBlocked("REPARSE_POINT_REJECTED", f"{current} is a link/junction/reparse point.")
+        self._validate_project_path(path)
 
     # ------------------------------------------------------------------ reading
     def _read_text(self, path: Path) -> dict[str, Any]:
         self._check_budget()
-        absolute = Path(os.path.abspath(os.fspath(path)))
-        current = Path(absolute.anchor)
-        for part in absolute.parts[1:]:
-            current = current / part
-            if safety.is_reparse_point(current):
-                raise SemanticsBlocked("REPARSE_POINT_REJECTED", f"{current} is a link/junction/reparse point.")
+        self._validate_project_path(path)
         if not path.exists() or not path.is_file():
             return {"text": None, "read_ok": False, "error": "MISSING"}
         try:
