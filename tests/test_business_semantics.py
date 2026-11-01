@@ -258,6 +258,48 @@ class FieldGapLocatorTests(unittest.TestCase):
 
 
 class ResourceSafetyTests(unittest.TestCase):
+
+    def test_outside_project_file_is_rejected(self):
+        p = SyntheticProject(self)
+        outside = p.root.parent / (p.root.name + "-outside.txt")
+        outside.write_text("OUTSIDE_MARKER", encoding="utf-8")
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        adapter = BusinessSemanticsAdapter(p.root)
+        with self.assertRaises(SemanticsBlocked) as blocked:
+            adapter._read_text(outside)
+        self.assertEqual(blocked.exception.code, "PATH_TRAVERSAL_REJECTED")
+
+    def test_symlinked_file_is_rejected_before_read(self):
+        p = SyntheticProject(self)
+        outside = p.root.parent / (p.root.name + "-outside-file.txt")
+        outside.write_text("OUTSIDE_MARKER", encoding="utf-8")
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        link = p.root / "linked.txt"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError, ValueError):
+            self.skipTest("OS denied symlink creation")
+        adapter = BusinessSemanticsAdapter(p.root)
+        with self.assertRaises(SemanticsBlocked) as blocked:
+            adapter._read_text(link)
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
+
+    def test_symlinked_directory_is_rejected_during_discovery(self):
+        p = SyntheticProject(self)
+        outside = p.root.parent / (p.root.name + "-outside-dir")
+        outside.mkdir()
+        (outside / "secret.js").write_text("const secret = true;\\n", encoding="utf-8")
+        self.addCleanup(lambda: (outside / "secret.js").unlink(missing_ok=True))
+        self.addCleanup(lambda: outside.rmdir())
+        link = p.root / "external"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError, ValueError):
+            self.skipTest("OS denied directory symlink creation")
+        adapter = BusinessSemanticsAdapter(p.root)
+        with self.assertRaises(SemanticsBlocked) as blocked:
+            adapter._project_files()
+        self.assertEqual(blocked.exception.code, "REPARSE_POINT_REJECTED")
     def test_repeated_file_reads_use_cached_verified_bytes(self):
         p = SyntheticProject(self)
         doc = p.root / "数据库设计文档.md"
