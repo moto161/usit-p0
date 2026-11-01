@@ -780,6 +780,38 @@ function main(input) {
           }
           if (ts.isNewExpression(node) && call.resolution_status === "RESOLVED") call.relation_type = "instantiates";
           calls.push(call);
+          if (ts.isCallExpression(node)) {
+            const calleeText = node.expression.getText(sourceFile);
+            const methodMatch = /(?:^|\\.)((?:get|post|put|patch|delete|head|options))$/i.exec(calleeText);
+            const isFetch = ts.isIdentifier(node.expression) && node.expression.text === "fetch";
+            const isAxios = /^(?:axios|http|api|client)\\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText);
+            if (isFetch || isAxios || methodMatch) {
+              const args = node.arguments || [];
+              const urlArg = args[0];
+              const literalUrl = urlArg && (ts.isStringLiteralLike(urlArg) || ts.isNoSubstitutionTemplateLiteral(urlArg)) ? urlArg.text : null;
+              let httpMethod = isFetch ? "GET" : (methodMatch ? methodMatch[1].toUpperCase() : null);
+              if (isFetch && args[1] && ts.isObjectLiteralExpression(args[1])) {
+                for (const property of args[1].properties) {
+                  if (ts.isPropertyAssignment(property) && property.name && property.name.getText(sourceFile).replace(/["']/g, "") === "method"
+                      && property.initializer && (ts.isStringLiteralLike(property.initializer) || ts.isNoSubstitutionTemplateLiteral(property.initializer))) {
+                    httpMethod = property.initializer.text.toUpperCase();
+                  }
+                }
+              }
+              const apiPosition = loc(sourceFile, node);
+              row.api_client_calls.push({
+                callee: calleeText, method: httpMethod,
+                path: literalUrl && literalUrl.startsWith("/") && !/[?#{}$]/.test(literalUrl) ? literalUrl : null,
+                url_expression: urlArg ? urlArg.getText(sourceFile).slice(0, 240) : null,
+                line: apiPosition.line, column: apiPosition.column,
+                caller_symbol_id: currentOwner ? currentOwner.symbol_id : null,
+                caller_name: currentOwner ? currentOwner.name : null,
+                resolution_status: literalUrl && literalUrl.startsWith("/") && !/[?#{}$]/.test(literalUrl) && httpMethod
+                  ? "LITERAL_METHOD_PATH" : "DYNAMIC_OR_UNSUPPORTED_URL",
+                confidence: "STATIC_INFERENCE", verification_status: "NOT_VERIFIED",
+              });
+            }
+          }
         }
       }
       ts.forEachChild(node, (child) => visit(child, childTestContext, currentOwner));
@@ -844,6 +876,7 @@ function main(input) {
     collectRouteHandlers(sourceFile);
 
     // S2.13-A: explicit JSX event-prop -> named handler evidence.
+    row.api_client_calls = [];
     row.ui_event_bindings = [];
     const uiEventProps = new Set(["onClick", "onSubmit", "onChange", "onPress", "onTap", "onLongPress"]);
     function collectUiEventBindings(node) {
