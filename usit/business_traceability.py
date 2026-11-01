@@ -159,7 +159,7 @@ def build_business_traceability(
         runtime = runtime_by_function.get(fid) if view else None
         runtime_status = runtime.get("test_execution_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
         coverage_status = runtime.get("code_coverage_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
-        runtime_observation_status = ("EVIDENCE_CONFLICT" if runtime_global_conflict else "RUNTIME_OBSERVED") if fid in runtime_observed_ids else ("NOT_OBSERVED" if runtime_evidence_validation else "NOT_MEASURED")
+        runtime_observation_status = "EVIDENCE_CONFLICT" if runtime_global_conflict else ("RUNTIME_OBSERVED" if fid in runtime_observed_ids else ("NOT_OBSERVED" if runtime_evidence_validation else "NOT_MEASURED"))
         valid_runtime_statuses = {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"}
         valid_coverage_statuses = {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}
         if runtime_status not in valid_runtime_statuses:
