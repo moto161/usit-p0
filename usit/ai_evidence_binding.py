@@ -129,7 +129,11 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
         bindings[evidence_id] = row
 
     claims = []
-    counts: dict[str, int] = {}
+    claim_counts: dict[str, int] = {}
+    evidence_counts: dict[str, int] = {}
+    for binding in bindings.values():
+        key = binding["binding_status"]
+        evidence_counts[key] = evidence_counts.get(key, 0) + 1
     for claim in ledger["claims"]:
         refs = claim.get("evidence_refs", [])
         statuses = [bindings[x]["binding_status"] for x in refs if x in bindings]
@@ -152,7 +156,7 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
             status = "ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED"
         else:
             status = "UNVERIFIED_REFERENCE"
-        counts[status] = counts.get(status, 0) + 1
+        claim_counts[status] = claim_counts.get(status, 0) + 1
         claims.append({
             "claim_id": claim["claim_id"],
             "evidence_refs": list(refs),
@@ -167,11 +171,10 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
         "input_sha256": ledger_sha256,
         "evidence_root": str(root),
         "evidence_count": len(bindings),
-        "binding_status_counts": {key: counts[key] for key in sorted(counts)},
+        "binding_status_counts": {key: evidence_counts[key] for key in sorted(evidence_counts)},
         "evidence_bindings": list(bindings.values()),
         "claim_count": len(claims),
-        "claim_binding_status_counts": {key: sum(1 for x in claims if x["binding_status"] == key)
-                                        for key in sorted({x["binding_status"] for x in claims})},
+        "claim_binding_status_counts": {key: claim_counts[key] for key in sorted(claim_counts)},
         "claims": claims,
         "verification_limits": [
             "A matching SHA-256 proves byte identity against the supplied catalog digest, not artifact provenance or authenticity.",
