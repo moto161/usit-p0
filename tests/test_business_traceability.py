@@ -189,6 +189,20 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertEqual(unreviewed["stage_status"]["runtime_observation"], "NOT_OBSERVED")
         self.assertIsNone(unreviewed["business_function_id"])
 
+    def test_global_runtime_conflict_is_not_reported_as_no_observation(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "EVIDENCE_CONFLICT",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": [],
+            "correlations": [],
+        }
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            input_hashes=self.hashes, runtime_evidence_validation=runtime)
+        linked = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(linked["stage_status"]["runtime_observation"], "EVIDENCE_CONFLICT")
+        self.assertEqual(linked["traceability_status"], "EVIDENCE_CONFLICT")
+
     def test_runtime_evidence_graph_hash_mismatch_is_rejected(self):
         runtime = {
             "schema_version": "usit-runtime-evidence-validation-v1",
