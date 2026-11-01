@@ -7,6 +7,11 @@ def _cell(value: Any) -> str:
     return str(value if value is not None else "—").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
+def _items(value: Any) -> list[Any]:
+    """Return list-shaped report data; malformed optional collections are omitted."""
+    return value if isinstance(value, list) else []
+
+
 def render_business_traceability_markdown(report: dict[str, Any]) -> str:
     if not isinstance(report, dict) or report.get("schema_version") != "usit-business-traceability-matrix-v1":
         raise ValueError("report must use usit-business-traceability-matrix-v1")
@@ -21,7 +26,7 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
         "| 需求功能 | 来源 | 审阅决策 | 业务功能 ID | API | 追溯状态 |",
         "|---|---|---|---|---|---|",
     ]
-    for row in report.get("rows", []):
+    for row in _items(report.get("rows")):
         if not isinstance(row, dict):
             continue
         endpoint = row.get("endpoint") if isinstance(row.get("endpoint"), dict) else {}
@@ -61,7 +66,7 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             actual_cases = execution_detail.get("mapped_test_cases", [])
             if isinstance(actual_cases, list) and actual_cases:
                 lines.append("- 已报告 testcase：")
-                for case in actual_cases:
+                for case in _items(actual_cases):
                     if isinstance(case, dict):
                         lines.append(
                             f"  - {_cell(case.get('test_case_id'))}：{_cell(case.get('status'))}"
@@ -69,7 +74,7 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             missing_cases = execution_detail.get("mapped_cases_missing_from_report", [])
             if isinstance(missing_cases, list) and missing_cases:
                 lines.append("- 映射但未出现在报告中的 testcase：")
-                for case_id in missing_cases:
+                for case_id in _items(missing_cases):
                     lines.append(f"  - {_cell(case_id)}")
         test_candidates = row.get("test_candidates", [])
         if isinstance(test_candidates, list) and test_candidates:
@@ -86,17 +91,17 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                     f"执行状态：{_cell(candidate.get('execution_status'))}；"
                     f"预期结果：{_cell(candidate.get('expected_results_status'))}"
                 )
-                for precondition in candidate.get("preconditions", []):
+                for precondition in _items(candidate.get("preconditions")):
                     lines.append(f"    - 前置条件：{_cell(precondition)}")
-                for action in candidate.get("actions", []):
+                for action in _items(candidate.get("actions")):
                     if isinstance(action, dict):
                         lines.append(
                             f"    - 步骤 { _cell(action.get('step')) }：{_cell(action.get('action'))}；"
                             f"预期：{_cell(action.get('expected_result'))}"
                         )
-                        for evidence in action.get("evidence_to_collect", []):
+                        for evidence in _items(action.get("evidence_to_collect")):
                             lines.append(f"      - 采集证据：{_cell(evidence)}")
-                for requirement in candidate.get("evidence_requirements", []):
+                for requirement in _items(candidate.get("evidence_requirements")):
                     if isinstance(requirement, dict):
                         lines.append(
                             f"    - 证据要求：{_cell(requirement.get('evidence_type'))} / "
@@ -105,7 +110,7 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
         lines.append("- 证据引用：")
         refs = row.get("evidence_refs", [])
         if refs:
-            for ref in refs:
+            for ref in _items(refs):
                 if isinstance(ref, dict):
                     lines.append(f"  - {_cell(ref.get('kind'))}: {_cell(ref.get('path'))}:{_cell(ref.get('line'))}")
         else:
@@ -116,10 +121,10 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
         f"- 未关联测试设计功能 ID：{_cell(', '.join(report.get('unlinked_test_design_function_ids', [])) or '无')}",
         f"- 无效运行状态功能 ID：{_cell(', '.join(report.get('invalid_runtime_status_function_ids', [])) or '无')}",
         "", "## 输入 SHA-256", "", "| 工件 | SHA-256 |", "|---|---|"])
-    for key, value in sorted(report.get("input_hashes", {}).items()):
+    for key, value in sorted((report.get("input_hashes") if isinstance(report.get("input_hashes"), dict) else {}).items()):
         lines.append(f"| {_cell(key)} | {_cell(value)} |")
     lines.extend(["", "## 解释边界", ""])
-    for item in report.get("limitations", []):
+    for item in _items(report.get("limitations")):
         lines.append(f"- {_cell(item)}")
     lines.append("")
     return "\n".join(lines)
