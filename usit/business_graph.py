@@ -540,27 +540,6 @@ def project_business_graph(graph: Mapping[str, Any],
                         refs.append(identity_id)
         identity_linked += 1
 
-    # Attach exact same-line identity evidence to endpoints only through a DB
-    # access already present in their resolved bounded call-chain association.
-    for endpoint_node in nodes:
-        association = endpoint_node.get("handler_association")
-        if not isinstance(association, dict):
-            continue
-        db_ids = {
-            item.get("database_access_id")
-            for item in association.get("database_access_evidence", [])
-            if isinstance(item, Mapping) and isinstance(item.get("database_access_id"), str)
-        }
-        related_identity = [
-            record
-            for db_id in sorted(db_ids)
-            for record in identity_by_database_id.get(db_id, [])
-        ]
-        related_identity.sort(key=lambda item: (
-            item["path"], item["line"], item["kind"], item["identity_evidence_id"]
-        ))
-        association["identity_dataflow_evidence"] = related_identity
-
     # S2.7: project explicit authorization guard/check evidence.
     authorization_records = semantics.get("authorization_checks", [])
     if not isinstance(authorization_records, list):
@@ -650,6 +629,27 @@ def project_business_graph(graph: Mapping[str, Any],
                                 "verification_status": "NOT_VERIFIED"})
         related.sort(key=lambda item: (item["path"] or "", item["line"] or 0, item["database_access_id"]))
         association["database_access_evidence"] = related
+
+    # Attach exact same-line identity evidence to endpoints only through a DB
+    # access already present in their resolved bounded call-chain association.
+    for endpoint_node in nodes:
+        association = endpoint_node.get("handler_association")
+        if not isinstance(association, dict):
+            continue
+        db_ids = {
+            item.get("database_access_id")
+            for item in association.get("database_access_evidence", [])
+            if isinstance(item, Mapping) and isinstance(item.get("database_access_id"), str)
+        }
+        related_identity = [
+            record
+            for db_id in sorted(db_ids)
+            for record in identity_by_database_id.get(db_id, [])
+        ]
+        related_identity.sort(key=lambda item: (
+            item["path"], item["line"], item["kind"], item["identity_evidence_id"]
+        ))
+        association["identity_dataflow_evidence"] = related_identity
 
     # Route middleware evidence is file/line anchored; function-level guard
     # calls are attached only when their exact caller symbol is reachable.
