@@ -65,8 +65,8 @@ def _candidate(kind: str, target: str, purpose: str, evidence: list[dict[str, An
     }
 
 
-def plan_business_tests(semantics: Mapping[str, Any]) -> dict[str, Any]:
-    """Create deterministic test candidates from a BusinessSemantics result."""
+def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Create deterministic candidates from semantics and optional evidence-linked graph."""
     if not isinstance(semantics, Mapping):
         raise TypeError("semantics must be a mapping")
     for key in ("entities", "features", "endpoints", "discrepancies"):
@@ -127,6 +127,143 @@ def plan_business_tests(semantics: Mapping[str, Any]) -> dict[str, Any]:
                 "未从代码推断具体 HTTP 状态码或业务响应。",
             ],
         ))
+
+    # S2.12: turn exact API-contract alignment into reviewable functional candidates.
+    # The optional graph contributes only its already-linked endpoint execution paths.
+    understanding = business_graph.get("business_understanding", {}) if isinstance(business_graph, Mapping) else {}
+    execution_paths = understanding.get("endpoint_execution_paths", []) if isinstance(understanding, Mapping) else []
+    if not isinstance(execution_paths, list):
+        execution_paths = []
+        warnings.append("business_graph.endpoint_execution_paths is malformed; graph evidence omitted")
+
+    def _path_for(method: str, endpoint_path: str) -> Mapping[str, Any] | None:
+        matches = [item for item in execution_paths if isinstance(item, Mapping)
+                   and _text(item.get("method")).upper() == method
+                   and _text(item.get("endpoint")) == endpoint_path]
+        return matches[0] if len(matches) == 1 else None
+
+    def _api_refs(alignment: Mapping[str, Any], flow: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        doc = alignment.get("document_evidence")
+        if isinstance(doc, Mapping):
+            ref = _source_ref(doc.get("source"), doc.get("line"), evidence_kind="documented_api_contract")
+            if ref:
+                refs.append(ref)
+        code_items = alignment.get("code_evidence")
+        if isinstance(code_items, list):
+            for item in code_items:
+                if isinstance(item, Mapping):
+                    ref = _source_ref(item.get("source"), item.get("line"),
+                                      evidence_kind="code_route", http_method=method,
+                                      endpoint=endpoint_path)
+                    if ref:
+                        refs.append(ref)
+        if isinstance(flow, Mapping):
+            source = flow.get("source")
+            if isinstance(source, Mapping):
+                ref = _source_ref(source.get("path"), source.get("line"), evidence_kind="endpoint_execution_path")
+                if ref:
+                    refs.append(ref)
+            handler = flow.get("handler")
+            if isinstance(handler, Mapping):
+                ref = _source_ref(handler.get("path"), handler.get("line"),
+                                  evidence_kind="resolved_handler", symbol_id=handler.get("symbol_id"))
+                if ref:
+                    refs.append(ref)
+            for key, kind in (("call_chain", "call_chain"), ("database_accesses", "database_access"),
+                              ("authorization", "authorization"), ("identity_evidence", "identity_resource")):
+                values = flow.get(key)
+                if key == "authorization" and isinstance(values, Mapping):
+                    values = values.get("route_middleware", []) + values.get("reachable_function_checks", [])
+                if not isinstance(values, list):
+                    continue
+                for item in values:
+                    if not isinstance(item, Mapping):
+                        continue
+                    location = item.get("call_site") if kind == "call_chain" else item
+                    location = location if isinstance(location, Mapping) else {}
+                    ref = _source_ref(location.get("path"), location.get("line"),
+                                      evidence_kind=kind,
+                                      evidence_id=(item.get("database_access_id") or item.get("authorization_check_id")
+                                                   or item.get("identity_evidence_id") or item.get("target_id")))
+                    if ref:
+                        refs.append(ref)
+        # Stable de-duplication; no inferred links are added here.
+        unique: dict[str, dict[str, Any]] = {}
+        for ref in refs:
+            key = json.dumps(ref, sort_keys=True, ensure_ascii=False)
+            unique[key] = ref
+        return [unique[key] for key in sorted(unique)]
+
+    alignments = semantics.get("endpoint_contract_alignment", [])
+    if isinstance(alignments, list):
+        for alignment in alignments:
+            if not isinstance(alignment, Mapping):
+                warnings.append("ignored malformed endpoint contract alignment record")
+                continue
+            status = _text(alignment.get("status"))
+            method = _text(alignment.get("method")).upper()
+            endpoint_path = _text(alignment.get("path"))
+            if not method or not endpoint_path or status not in {
+                "EXACT_MATCH", "MULTIPLE_CODE_MATCHES",
+                "DOCUMENTED_NOT_FOUND_IN_CODE", "CODE_ENDPOINT_NOT_DOCUMENTED",
+            }:
+                warnings.append("ignored unsupported or incomplete endpoint contract alignment")
+                continue
+            flow = _path_for(method, endpoint_path) if status in {"EXACT_MATCH", "MULTIPLE_CODE_MATCHES"} else None
+            refs = _api_refs(alignment, flow)
+            if status == "EXACT_MATCH":
+                category = "api_contract_verification"
+                purpose = f"核验已精确匹配的 API 契约：{method} {endpoint_path}"
+                steps = [
+                    "在项目负责人批准的隔离环境中确认服务版本、路由前缀、测试账号和测试数据",
+                    "按文档记录的 HTTP method 与 path 发起请求；不得由静态分析结果推定请求体或参数",
+                    "记录实际响应、服务端日志和数据副作用，并依据已确认需求逐项核对",
+                    "单独核验该接口的认证、角色和资源归属边界；静态 guard 仅作为检查线索",
+                ]
+                limitations = [
+                    "精确 method/path 匹配仅证明静态路由字符串相同，不证明运行时注册、请求可达或功能正确。",
+                    "文档未提供的请求参数、响应结构、状态码和业务预期必须由需求负责人确认，不得编造。",
+                ]
+            elif status == "DOCUMENTED_NOT_FOUND_IN_CODE":
+                category = "api_contract_review"
+                purpose = f"复核文档接口未在当前静态代码范围内匹配：{method} {endpoint_path}"
+                steps = [
+                    "确认 API 文档版本、代码分支、服务模块和分析范围一致",
+                    "人工检查 router mount、API gateway、版本前缀、动态路由、生成代码及其他服务入口",
+                    "由需求/接口负责人确认该契约是否仍有效，并决定补充证据、实现或更新文档",
+                ]
+                limitations = [
+                    "DOCUMENTED_NOT_FOUND_IN_CODE 不是接口缺失或功能未实现的结论。",
+                    "当前对照未展开 router mount/base path、gateway rewrite、版本前缀或动态路由。",
+                ]
+            elif status == "CODE_ENDPOINT_NOT_DOCUMENTED":
+                category = "api_contract_review"
+                purpose = f"复核代码路由未出现在当前 API 文档中：{method} {endpoint_path}"
+                steps = [
+                    "确认文档收集范围、版本和服务边界，检查是否存在其他接口规范",
+                    "由接口负责人确认该路由是内部接口、遗漏文档、遗留入口还是有意公开接口",
+                    "按确认结果补充契约、记录豁免依据或安排后续评审；不得直接判为无效接口",
+                ]
+                limitations = [
+                    "CODE_ENDPOINT_NOT_DOCUMENTED 不证明接口错误、未授权或不应存在。",
+                    "文档可能不完整，当前分析也可能未覆盖所有文档位置。",
+                ]
+            else:
+                category = "api_contract_review"
+                purpose = f"复核存在多个静态代码路由匹配：{method} {endpoint_path}"
+                steps = [
+                    "检查所有匹配路由的文件、行号、服务模块和实际部署边界",
+                    "确认重复注册是否有意设计，并核对路由顺序、中间件和版本策略",
+                    "由接口负责人确认唯一契约归属后，再制定运行时验证场景",
+                ]
+                limitations = [
+                    "MULTIPLE_CODE_MATCHES 只表示静态匹配到多个路由，不代表运行时冲突或缺陷。",
+                    "静态执行路径仅在唯一精确 endpoint 关联时附加；未唯一关联时不拼接图谱证据。",
+                ]
+            candidates.append(_candidate(
+                category, f"{method} {endpoint_path}", purpose, refs, steps, limitations,
+            ))
 
     for entity in semantics.get("entities", []):
         if not isinstance(entity, Mapping):
