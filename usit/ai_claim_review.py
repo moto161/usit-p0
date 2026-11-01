@@ -249,7 +249,11 @@ def review_claim_ledger(ledger: dict[str, Any], ledger_sha256: str | None = None
             and not row["unknown_evidence_refs"]
             for row in reviewed_claims
         ),
-        "review_required_count": sum(row["review_status"].startswith("REVIEW_REQUIRED") for row in reviewed_claims),
+        "review_required_count": sum(
+            row["review_status"].startswith("REVIEW_REQUIRED")
+            or row["review_status"] in {"NEEDS_MORE_EVIDENCE", "REVIEWED_CONFLICT"}
+            for row in reviewed_claims
+        ),
         "unknown_evidence_reference_count": sum(
             len(row["unknown_evidence_refs"]) +
             len((row["review_attestation"] or {}).get("unknown_evidence_refs", []))
