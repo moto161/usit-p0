@@ -168,6 +168,10 @@ class VerificationCaptureTests(unittest.TestCase):
             )
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
 
+    def test_ntfs_alternate_data_stream_path_is_rejected(self):
+        with self.assertRaises(ValueError):
+            capture._safe_relative_file(self.project, "nested/file.txt:secret")
+
     def test_manifest_hash_mismatch_is_detected(self):
         result = self.run_capture("pass")
         log = Path(result.evidence_dir) / "stdout.log"
