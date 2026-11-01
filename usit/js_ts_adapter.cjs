@@ -738,7 +738,7 @@ function main(input) {
         ? declaredFunctionOwner(node)
         : (declaredFunctionOwner(node) || callerOwner || null);
       let childTestContext = testContext;
-      if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && /^test\\w*/i.test(node.name.getText(sourceFile))) {
+      if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && /^test\w*/i.test(node.name.getText(sourceFile))) {
         childTestContext = node.name.getText(sourceFile);
       }
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && ["test", "it"].includes(node.expression.text) && node.arguments.length && ts.isStringLiteralLike(node.arguments[0])) {
@@ -783,7 +783,7 @@ function main(input) {
           if (ts.isCallExpression(node)) {
             const calleeText = node.expression.getText(sourceFile);
             const isFetch = ts.isIdentifier(node.expression) && node.expression.text === "fetch";
-            const isAxios = /^(?:axios|http|api|client)\\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText);
+            const isAxios = /^(?:axios|http|api|client)\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText);
             if (isFetch || isAxios) {
               const args = node.arguments || [];
               const urlArg = args[0];
