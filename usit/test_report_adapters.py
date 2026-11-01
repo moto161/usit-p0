@@ -13,7 +13,7 @@ def _safe_relative_path(value: Any) -> str:
         raise ValueError("source_file must be a non-empty relative path")
     path = value.replace("\\", "/")
     pure = PurePosixPath(path)
-    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+    if pure.is_absolute() or (pure.parts and pure.parts[0].endswith(":")) or any(part in {"", ".", ".."} for part in pure.parts):
         raise ValueError("source_file must be a normalized relative path")
     return pure.as_posix()
 
@@ -37,6 +37,8 @@ def parse_pytest_json(data: bytes) -> list[dict[str, Any]]:
             "status": {"passed":"PASSED","failed":"FAILED","skipped":"SKIPPED"}[outcome],
             "failure_count": int(outcome == "failed"), "error_count": 0,
             "skipped_count": int(outcome == "skipped"), "source_format":"PYTEST_JSON"})
+    if len(cases) > 200_000:
+        raise ValueError("pytest JSON testcase limit exceeded (200000)")
     if not cases:
         raise ValueError("pytest JSON report contains no tests")
     ids = [x["test_case_id"] for x in cases]
