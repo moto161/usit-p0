@@ -1,6 +1,6 @@
 # USIT S2.27-C — Detached scan attestation and provenance trust model
 
-- Status: CORE IMPLEMENTED / CLI, scanner integration, and key custody workflow pending
+- Status: CORE + READ-ONLY CLIs + EVIDENCE-LEDGER INTEGRATION IMPLEMENTED / SCANNER AUTO-SIGNING AND KEY CUSTODY WORKFLOW PENDING
 - Target branch: `feature/understanding-to-test-v1`
 - Baseline: S2.27-B (`usit-manifest-v1` byte and source-entry cross-binding)
 - Security posture: read-only verification; fail closed; no automatic claim promotion
@@ -156,10 +156,10 @@ CI must run the focused tests on Linux and Windows where applicable, plus the ex
 - Canonical UTF-8 JSON serialization, duplicate-key rejection, strict base64 lengths, manifest digest binding, snapshot ID policy, and relative manifest path checks are implemented.
 - `tests/test_scan_attestation.py` adds 15 synthetic tests; CI installs the pinned provider and runs the tests on the Linux business suite and Windows full regression.
 - A read-only `verify-scan-attestation` CLI is now available. It accepts the exact manifest, detached sidecar, one or more independently provisioned raw/PEM Ed25519 public-key files, and an optional expected snapshot ID; it refuses to overwrite an existing report. Four CLI regression tests cover trusted/untrusted keys, overwrite refusal, and symlink rejection.
-- There is not yet scanner auto-signing, trust-store persistence/enrollment/revocation, OS-backed private-key custody, or integration into `verify-evidence-bindings`.
+- `verify-evidence-bindings` now accepts `snapshot_attestation_path` on SOURCE_CODE entries and independently supplied `--trusted-public-key` values. It reports attestation status separately from byte/manifest binding, checks the signed manifest path against the catalog path, supports optional `expected_snapshot_id` policy, and preserves one provenance record per source evidence reference. Legacy evidence without a sidecar remains compatible and is explicitly `ATTESTATION_NOT_PROVIDED`.
 
 ### 8.2 Remaining implementation gate
 
 Before production use, define explicit key enrollment/storage UX and integrate signing as a deliberate operation. The caller must provision trusted public keys independently of the evidence directory. Do not add an implicit machine key or trust-on-first-use. A trusted signature still does not establish trusted time, scanner integrity, scan completeness, or semantic truth.
 
-S2.27-C is **CORE + READ-ONLY VERIFICATION CLI IMPLEMENTED / SCANNER AND EVIDENCE-LEDGER INTEGRATION PENDING**. S2.27-B remains integrity cross-binding, not authenticated provenance.
+S2.27-C is **CORE + READ-ONLY CLIs + EVIDENCE-LEDGER INTEGRATION IMPLEMENTED / SCANNER AUTO-SIGNING AND KEY CUSTODY PENDING**. S2.27-B remains integrity cross-binding, not authenticated provenance. `truth_status` remains `NOT_ESTABLISHED`.
