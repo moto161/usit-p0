@@ -33,6 +33,7 @@ from typing import Any
 from . import safety
 from .safeio import open_no_follow
 from .database_access import extract_database_accesses
+from .permission_evidence import extract_authorization_evidence
 
 SCHEMA_VERSION = "usit-business-semantics-v1"
 
@@ -648,6 +649,7 @@ class BusinessSemanticsAdapter:
                 code_blob_by_file[self._rel(cf)] = data["text"]
         all_code = "\n".join(code_blob_by_file.values())
         database_accesses = extract_database_accesses(code_blob_by_file)
+        authorization_checks = extract_authorization_evidence(code_blob_by_file)
 
         # (3) PRD features marked ✅ DONE whose backing permission field is never
         #     referenced in code.  This is the strongest "documented-but-fake"
@@ -723,7 +725,8 @@ class BusinessSemanticsAdapter:
             "endpoint_count": len(endpoints),
             "endpoints": [
                 {"method": ep.method, "path": ep.path, "code_auth": ep.code_auth,
-                 "source": ep.source, "confidence": ep.confidence,
+                 "authorization_status": "DETECTED" if ep.code_auth else "NOT_DETECTED_STATIC_SCAN",
+                 "source": ep.source, "line": ep.line, "confidence": ep.confidence,
                  "handler_reference": ep.handler_reference}
                 for ep in endpoints
             ],
@@ -732,6 +735,8 @@ class BusinessSemanticsAdapter:
                 {"kind": d.kind, "message": d.message, "evidence": d.evidence, "confidence": d.confidence}
                 for d in discrepancies
             ],
+            "authorization_check_count": len(authorization_checks),
+            "authorization_checks": authorization_checks,
             "database_access_count": len(database_accesses),
             "database_accesses": database_accesses,
             "field_gap_count": len(field_gaps),
