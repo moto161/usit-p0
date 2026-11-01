@@ -645,6 +645,7 @@ The optional provenance layer is implemented in `usit.scan_attestation` using th
 - `verify-evidence-bindings` now accepts optional `snapshot_attestation_path` on `SOURCE_CODE` entries and repeatable `--trusted-public-key` arguments. The sidecar's signed manifest path must match `snapshot_manifest_path`; an optional catalog `expected_snapshot_id` enforces caller policy.
 - Evidence reports keep `snapshot_binding_status` separate from `attestation_status`; claim summaries include `snapshot_provenance_status` and a per-source `snapshot_provenance` list so multiple manifests are never collapsed into one identity.
 - Legacy entries without sidecars remain compatible and report `ATTESTATION_NOT_PROVIDED`. A valid signature without an independently supplied key remains `ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY`; it is not trusted.
+- `verify-evidence-bindings` exits 0 only when artifact bindings resolve and any declared scan-manifest/attestation checks are acceptable. Legacy entries without a manifest or sidecar remain compatible; a declared but stale manifest, invalid/untrusted sidecar, or failed snapshot policy returns exit 2. Inspect the JSON report for the separate binding, snapshot, and attestation statuses.
 - Scanner auto-signing, trust-store persistence/enrollment/revocation, OS-backed private-key custody, and automated key lifecycle remain pending.
 - Private keys must be kept outside the project and evidence artifacts. Tests use ephemeral keys only.
 
