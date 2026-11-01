@@ -64,7 +64,7 @@ def project_business_graph(graph: Mapping[str, Any],
         if isinstance(path, str) and path:
             file_ids[path] = node["id"]
 
-    counts = {"features": 0, "entities": 0, "endpoints": 0}
+    linked_counts = {"features": 0, "entities": 0, "endpoints": 0}
     linked = 0
     unlinked: list[dict[str, str]] = []
     for kind in _ALLOWED_BUSINESS:
@@ -112,7 +112,7 @@ def project_business_graph(graph: Mapping[str, Any],
             if node_id not in existing_ids:
                 node = {
                     "id": node_id, "type": "candidate", "label": label,
-                    "business_kind": kind[:-1] if kind.endswith("s") else kind,
+                    "business_kind": {"features": "feature", "entities": "entity", "endpoints": "endpoint"}[kind],
                     "business_details": details,
                     "evidence": {"path": path, **({"line": line} if line else {}),
                                  "confidence": raw.get("confidence") or "UNKNOWN"},
@@ -131,14 +131,14 @@ def project_business_graph(graph: Mapping[str, Any],
                     "verification_status": "NOT_VERIFIED",
                 })
                 linked += 1
-            counts[kind] += 1
+            linked_counts[kind] += 1
 
     result["nodes"] = nodes
     result["edges"] = edges
     result["business_understanding"] = {
         "schema_version": _SCHEMA,
         "status": "PARTIAL_EVIDENCE_LINKS",
-        "record_counts": counts,
+        "linked_record_counts": linked_counts,
         "linked_records": linked,
         "unlinked_records": unlinked,
         "limitations": [
