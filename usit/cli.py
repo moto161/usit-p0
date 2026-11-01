@@ -282,7 +282,7 @@ def main(argv=None):
             if matrix_pair[0] is not None: hashes["evidence_matrix_sha256"]=hashlib.sha256(matrix_pair[0]).hexdigest()
             result=build_verification_gap_backlog(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],hashes)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","business_function_count","gap_count","gap_kind_counts","priority_counts")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
