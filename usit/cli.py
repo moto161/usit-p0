@@ -220,6 +220,7 @@ def main(argv=None):
     ga.add_argument('--graph',required=True,help='business_knowledge_graph.json')
     ga.add_argument('--test-plan',help='Optional business_test_plan.json')
     ga.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
+    ga.add_argument('--traceability',help='Optional trace-business output JSON; must be bound to the exact graph bytes')
     ga.add_argument('--out',required=True,help='New JSON gap backlog path; existing files are never overwritten')
     qa=sub.add_parser('assess-quality',help='Summarize multidimensional project quality from evidence artifacts; no aggregate score')
     qa.add_argument('--semantics',required=True,help='business_semantics.json')
@@ -584,6 +585,7 @@ def main(argv=None):
             graph_bytes,graph_doc=read_gap_json(a.graph,50*1024*1024)
             plan_pair=read_gap_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
             matrix_pair=read_gap_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
+            trace_pair=read_gap_json(a.traceability,50*1024*1024) if a.traceability else (None,None)
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
@@ -592,7 +594,10 @@ def main(argv=None):
                     "business_graph_sha256":hashlib.sha256(graph_bytes).hexdigest()}
             if plan_pair[0] is not None: hashes["test_plan_sha256"]=hashlib.sha256(plan_pair[0]).hexdigest()
             if matrix_pair[0] is not None: hashes["evidence_matrix_sha256"]=hashlib.sha256(matrix_pair[0]).hexdigest()
-            result=build_verification_gap_backlog(sem_doc,graph_doc,plan_pair[1],matrix_pair[1],hashes)
+            if trace_pair[0] is not None: hashes["traceability_matrix_sha256"]=hashlib.sha256(trace_pair[0]).hexdigest()
+            result=build_verification_gap_backlog(
+                sem_doc,graph_doc,plan_pair[1],matrix_pair[1],hashes,trace_pair[1]
+            )
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","business_function_count","gap_count","gap_kind_counts","priority_counts")}
