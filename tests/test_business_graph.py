@@ -418,7 +418,7 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         source = graph()
         result = project_business_graph(source, {"features": [{"name": "Photo gallery", "module": "photos",
             "source": "requirements.md", "line": 4}], "endpoints": [{
-            "method": "GET", "path": "/photos", "source": "server/routes.js:3", "line": 3,
+            "method": "GET", "path": "/photos", "source": "server/routes/photos.js:3", "line": 3,
             "handler_reference": "listPhotos"}]})
         understanding = result["business_understanding"]
         self.assertEqual(understanding["business_function_view_count"], 1)
