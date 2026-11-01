@@ -69,6 +69,13 @@ class BusinessTestCliTests(unittest.TestCase):
             self.assertTrue(plan_path.is_file())
             business_graph_path = output / "business_knowledge_graph.json"
             self.assertTrue(business_graph_path.is_file())
+            security_path = output / "security_test_candidates.json"
+            self.assertTrue(security_path.is_file())
+            security_plan = json.loads(security_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["security_test_candidate_count"], security_plan["candidate_count"])
+            self.assertGreaterEqual(security_plan["candidate_count"], 1)
+            self.assertTrue(all(item["execution_status"] == "NOT_EXECUTED"
+                                for item in security_plan["candidates"]))
             business_graph = json.loads(business_graph_path.read_text(encoding="utf-8"))
             self.assertEqual(business_graph["business_understanding"]["linked_records"], 2)
             self.assertEqual(len(business_graph["business_understanding"]["unlinked_records"]), 0)
