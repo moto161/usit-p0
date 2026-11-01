@@ -22,6 +22,7 @@ from .business_traceability import build_business_traceability
 from .traceability_template import create_feature_mapping_template
 from .business_traceability_report import render_business_traceability_markdown
 from .runtime_evidence import validate_runtime_evidence_files
+from .android_event_adapter import adapt_android_jsonl_file
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -240,6 +241,12 @@ def main(argv=None):
     re.add_argument('--events',required=True,help='Existing usit-runtime-evidence-v1 JSON event file')
     re.add_argument('--graph',required=True,help='Exact business_knowledge_graph.json used by the event capture session')
     re.add_argument('--out',required=True,help='New validation report path; existing files are never overwritten')
+    aa=sub.add_parser('adapt-android-events',help='Convert a privacy-minimised Android instrumentation JSONL export into USIT runtime evidence; offline only')
+    aa.add_argument('--input',required=True,help='Structured Android event export containing USIT_ANDROID_EVENT records')
+    aa.add_argument('--graph',required=True,help='Business graph used by the instrumentation session')
+    aa.add_argument('--session-id',required=True,help='Opaque session identifier')
+    aa.add_argument('--captured-at',required=True,help='Session capture timestamp with timezone')
+    aa.add_argument('--out',required=True,help='New usit-runtime-evidence-v1 JSON path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
         if a.cmd=='selftest': return selftest()
@@ -437,6 +444,17 @@ def main(argv=None):
             summary={key:result[key] for key in ("schema_version","business_function_count","gap_count","gap_kind_counts","priority_counts")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
+            return 0
+        if a.cmd=='adapt-android-events':
+            output=Path(a.out).expanduser()
+            if output.is_symlink(): raise ValueError("Android adapter output must not be a symbolic link")
+            output=output.resolve()
+            if output.exists(): raise ValueError("Android adapter output already exists; choose a new path to preserve prior evidence")
+            result=adapt_android_jsonl_file(a.input,a.graph,a.session_id,a.captured_at)
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            print(json.dumps({"schema_version":result["schema_version"],"event_count":len(result["events"]),
+                "session_id":result["session"]["session_id"],"platform":"ANDROID","result_path":str(output)},ensure_ascii=False,indent=2))
             return 0
         if a.cmd=='validate-runtime-evidence':
             output=Path(a.out).expanduser()
