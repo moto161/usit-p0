@@ -56,6 +56,19 @@ class SecurityTestPlannerTests(unittest.TestCase):
         self.assertTrue(all(item["design_status"] == "CANDIDATE_NEEDS_REQUIREMENTS"
                             for item in result["candidates"]))
 
+    def test_security_candidates_share_structured_actions_and_evidence_contract(self):
+        result = plan_security_tests({"nodes": [endpoint(guards=["adminRequired"])]})
+        self.assertTrue(result["candidates"])
+        for candidate in result["candidates"]:
+            self.assertEqual(candidate["expected_results_status"], "OWNER_CONFIRMATION_REQUIRED")
+            self.assertEqual(len(candidate["actions"]), len(candidate["steps"]))
+            self.assertTrue(all(action["action"] and action["expected_result"]
+                                and action["evidence_to_collect"] for action in candidate["actions"]))
+            evidence_types = {item["evidence_type"] for item in candidate["evidence_requirements"]}
+            self.assertTrue({"RUNTIME_TEST_RESULT", "AUTHORIZATION_DECISION", "BUSINESS_ORACLE"}
+                            .issubset(evidence_types))
+            self.assertEqual(candidate["execution_status"], "NOT_EXECUTED")
+
     def test_missing_auth_evidence_is_not_called_a_vulnerability(self):
         result = plan_security_tests({"nodes": [endpoint()]})
         auth = next(item for item in result["candidates"]
