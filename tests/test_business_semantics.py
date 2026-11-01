@@ -91,6 +91,25 @@ class EntityExtractionTests(unittest.TestCase):
         self.assertEqual(result["entity_count"], 0)
 
 
+class DatabaseAccessSemanticsTests(unittest.TestCase):
+    def test_analyze_emits_function_line_database_access_candidates(self):
+        p = SyntheticProject(self)
+        p.route("server/repos/photo_repo.py", (
+            "def load_photos(cursor):\\n"
+            '    cursor.execute("SELECT id, owner_id FROM photos WHERE id = 1")\\n'
+            "    cursor.execute(sql)\\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["database_access_count"], 2)
+        literal, dynamic = result["database_accesses"]
+        self.assertEqual((literal["source"], literal["line"]), ("server/repos/photo_repo.py", 2))
+        self.assertEqual(literal["operation"], "SELECT")
+        self.assertEqual(literal["tables"], ["photos"])
+        self.assertEqual(literal["columns"], ["id", "owner_id"])
+        self.assertEqual(dynamic["parse_status"], "UNKNOWN")
+        self.assertEqual(dynamic["tables"], [])
+
+
 class EndpointAuthTests(unittest.TestCase):
     def test_module_level_router_use_applies_admin_auth(self):
         p = SyntheticProject(self)
