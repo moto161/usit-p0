@@ -129,9 +129,11 @@ def build_business_traceability(
         if not isinstance(candidate, dict):
             raise ValueError("security test plan contains a malformed candidate")
         function_id = candidate.get("business_function_id")
-        if isinstance(function_id, str) and function_id:
+        if isinstance(function_id, str) and function_id and function_id in functions:
             candidates_by_function.setdefault(function_id, []).append(candidate)
         elif candidate.get("test_id") is not None:
+            # A non-empty but unknown function ID is not a valid linkage.
+            # Preserve the candidate as unlinked instead of silently dropping it.
             unlinked_security_candidate_ids.append(str(candidate.get("test_id")))
 
     rows = evidence_matrix.get("business_function_evidence", []) if evidence_matrix else []
