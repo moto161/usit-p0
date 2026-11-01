@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .ai_claim_review import load_claim_ledger
@@ -23,13 +23,13 @@ def _artifact_path(root: Path, relative: Any) -> Path:
         raise ValueError("artifact_path must be a non-empty relative POSIX path")
     raw_parts = relative.split("/")
     pure = PurePosixPath(relative)
-    if pure.is_absolute() or any(part in {"", ".", ".."} for part in raw_parts):
+    if pure.is_absolute() or PureWindowsPath(relative).drive or any(part in {"", ".", ".."} for part in raw_parts):
         raise ValueError("artifact_path must not be absolute or contain traversal")
     candidate = root
     for part in pure.parts:
         candidate = candidate / part
         try:
-            mode = candidate.lstat().st_mode
+            candidate.lstat()
         except FileNotFoundError:
             raise
         if candidate.is_symlink():
