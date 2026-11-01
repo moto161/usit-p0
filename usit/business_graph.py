@@ -176,7 +176,7 @@ def project_business_graph(graph: Mapping[str, Any],
                 handler_ref = handler_ref.strip()
                 simple_identifier = re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", handler_ref)
                 simple_member = re.fullmatch(
-                    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)+",
+                    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+",
                     handler_ref,
                 )
                 if not simple_identifier and not simple_member:
