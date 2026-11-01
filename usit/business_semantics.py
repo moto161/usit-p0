@@ -54,6 +54,50 @@ _ROLE_ADMIN = re.compile(r"role\s*[!=]==?\s*['\"]admin['\"]")
 _SECRET_CHECK = re.compile(r"\bis_secret\s*[!=]==?\s*1\b")
 _ONLY_SELF_CHECK = re.compile(r"\bis_only_self\s*[!=]==?\s*1\b")
 
+def _route_handler_reference(line: str, start: int) -> str:
+    """Extract a simple named final callback from a single-line route call."""
+    tail = line[start:].lstrip()
+    if not tail.startswith(","):
+        return ""
+    tail = tail[1:]
+    args: list[str] = []
+    token: list[str] = []
+    depth = 0
+    quote = ""
+    escaped = False
+    for char in tail:
+        if quote:
+            token.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            token.append(char)
+        elif char in "([{":
+            depth += 1
+            token.append(char)
+        elif char in ")]}":
+            if char == ")" and depth == 0:
+                args.append("".join(token).strip())
+                break
+            depth = max(0, depth - 1)
+            token.append(char)
+        elif char == "," and depth == 0:
+            args.append("".join(token).strip())
+            token = []
+        else:
+            token.append(char)
+    if not args:
+        return ""
+    candidate = args[-1].strip()
+    return candidate if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", candidate) else ""
+
+
 # Markdown table row: `| a | b | c |`.
 _MD_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
 _ALIGN_CELL = re.compile(r"^:?-{2,}:?$")
@@ -153,6 +197,7 @@ class Endpoint:
     source: str = ""
     line: int = 0
     confidence: str = CONF_UNKNOWN
+    handler_reference: str = ""
 
 
 @dataclass
@@ -459,6 +504,7 @@ class BusinessSemanticsAdapter:
             if not m:
                 continue
             method, path = m.group(1).upper(), m.group(2)
+            handler_reference = _route_handler_reference(line, m.end())
             # Auth signal: the route's own line first (most specific), then the
             # file-level router.use default.
             auth = ""
@@ -472,6 +518,7 @@ class BusinessSemanticsAdapter:
                 method=method, path=path, code_auth=auth,
                 source=f"{self._rel(route_path)}:{i}", line=i,
                 confidence=CONF_VERIFIED if auth else CONF_INFERRED,
+                handler_reference=handler_reference,
             ))
         return out
 
@@ -674,7 +721,8 @@ class BusinessSemanticsAdapter:
             "endpoint_count": len(endpoints),
             "endpoints": [
                 {"method": ep.method, "path": ep.path, "code_auth": ep.code_auth,
-                 "source": ep.source, "confidence": ep.confidence}
+                 "source": ep.source, "confidence": ep.confidence,
+                 "handler_reference": ep.handler_reference}
                 for ep in endpoints
             ],
             "discrepancy_count": len(discrepancies),
