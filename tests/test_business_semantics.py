@@ -288,14 +288,15 @@ class ResourceSafetyTests(unittest.TestCase):
         p = SyntheticProject(self)
         outside = p.root.parent / (p.root.name + "-outside-dir")
         outside.mkdir()
+        self.addCleanup(lambda: outside.rmdir())
         (outside / "secret.js").write_text("const secret = true;\\n", encoding="utf-8")
         self.addCleanup(lambda: (outside / "secret.js").unlink(missing_ok=True))
-        self.addCleanup(lambda: outside.rmdir())
         link = p.root / "external"
         try:
             link.symlink_to(outside, target_is_directory=True)
         except (OSError, NotImplementedError, ValueError):
             self.skipTest("OS denied directory symlink creation")
+        self.addCleanup(lambda: link.unlink(missing_ok=True))
         adapter = BusinessSemanticsAdapter(p.root)
         with self.assertRaises(SemanticsBlocked) as blocked:
             adapter._project_files()
