@@ -863,7 +863,7 @@ def project_business_graph(graph: Mapping[str, Any],
         details = endpoint_node.get("business_details")
         details = details if isinstance(details, Mapping) else {}
         method = str(details.get("method") or "").upper()
-        path = str(details.get("path") or "")
+        path = str(details.get("endpoint") or details.get("path") or "")
         if method and path:
             endpoint_by_contract.setdefault((method, path), []).append(endpoint_node)
     api_endpoint_links = []
