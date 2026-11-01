@@ -442,7 +442,7 @@ def main(argv=None):
             if output.exists(): raise ValueError("runtime validation output already exists; choose a new path to preserve prior evidence")
             result=validate_runtime_evidence_files(a.events,a.graph)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","assessment_status","event_count","correlation_count","business_function_observation_count","evidence_conflict_count")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
