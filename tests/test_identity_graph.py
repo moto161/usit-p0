@@ -68,6 +68,13 @@ class IdentityGraphProjectionTests(unittest.TestCase):
                          "direct_authenticated_identity_to_sql_owner_binding")
         self.assertEqual(projected["business_understanding"]["identity_evidence_records"], 2)
         self.assertEqual(projected["business_understanding"]["identity_evidence_unlinked"], 0)
+        self.assertEqual(projected["business_understanding"]["endpoint_execution_path_count"], 1)
+        flow = projected["business_understanding"]["endpoint_execution_paths"][0]
+        self.assertEqual(flow["handler"]["resolution_status"], "RESOLVED")
+        self.assertEqual(flow["stage_status"]["calls"], "PARTIAL")
+        self.assertEqual(flow["stage_status"]["database"], "LINKED")
+        self.assertEqual(flow["stage_status"]["identity_resource"], "DETECTED")
+        self.assertEqual(flow["verification_status"], "NOT_VERIFIED")
 
 
 if __name__ == "__main__":
