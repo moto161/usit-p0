@@ -44,6 +44,8 @@ def build_business_traceability(
         raise ValueError("security test plan must use usit-security-test-candidates-v1")
     if security_test_plan is not None and not isinstance(security_test_plan.get("candidates", []), list):
         raise ValueError("security test plan candidates must be a list")
+    if security_test_plan is not None and security_test_plan.get("source_business_graph_sha256") != graph_hash:
+        raise ValueError("security test plan source_business_graph_sha256 does not match the supplied graph bytes")
     if evidence_matrix is not None and (not isinstance(evidence_matrix, dict) or evidence_matrix.get("schema_version") != "usit-business-evidence-verification-v1"):
         raise ValueError("evidence matrix must use usit-business-evidence-verification-v1")
     if evidence_matrix is not None and evidence_matrix.get("business_graph_sha256") not in {None, graph_hash}:
