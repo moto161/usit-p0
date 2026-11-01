@@ -782,14 +782,13 @@ function main(input) {
           calls.push(call);
           if (ts.isCallExpression(node)) {
             const calleeText = node.expression.getText(sourceFile);
-            const methodMatch = /(?:^|\\.)((?:get|post|put|patch|delete|head|options))$/i.exec(calleeText);
             const isFetch = ts.isIdentifier(node.expression) && node.expression.text === "fetch";
             const isAxios = /^(?:axios|http|api|client)\\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText);
-            if (isFetch || isAxios || methodMatch) {
+            if (isFetch || isAxios) {
               const args = node.arguments || [];
               const urlArg = args[0];
               const literalUrl = urlArg && (ts.isStringLiteralLike(urlArg) || ts.isNoSubstitutionTemplateLiteral(urlArg)) ? urlArg.text : null;
-              let httpMethod = isFetch ? "GET" : (methodMatch ? methodMatch[1].toUpperCase() : null);
+              let httpMethod = isFetch ? "GET" : calleeText.split(".").pop().toUpperCase();
               if (isFetch && args[1] && ts.isObjectLiteralExpression(args[1])) {
                 for (const property of args[1].properties) {
                   if (ts.isPropertyAssignment(property) && property.name && property.name.getText(sourceFile).replace(/["']/g, "") === "method"
