@@ -166,3 +166,10 @@ TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调
 ## S2.13-C — 跨前后端业务链测试候选
 
 对唯一精确匹配的 UI 事件 → 命名 Handler → 有界已解析调用链 → HTTP 客户端调用 → 后端 method/path endpoint，进一步关联既有 endpoint execution path（后端 Handler、调用链、数据库访问、授权和身份/资源证据），由业务测试规划器生成 `frontend_backend_flow` 候选。只有 EXACT_MATCH 且 endpoint execution path 唯一时才生成；动态 URL、未匹配或歧义链不生成此类候选。测试步骤覆盖真实页面触发、网络请求、后端执行、数据副作用、授权/资源边界和 UI 状态核对，但全部保持 CANDIDATE_NEEDS_REQUIREMENTS / NOT_EXECUTED。该候选是测试设计线索，不代表运行时功能已验证。
+
+
+## S2.14 — 业务功能视图与测试覆盖关联
+
+新增 endpoint-centred `business_function_views`，将可证据关联的前端入口、后端 Handler/调用链、数据库访问、已文档化实体关联、授权及身份/资源线索汇总为可审计功能切片。PRD feature 与 endpoint 没有显式关系证据时，标记 `NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION`，不按名称或模块猜测。
+
+测试规划器将已生成的 `frontend_backend_flow` 候选关联到对应功能视图，分别报告测试设计关联与执行覆盖：`TEST_DESIGN_CANDIDATE_LINKED` 不代表测试执行，`test_execution_coverage` 固定为 `NOT_MEASURED`。尚未接入真实测试运行结果、覆盖率报告或需求追踪矩阵。
