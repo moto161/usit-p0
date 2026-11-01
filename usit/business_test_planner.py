@@ -171,10 +171,10 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
                 if ref:
                     refs.append(ref)
             for key, kind in (("call_chain", "call_chain"), ("database_accesses", "database_access"),
-                              ("authorization", "authorization"), ("identity_evidence", "identity_resource")):
+                              ("authorization", "authorization"), ("identity_resource_flow", "identity_resource")):
                 values = flow.get(key)
                 if key == "authorization" and isinstance(values, Mapping):
-                    values = values.get("route_middleware", []) + values.get("reachable_function_checks", [])
+                    values = values.get("evidence", [])
                 if not isinstance(values, list):
                     continue
                 for item in values:
