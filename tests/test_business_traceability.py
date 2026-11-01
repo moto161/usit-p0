@@ -46,7 +46,8 @@ class BusinessTraceabilityTests(unittest.TestCase):
             "business_function_evidence": [{"business_function_id": "bf-list",
                 "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL"}]}
         result = build_business_traceability(self.semantics, self.graph, self.mapping, plan, evidence, self.hashes)
-        first, second = result["rows"]
+        first = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        second = next(row for row in result["rows"] if row["feature_name"] == "删除照片")
         self.assertEqual(first["business_function_id"], "bf-list")
         self.assertEqual(first["traceability_status"], "TRACEABLE_WITH_RUNTIME_EVIDENCE")
         self.assertEqual(first["stage_status"]["business_function_to_frontend_entrypoint"], "LINKED")
@@ -90,7 +91,8 @@ class BusinessTraceabilityTests(unittest.TestCase):
         plan = {"schema_version": "usit-business-test-plan-v1", "candidates": [
             {"test_id": "test-unknown", "business_function_id": "missing-function"}]}
         result = build_business_traceability(self.semantics, self.graph, mapping, plan, input_hashes=self.hashes)
-        self.assertEqual(result["rows"][0]["traceability_status"], "MAPPING_TARGET_NOT_FOUND_IN_GRAPH")
+        mapped_row = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(mapped_row["traceability_status"], "MAPPING_TARGET_NOT_FOUND_IN_GRAPH")
         self.assertEqual(result["unlinked_test_design_function_ids"], ["missing-function"])
 
     def test_rejects_duplicate_feature_identity_and_duplicate_mapping(self):
@@ -136,7 +138,8 @@ class BusinessTraceabilityTests(unittest.TestCase):
                 "test_execution_status": "MAYBE", "code_coverage_status": "COVERED"}]}
         result = build_business_traceability(self.semantics, self.graph, self.mapping,
             evidence_matrix=evidence, input_hashes=self.hashes)
-        self.assertEqual(result["rows"][0]["stage_status"]["test_execution"], "INVALID")
+        mapped_row = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(mapped_row["stage_status"]["test_execution"], "INVALID")
         self.assertEqual(result["invalid_runtime_status_function_ids"], ["bf-list"])
 
     def test_rejects_invalid_runtime_evidence_shape(self):
