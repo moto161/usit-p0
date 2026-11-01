@@ -20,6 +20,7 @@ from .project_quality_assessment import assess_project_quality
 from .project_quality_report import render_project_quality_markdown
 from .business_traceability import build_business_traceability
 from .traceability_template import create_feature_mapping_template
+from .business_traceability_report import render_business_traceability_markdown
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -228,6 +229,7 @@ def main(argv=None):
     bt.add_argument('--test-plan',help='Optional business_test_plan.json')
     bt.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
     bt.add_argument('--out',required=True,help='New traceability matrix JSON path; existing files are never overwritten')
+    bt.add_argument('--out-md',help='Optional new Markdown traceability report path; existing files are never overwritten')
     tt=sub.add_parser('init-traceability-template',help='Create an unapproved feature-to-function review template bound to the exact graph hash')
     tt.add_argument('--semantics',required=True,help='business_semantics.json')
     tt.add_argument('--graph',required=True,help='business_knowledge_graph.json')
@@ -328,6 +330,13 @@ def main(argv=None):
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
             if output.exists(): raise ValueError("traceability output already exists; choose a new path to preserve prior evidence")
+            markdown_output=None
+            if a.out_md:
+                markdown_output=Path(a.out_md).expanduser()
+                if markdown_output.is_symlink(): raise ValueError("Markdown output must not be a symbolic link")
+                markdown_output=markdown_output.resolve()
+                if markdown_output==output: raise ValueError("JSON and Markdown output paths must be distinct")
+                if markdown_output.exists(): raise ValueError("Markdown traceability output already exists; choose a new path")
             hashes={"business_semantics_sha256":hashlib.sha256(sem_bytes).hexdigest(),
                     "business_graph_sha256":hashlib.sha256(graph_bytes).hexdigest(),
                     "mapping_manifest_sha256":hashlib.sha256(mapping_bytes).hexdigest()}
@@ -450,6 +459,9 @@ def main(argv=None):
             result=ingest_coverage_results(a.coverage,a.mapping,a.graph,a.format)
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding="utf-8")
+            if markdown_output is not None:
+                markdown_output.parent.mkdir(parents=True,exist_ok=True)
+                markdown_output.write_text(render_business_traceability_markdown(result),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","source_format","business_function_count","coverage_status_counts")}
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
