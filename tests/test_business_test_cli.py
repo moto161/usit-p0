@@ -34,6 +34,19 @@ class BusinessTestCliTests(unittest.TestCase):
                 p.relative_to(project).as_posix(): p.read_bytes()
                 for p in project.rglob("*") if p.is_file()
             }
+            graph_input = base / "scan" / "knowledge_graph.json"
+            graph_input.parent.mkdir(parents=True)
+            graph_input.write_text(json.dumps({
+                "schema_version": "usit-graph-v1",
+                "nodes": [
+                    {"id": "file:docs/PRD.md", "type": "file", "label": "docs/PRD.md",
+                     "evidence": {"path": "docs/PRD.md"}},
+                    {"id": "file:server/routes/photos.js", "type": "file",
+                     "label": "server/routes/photos.js",
+                     "evidence": {"path": "server/routes/photos.js"}},
+                ],
+                "edges": [],
+            }), encoding="utf-8")
             auth_path = base / "authorization.json"
             auth = authorization_record(project, output)
             auth_path.write_text(json.dumps(auth), encoding="utf-8")
@@ -44,6 +57,7 @@ class BusinessTestCliTests(unittest.TestCase):
                     "plan-business-tests", str(project),
                     "--out", str(output),
                     "--authorization-file", str(auth_path),
+                    "--graph", str(graph_input),
                 ])
 
             self.assertEqual(exit_code, 0)
@@ -53,6 +67,17 @@ class BusinessTestCliTests(unittest.TestCase):
             plan_path = output / "business_test_plan.json"
             self.assertTrue(semantics_path.is_file())
             self.assertTrue(plan_path.is_file())
+            business_graph_path = output / "business_knowledge_graph.json"
+            self.assertTrue(business_graph_path.is_file())
+            business_graph = json.loads(business_graph_path.read_text(encoding="utf-8"))
+            self.assertEqual(business_graph["business_understanding"]["linked_records"], 2)
+            self.assertEqual(len(business_graph["business_understanding"]["unlinked_records"]), 0)
+            self.assertTrue(all(
+                edge.get("verified") is False
+                for edge in business_graph["edges"]
+                if edge.get("method") == "business-semantics-source-link"
+            ))
+            self.assertEqual(summary["business_graph_linked_records"], 2)
             semantics = json.loads(semantics_path.read_text(encoding="utf-8"))
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             self.assertGreaterEqual(semantics["feature_count"], 1)
