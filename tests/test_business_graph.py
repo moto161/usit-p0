@@ -148,6 +148,37 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(len(endpoint["handler_association"]["candidate_targets"]), 2)
         self.assertFalse(any(e.get("method") == "route-handler-static-symbol-match" for e in result["edges"]))
 
+    def test_member_handler_resolves_only_through_exact_compiler_binding(self):
+        source = graph()
+        source["nodes"].append({
+            "id": "symbol:server/controllers/photos.js#uploadPhoto:12",
+            "type": "function", "label": "uploadPhoto",
+            "evidence": {"path": "server/controllers/photos.js", "line": 12},
+        })
+        source["edges"].append({
+            "source": "file:server/routes/photos.js",
+            "target": "symbol:server/controllers/photos.js#uploadPhoto:12",
+            "type": "references", "method": "typescript-route-handler-binding",
+            "resolution_status": "RESOLVED", "resolved": True,
+            "evidence": {"path": "server/routes/photos.js", "line": 20,
+                         "handler_reference": "photos.uploadPhoto"},
+            "evidence_chain": [
+                {"kind": "route_registration", "file": "server/routes/photos.js", "line": 20},
+                {"kind": "handler_definition", "file": "server/controllers/photos.js", "line": 12},
+            ],
+        })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "photos.uploadPhoto",
+        }]})
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "RESOLVED")
+        self.assertEqual(endpoint["handler_association"]["target_symbol_id"],
+                         "symbol:server/controllers/photos.js#uploadPhoto:12")
+        self.assertTrue(any(e.get("method") == "route-handler-static-symbol-match"
+                            and e.get("target") == "symbol:server/controllers/photos.js#uploadPhoto:12"
+                            for e in result["edges"]))
+
     def test_member_handler_is_not_guessed(self):
         source = graph()
         source["nodes"].append({

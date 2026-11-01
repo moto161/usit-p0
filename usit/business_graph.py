@@ -174,15 +174,23 @@ def project_business_graph(graph: Mapping[str, Any],
                         }
                     continue
                 handler_ref = handler_ref.strip()
-                if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", handler_ref):
+                simple_identifier = re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", handler_ref)
+                simple_member = re.fullmatch(
+                    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)+",
+                    handler_ref,
+                )
+                if not simple_identifier and not simple_member:
                     handler_counts["UNKNOWN"] += 1
                     if endpoint_node is not None:
                         endpoint_node["handler_association"] = {
                             "reference": handler_ref, "resolution_status": "UNKNOWN",
-                            "reason": "COMPLEX_OR_MEMBER_HANDLER_NOT_RESOLVED",
+                            "reason": "COMPLEX_OR_DYNAMIC_HANDLER_NOT_RESOLVED",
                         }
                     continue
-                matches = symbols_by_file_name.get((path, handler_ref), [])
+                # Member expressions are accepted only through an exact
+                # compiler-produced route binding for this source line.
+                matches = (symbols_by_file_name.get((path, handler_ref), [])
+                           if simple_identifier else [])
                 route_line = line
                 imported_matches = [
                     edge for edge in edges
