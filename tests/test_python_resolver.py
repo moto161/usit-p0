@@ -124,15 +124,15 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
 
     def test_typescript_imported_express_handler_resolves_to_exported_symbol(self):
         (self.root / "routes.js").write_text(
-            "const router = require('express').Router();\\n"
-            "import { uploadPhoto as upload } from './controllers/photos.js';\\n"
-            "router.post('/photos', upload);\\n",
+            "const router = require('express').Router();\n"
+            "import { uploadPhoto as upload } from './controllers/photos.js';\n"
+            "router.post('/photos', upload);\n",
             encoding="utf-8",
         )
         (self.root / "controllers").mkdir(exist_ok=True)
         (self.root / "controllers" / "photos.js").write_text(
-            "export function uploadPhoto(req, res) { return savePhoto(); }\\n"
-            "function savePhoto() {}\\n",
+            "export function uploadPhoto(req, res) { return savePhoto(); }\n"
+            "function savePhoto() {}\n",
             encoding="utf-8",
         )
         out = self.root.parent / "imported-handler-output"
