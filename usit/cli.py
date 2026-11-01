@@ -26,6 +26,7 @@ from .android_event_adapter import adapt_android_jsonl_file
 from .ai_gateway import Agent2APIClient, DEFAULT_BASE_URL, DEFAULT_API_KEY_ENV
 from .ai_orchestrator import load_model_registry, run_ensemble, registry_template
 from .ai_claim_review import review_claim_ledger_file
+from .ai_evidence_binding import verify_evidence_bindings_file
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -277,8 +278,24 @@ def main(argv=None):
     acr=sub.add_parser('review-ai-claims',help='Compare explicit model claims against a reference catalog; never promotes claims to facts')
     acr.add_argument('--input',required=True,help='Structured usit-ai-claim-ledger-v1 JSON; free-text model output is not parsed automatically')
     acr.add_argument('--out',required=True,help='New review JSON path; existing files are never overwritten')
+    aev=sub.add_parser('verify-evidence-bindings',help='Verify AI evidence catalog references against exact local artifact bytes; never promotes claims to facts')
+    aev.add_argument('--input',required=True,help='Structured usit-ai-claim-ledger-v1 JSON')
+    aev.add_argument('--evidence-root',required=True,help='Directory containing the referenced local evidence artifacts')
+    aev.add_argument('--out',required=True,help='New JSON binding report path; existing files are never overwritten')
     a=parser.parse_args(argv)
     try:
+        if a.cmd=='verify-evidence-bindings':
+            result=verify_evidence_bindings_file(a.input,a.evidence_root)
+            output=Path(a.out).expanduser()
+            if output.is_symlink() or output.exists():
+                raise ValueError('evidence binding output already exists or is a symbolic link; refusing to overwrite')
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+            print(json.dumps({'result_path':str(output.resolve()),'schema':result['schema'],
+                'evidence_count':result['evidence_count'],'binding_status_counts':result['binding_status_counts'],
+                'claim_count':result['claim_count'],'claim_binding_status_counts':result['claim_binding_status_counts'],
+                'overall_truth_status':result['overall_truth_status']},ensure_ascii=False,indent=2))
+            return 0 if all(x['binding_status']=='ALL_BINDINGS_RESOLVED_NOT_AUTHENTICATED' for x in result['claims']) else 2
         if a.cmd=='review-ai-claims':
             result=review_claim_ledger_file(a.input)
             output=Path(a.out).expanduser()
