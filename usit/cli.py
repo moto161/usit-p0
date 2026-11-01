@@ -13,6 +13,7 @@ from .business_test_planner import plan_business_tests
 from .business_graph import project_business_graph
 from .security_test_planner import plan_security_tests
 from .test_result_importer import ingest_junit_results
+from .coverage_result_importer import ingest_coverage_results
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -237,12 +238,24 @@ def main(argv=None):
             return _inspect_android(a)
         if a.cmd=='plan-business-tests':
             return _plan_business_tests(a)
+        if a.cmd=='ingest-coverage':
+            output=Path(a.out).expanduser()
+            if output.is_symlink(): raise ValueError("output must not be a symbolic link")
+            output=output.resolve()
+            if output.exists(): raise ValueError("coverage output already exists; choose a new path to preserve prior evidence")
+            result=ingest_coverage_results(a.coverage,a.mapping,a.graph,a.format)
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding="utf-8")
+            summary={key:result[key] for key in ("schema_version","source_format","business_function_count","coverage_status_counts")}
+            summary["result_path"]=str(output)
+            print(json.dumps(summary,ensure_ascii=False,indent=2))
+            return 0
         if a.cmd=='ingest-test-results':
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError('output must not be a symbolic link')
             output=output.resolve()
             if output.exists(): raise ValueError('test-result output already exists; choose a new path to preserve prior evidence')
-            result=ingest_junit_results(a.junit,a.mapping,a.graph)
+            result=ingest_junit_results(a.junit,a.mapping,a.graph,a.format)
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             summary={key:result[key] for key in ('schema_version','test_case_count','test_case_status_counts','unmapped_test_case_count','business_function_count','business_function_status_counts')}
