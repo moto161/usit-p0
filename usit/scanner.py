@@ -107,7 +107,7 @@ def discover_files(root: Path, *, deadline: float | None = None, clock=time.mono
     """Bounded, deterministic discovery. Any unsafe path or budget ambiguity blocks the scan.
 
     P0.7.4: when ``identities`` is supplied it is filled with the ``(st_dev,
-    st_ino)`` identity of every accepted file, keyed by its project-relative
+    st_ino, st_ctime_ns)`` identity of every accepted file, keyed by its project-relative
     POSIX path.  A later open compares the *opened handle's* identity against
     this discovery-time identity, which is what detects a path that was swapped
     for a link (including an intermediate directory junction) after discovery.
