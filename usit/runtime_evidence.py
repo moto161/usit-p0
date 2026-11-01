@@ -75,6 +75,9 @@ def validate_runtime_evidence(
 ) -> dict[str, Any]:
     if not isinstance(document, dict) or document.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"runtime evidence must use {SCHEMA_VERSION}")
+    extra_top = set(document) - {"schema_version", "source_graph_sha256", "session", "events"}
+    if extra_top:
+        raise ValueError("runtime evidence contains unsupported top-level fields: " + ", ".join(sorted(extra_top)[:8]))
     if not isinstance(business_graph, dict) or business_graph.get("schema_version") != "usit-graph-v1":
         raise ValueError("business graph must use usit-graph-v1")
     understanding = business_graph.get("business_understanding")
@@ -93,6 +96,9 @@ def validate_runtime_evidence(
     metadata = document.get("session")
     if not isinstance(metadata, dict):
         raise ValueError("session must be an object")
+    extra_session = set(metadata) - {"session_id", "platform", "captured_at"}
+    if extra_session:
+        raise ValueError("session contains unsupported fields: " + ", ".join(sorted(extra_session)[:8]))
     session_id = metadata.get("session_id")
     platform = metadata.get("platform")
     if not isinstance(session_id, str) or not session_id.strip():
