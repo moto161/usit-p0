@@ -52,7 +52,7 @@ class RuntimeEvidenceTests(unittest.TestCase):
         self.assertEqual(result["business_function_observation_count"], 1)
         chain = result["correlations"][0]
         self.assertEqual(chain["runtime_observation_status"], "RUNTIME_OBSERVED")
-        self.assertEqual(chain["end_to_end_chain_status"], "CORRELATED_EVENTS_OBSERVED")
+        self.assertEqual(chain["correlation_status"], "PARENT_LINKED_EVENTS_OBSERVED")
         self.assertTrue(chain["has_ui_action"])
         self.assertTrue(chain["has_http_exchange"])
         self.assertTrue(chain["has_backend_span"])
@@ -91,6 +91,15 @@ class RuntimeEvidenceTests(unittest.TestCase):
         doc["events"][0]["timestamp"] = "2026-11-01T12:00:01"
         with self.assertRaisesRegex(ValueError, "include a timezone"):
             validate_runtime_evidence(doc, self.graph, self.graph_hash)
+
+    def test_parent_cycle_is_reported_even_when_timestamps_are_equal(self):
+        doc = json.loads(json.dumps(self.doc))
+        for event in doc["events"]:
+            event["timestamp"] = "2026-11-01T12:00:01+08:00"
+        doc["events"][0]["parent_event_id"] = "e4"
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        self.assertIn("PARENT_EVENT_CYCLE", {x["kind"] for x in result["evidence_conflicts"]})
+        self.assertEqual(result["assessment_status"], "EVIDENCE_CONFLICT")
 
     def test_cli_writes_validation_report_and_returns_conflict_exit_code(self):
         from usit.cli import main
