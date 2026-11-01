@@ -210,5 +210,21 @@ class AIClaimReviewTests(unittest.TestCase):
             self.assertEqual(code, 2)
 
 
+    def test_contradiction_and_conflict_without_evidence_stay_unverified(self):
+        for decision in ("CONTRADICTS_CLAIM", "CONFLICTING_EVIDENCE"):
+            ledger = json.loads(json.dumps(self.ledger))
+            ledger["reviews"] = [{
+                "claim_id": "claim-a",
+                "decision": decision,
+                "reviewed_by": "human-reviewer",
+                "reviewed_at": "2026-11-01T13:00:00+08:00",
+                "rationale": "Decision supplied without a supporting evidence reference.",
+                "evidence_refs": [],
+            }]
+            result = review_claim_ledger(ledger)
+            claim = next(row for row in result["claims"] if row["claim_id"] == "claim-a")
+            self.assertEqual(claim["review_status"], "NEEDS_MORE_EVIDENCE")
+            self.assertEqual(claim["truth_status"], "NOT_ESTABLISHED")
+
 if __name__ == "__main__":
     unittest.main()
