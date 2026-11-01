@@ -341,8 +341,11 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
         understanding = business_graph.get("business_understanding")
         if isinstance(understanding, Mapping) and isinstance(understanding.get("business_function_views", []), list):
             function_views = [item for item in understanding.get("business_function_views", []) if isinstance(item, Mapping)]
-    function_view_by_endpoint = {str(item.get("endpoint_id")): item for item in function_views
-                                 if isinstance(item.get("endpoint_id"), str)}
+    function_views_by_endpoint: dict[str, list[Mapping[str, Any]]] = {}
+    for item in function_views:
+        endpoint_id = item.get("endpoint_id")
+        if isinstance(endpoint_id, str):
+            function_views_by_endpoint.setdefault(endpoint_id, []).append(item)
 
     # S2.13-C: synthesize a reviewable test candidate only for a resolved UI → API → endpoint chain.
     frontend_chains = understanding.get("frontend_business_chains", []) if isinstance(understanding, Mapping) else []
@@ -413,7 +416,13 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
         }
         refs = [unique_refs[key] for key in sorted(unique_refs)]
         stage_status = flow.get("stage_status") if isinstance(flow.get("stage_status"), Mapping) else {}
-        function_view = function_view_by_endpoint.get(endpoint_id)
+        endpoint_function_matches = function_views_by_endpoint.get(endpoint_id, [])
+        function_view = endpoint_function_matches[0] if len(endpoint_function_matches) == 1 else None
+        if len(endpoint_function_matches) > 1:
+            warnings.append(
+                f"endpoint {endpoint_id} maps to multiple business function views; "
+                "frontend flow candidate remains unlinked"
+            )
         candidate = _candidate(
             "frontend_backend_flow", f"{chain.get('event_name') or 'UI event'} → {method} {endpoint_path}",
             f"验证前端交互是否按已确认需求正确触发并完成后端接口流程：{method} {endpoint_path}",
