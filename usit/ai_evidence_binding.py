@@ -71,9 +71,21 @@ def _verify_scan_manifest_integrity(root: Path, entry: dict[str, Any], source_pa
         return {"status": "MANIFEST_STALE", "manifest_path": manifest_path,
                 "manifest_sha256": actual_manifest_sha,
                 "detail": "Scan manifest bytes do not match the declared manifest SHA-256."}
+    def reject_duplicate_manifest_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        parsed: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in parsed:
+                raise ValueError("duplicate JSON object key")
+            parsed[key] = value
+        return parsed
+
     try:
-        manifest = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        manifest = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_manifest_keys,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("invalid JSON constant")),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return {"status": "MANIFEST_INVALID", "manifest_path": manifest_path,
                 "manifest_sha256": actual_manifest_sha,
                 "detail": "Scan manifest is not valid UTF-8 JSON."}
