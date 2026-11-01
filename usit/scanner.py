@@ -1068,10 +1068,14 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             if target:
                 extras['target_location']={'path':target['file'],'line':target['line'],'qualified_name':target.get('qualified_name')}
             caller_id=c.get('caller_symbol_id')
-            call_source=caller_id if caller_id in defined_symbol_ids else fid
-            if call_source != fid:
-                extras['caller_symbol_id']=call_source
-            edges.append(_edge(call_source,tid,'calls',ev,method=c.get('method','regex'),confidence=c.get('confidence','low'),**extras))
+            if caller_id in defined_symbol_ids:
+                extras['caller_symbol_id']=caller_id
+                caller=c.get('caller') or {}
+                extras['caller_location']={'path':f['path'],'line':caller.get('line'),'name':caller.get('name')}
+            # graph-v1 requires every relationship source to remain a file node.
+            # Preserve precise function ownership as call-edge metadata until a
+            # versioned graph schema can represent function-originating edges.
+            edges.append(_edge(fid,tid,'calls',ev,method=c.get('method','regex'),confidence=c.get('confidence','low'),**extras))
         for fc in f.get('framework_candidates',[]):
             cid='candidate:'+fc['kind']
             if not any(n['id']==cid for n in nodes): nodes.append({'id':cid,'type':'candidate','label':fc['kind'],'evidence':{'note':'框架候选关联，未验证，不视为已连通'}})
