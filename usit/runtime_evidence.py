@@ -176,22 +176,19 @@ def validate_runtime_evidence(
                     conflicts.append({"kind": "PARENT_AFTER_CHILD_TIMESTAMP", "event_id": event["event_id"], "parent_event_id": parent_id})
 
     parent_by_child = {child: parent for parent, child in parent_edges}
-    visiting: set[str] = set()
     visited: set[str] = set()
-    def visit(event_id: str) -> None:
-        if event_id in visiting:
-            conflicts.append({"kind": "PARENT_EVENT_CYCLE", "event_id": event_id})
-            return
-        if event_id in visited:
-            return
-        visiting.add(event_id)
-        parent_id = parent_by_child.get(event_id)
-        if parent_id is not None:
-            visit(parent_id)
-        visiting.remove(event_id)
-        visited.add(event_id)
-    for event_id in sorted(indexed):
-        visit(event_id)
+    for start_id in sorted(indexed):
+        path: list[str] = []
+        position: dict[str, int] = {}
+        current = start_id
+        while current in parent_by_child and current not in visited:
+            if current in position:
+                conflicts.append({"kind": "PARENT_EVENT_CYCLE", "event_id": current})
+                break
+            position[current] = len(path)
+            path.append(current)
+            current = parent_by_child[current]
+        visited.update(path)
 
     summaries = []
     for correlation_id, rows in sorted(correlations.items()):
