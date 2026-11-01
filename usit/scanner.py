@@ -966,6 +966,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             row['calls']=parsed.get('calls',[])
             row['route_handlers']=parsed.get('route_handlers',[])
             row['ui_event_bindings']=parsed.get('ui_event_bindings',[])
+            row['api_client_calls']=parsed.get('api_client_calls',[])
             row['analysis_diagnostics']=parsed.get('diagnostics',[])
             row['syntax_status']=parsed.get('syntax_status','UNKNOWN')
             row['parser']={**js_ts_capabilities[row['language']],'parser_name':parsed.get('parser_name','typescript-compiler-api'),
@@ -1079,6 +1080,24 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                     'references', {'path': f['path'], 'line': route_handler.get('line'),
                     'handler_reference': route_handler.get('handler_reference')},
                     method='typescript-route-handler-binding', confidence='low', **extras))
+        for api_call in f.get('api_client_calls', []):
+            call_id = 'api-client-call:' + f['path'] + ':' + str(api_call.get('line')) + ':' + str(api_call.get('column') or 0)
+            if not any(n['id'] == call_id for n in nodes):
+                nodes.append({'id': call_id, 'type': 'api_client_call',
+                    'label': (api_call.get('method') or 'UNKNOWN') + ' ' + (api_call.get('path') or api_call.get('url_expression') or 'dynamic URL'),
+                    'evidence': {'path': f['path'], 'line': api_call.get('line'),
+                                 'resolution_status': api_call.get('resolution_status')}})
+            source_id = api_call.get('caller_symbol_id')
+            if source_id not in all_symbol_ids:
+                source_id = fid
+            edges.append(_edge(source_id, call_id, 'references',
+                {'path': f['path'], 'line': api_call.get('line'), 'column': api_call.get('column'),
+                 'callee': api_call.get('callee'), 'url_expression': api_call.get('url_expression')},
+                method='typescript-api-client-call', confidence='medium',
+                route_method=api_call.get('method'), route_path=api_call.get('path'),
+                resolution_status=api_call.get('resolution_status'),
+                caller_symbol_id=api_call.get('caller_symbol_id'), candidate=True, verified=False,
+                verification_status='NOT_VERIFIED', confidence_level='STATIC_INFERENCE'))
         for ui_binding in f.get('ui_event_bindings', []):
             state = ui_binding.get('resolution_status', 'UNKNOWN')
             target = ui_binding.get('target') or {}
