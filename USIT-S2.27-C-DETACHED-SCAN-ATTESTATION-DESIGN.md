@@ -157,6 +157,7 @@ CI must run the focused tests on Linux and Windows where applicable, plus the ex
 - `tests/test_scan_attestation.py` adds 15 synthetic tests; CI installs the pinned provider and runs the tests on the Linux business suite and Windows full regression.
 - A read-only `verify-scan-attestation` CLI is now available. It accepts the exact manifest, detached sidecar, one or more independently provisioned raw/PEM Ed25519 public-key files, and an optional expected snapshot ID; it refuses to overwrite an existing report. Four CLI regression tests cover trusted/untrusted keys, overwrite refusal, and symlink rejection.
 - `verify-evidence-bindings` now accepts `snapshot_attestation_path` on SOURCE_CODE entries and independently supplied `--trusted-public-key` values. It reports attestation status separately from byte/manifest binding, checks the signed manifest path against the catalog path, supports optional `expected_snapshot_id` policy, and preserves one provenance record per source evidence reference. Legacy evidence without a sidecar remains compatible and is explicitly `ATTESTATION_NOT_PROVIDED`.
+- The evidence verifier rejects duplicate JSON object keys and non-standard JSON constants in scan manifests instead of accepting parser-dependent interpretations. The evidence-verification CLI also fails if any catalog evidence item fails byte/locator verification, including unreferenced catalog entries; a successful claim summary cannot mask a broken catalog row.
 
 ### 8.2 Remaining implementation gate
 
