@@ -69,7 +69,6 @@ def adapt_android_jsonl(
         if isinstance(row, dict) and isinstance(row.get("business_function_id"), str)
     }
     events = []
-    ignored_lines = 0
     seen_ids = set()
     try:
         text = raw.decode("utf-8")
@@ -77,7 +76,6 @@ def adapt_android_jsonl(
         raise ValueError("Android event input must be UTF-8") from exc
     for line_number, line in enumerate(text.splitlines(), 1):
         if not line.startswith(PREFIX):
-            ignored_lines += 1
             continue
         payload = line[len(PREFIX):]
         try:
@@ -149,12 +147,6 @@ def adapt_android_jsonl(
         "source_graph_sha256": graph_sha256,
         "session": {"session_id": session_id, "platform": "ANDROID", "captured_at": captured_at},
         "events": events,
-        "_adapter_metadata": {
-            "adapter": "usit-android-jsonl-v1",
-            "accepted_event_count": len(events),
-            "ignored_non_event_line_count": ignored_lines,
-            "source_sha256": hashlib.sha256(raw).hexdigest(),
-        },
     }
 
 
@@ -173,5 +165,4 @@ def adapt_android_jsonl_file(
         raise ValueError("business graph exceeds size limit")
     graph = json.loads(graph_raw)
     result = adapt_android_jsonl(raw, graph, hashlib.sha256(graph_raw).hexdigest(), session_id, captured_at)
-    result["_adapter_metadata"]["source_path"] = str(Path(input_path).expanduser().resolve())
     return result
