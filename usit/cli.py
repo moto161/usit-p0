@@ -120,7 +120,6 @@ def _plan_business_tests(a) -> int:
         "endpoint_count": semantics["endpoint_count"],
         "discrepancy_count": semantics["discrepancy_count"],
         "test_candidate_count": plan["candidate_count"],
-        "execution_status": "NOT_EXECUTED",
         "business_graph_linked_records": (
             business_graph.get("business_understanding", {}).get("linked_records", 0)
             if business_graph is not None else None
