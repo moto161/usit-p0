@@ -86,8 +86,8 @@ def _plan_business_tests(a) -> int:
     if out.exists():
         raise ValueError("business test-plan output already exists; choose a new path to preserve prior evidence")
     semantics = analyze_business(project)
-    plan = plan_business_tests(semantics)
     business_graph = None
+    plan = None
     security_plan = None
     graph_path = None
     if a.graph:
@@ -104,6 +104,7 @@ def _plan_business_tests(a) -> int:
         source_graph = json.loads(graph_path.read_text(encoding="utf-8"))
         business_graph = project_business_graph(source_graph, semantics)
         security_plan = plan_security_tests(business_graph)
+    plan = plan_business_tests(semantics, business_graph)
     out.mkdir(parents=True, exist_ok=False)
     (out / "business_semantics.json").write_text(
         json.dumps(semantics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
