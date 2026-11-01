@@ -97,7 +97,7 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertIn("OWNER_CONFIRMATION_REQUIRED", markdown)
 
     def test_security_candidates_flow_into_explicitly_approved_requirement_trace(self):
-        security_plan = {"schema_version": "usit-security-test-candidates-v1", "candidate_count": 1,
+        security_plan = {"schema_version": "usit-security-test-candidates-v1", "source_business_graph_sha256": self.graph_hash, "candidate_count": 1,
             "candidates": [{
                 "test_id": "sec-cross-user-001", "business_function_id": "bf-list",
                 "category": "security_cross_user_resource_isolation", "target": "GET /api/photos",
@@ -126,8 +126,16 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertIn("验证跨用户资源隔离", markdown)
         self.assertIn("静态证据不是漏洞结论", markdown)
 
+    def test_rejects_security_candidates_from_a_stale_graph(self):
+        security_plan = {"schema_version": "usit-security-test-candidates-v1",
+            "source_business_graph_sha256": "b" * 64, "candidates": []}
+        with self.assertRaisesRegex(ValueError, "source_business_graph_sha256"):
+            build_business_traceability(self.semantics, self.graph, self.mapping,
+                security_test_plan=security_plan, input_hashes=self.hashes)
+
     def test_unlinked_security_candidate_is_reported_not_guessed(self):
         security_plan = {"schema_version": "usit-security-test-candidates-v1",
+            "source_business_graph_sha256": self.graph_hash,
             "candidates": [{"test_id": "sec-unlinked", "business_function_id": None}]}
         result = build_business_traceability(self.semantics, self.graph, self.mapping,
             security_test_plan=security_plan, input_hashes=self.hashes)
