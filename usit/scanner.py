@@ -965,6 +965,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             row['imports']=parsed.get('imports',[])
             row['calls']=parsed.get('calls',[])
             row['route_handlers']=parsed.get('route_handlers',[])
+            row['ui_event_bindings']=parsed.get('ui_event_bindings',[])
             row['analysis_diagnostics']=parsed.get('diagnostics',[])
             row['syntax_status']=parsed.get('syntax_status','UNKNOWN')
             row['parser']={**js_ts_capabilities[row['language']],'parser_name':parsed.get('parser_name','typescript-compiler-api'),
@@ -1078,6 +1079,29 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                     'references', {'path': f['path'], 'line': route_handler.get('line'),
                     'handler_reference': route_handler.get('handler_reference')},
                     method='typescript-route-handler-binding', confidence='low', **extras))
+        for ui_binding in f.get('ui_event_bindings', []):
+            state = ui_binding.get('resolution_status', 'UNKNOWN')
+            target = ui_binding.get('target') or {}
+            extras = {'resolution_status': state, 'event_name': ui_binding.get('event_name', ''),
+                'binding_expression': ui_binding.get('binding_expression'), 'candidate': True,
+                'verified': False, 'verification_status': 'NOT_VERIFIED',
+                'evidence_chain': ui_binding.get('evidence_chain', [])}
+            target_id = target.get('id') if state == 'RESOLVED' else None
+            if target_id not in all_symbol_ids:
+                target_id = 'unresolved-ui-event:' + f['path'] + ':' + str(ui_binding.get('line')) + ':' + str(ui_binding.get('event_name'))
+                if not any(n['id'] == target_id for n in nodes):
+                    nodes.append({'id': target_id, 'type': 'unresolved',
+                        'label': ui_binding.get('binding_expression') or ui_binding.get('event_name') or 'UI event',
+                        'evidence': {'path': f['path'], 'line': ui_binding.get('line'), 'resolution_status': state}})
+                extras['resolved'] = False
+                if ui_binding.get('candidate_targets'):
+                    extras['candidate_targets'] = ui_binding['candidate_targets']
+            else:
+                extras['resolved'] = True
+            edges.append(_edge(fid, target_id, 'references',
+                {'path': f['path'], 'line': ui_binding.get('line'), 'column': ui_binding.get('column'),
+                 'event_name': ui_binding.get('event_name'), 'binding_expression': ui_binding.get('binding_expression')},
+                method='typescript-jsx-event-handler-binding', confidence='high' if extras['resolved'] else 'low', **extras))
         for c in f['calls']:
             state=c.get('resolution_status','UNKNOWN')
             target=c.get('target') or {}
