@@ -168,20 +168,37 @@ def ingest_junit_results(
     for function_id, view in sorted(known_functions.items()):
         linked = mapped_cases.get(function_id, [])
         counts = Counter(item["status"] for item in linked)
-        if not linked:
-            execution_status = "NOT_EXECUTED"
-        elif counts["FAILED"]:
-            execution_status = "FAILED"
-        elif counts["SKIPPED"]:
-            execution_status = "UNKNOWN"
-        else:
-            execution_status = "PASSED"
         expected_not_seen = sorted(case_id for case_id, target in explicit_map.items()
                                    if target == function_id and case_id not in actual_ids)
+        expected_mapped_count = sum(1 for target in explicit_map.values() if target == function_id)
+        if not linked:
+            execution_status = "NOT_EXECUTED"
+            execution_status_reason = "NO_MAPPED_TEST_CASE_REPORTED"
+        elif counts["FAILED"]:
+            # An observed failure remains a failure even when other expected
+            # cases are absent; missing cases are still retained separately.
+            execution_status = "FAILED"
+            execution_status_reason = "MAPPED_TEST_FAILURE_OBSERVED"
+        elif expected_not_seen:
+            # A partial report cannot certify the whole mapped function as PASS.
+            execution_status = "UNKNOWN"
+            execution_status_reason = "MAPPED_TEST_CASES_MISSING_FROM_REPORT"
+        elif counts["SKIPPED"]:
+            execution_status = "UNKNOWN"
+            execution_status_reason = "MAPPED_TEST_CASE_SKIPPED"
+        else:
+            execution_status = "PASSED"
+            execution_status_reason = "ALL_MAPPED_TEST_CASES_PASSED"
         function_results.append({
             "business_function_id": function_id,
             "endpoint_id": view.get("endpoint_id"),
             "execution_status": execution_status,
+            "execution_status_reason": execution_status_reason,
+            "expected_mapped_test_case_count": expected_mapped_count,
+            "reported_mapped_test_case_count": len(linked),
+            "mapped_case_completeness": "INCOMPLETE" if expected_not_seen else (
+                "NO_EXPECTED_MAPPED_CASES" if expected_mapped_count == 0 else "COMPLETE"
+            ),
             "mapped_test_case_count": len(linked),
             "passed": counts["PASSED"],
             "failed": counts["FAILED"],
@@ -214,6 +231,7 @@ def ingest_junit_results(
             "功能关联完全依赖显式 mapping；不使用名称相似度或 endpoint 猜测。",
             "JUnit 测试通过不等于业务需求完整正确，也不等于代码覆盖率。",
             "没有映射测试结果的功能标记 NOT_EXECUTED；被跳过的功能标记 UNKNOWN。",
+            "映射中任一预期 testcase 未出现在报告中时，即使已报告用例全部通过，功能状态也只能是 UNKNOWN；观察到的失败仍优先报告 FAILED。",
             "JUnit XML 可接收 Android instrumentation 等兼容报告；pytest 支持 pytest-json-report JSON。",
             "代码覆盖率由独立 coverage importer 读取，并要求显式源码文件/行范围映射。",
         ],
