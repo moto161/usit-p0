@@ -47,10 +47,12 @@ def _evidence_ref(path: Any, line: Any = None, **extra: Any) -> dict[str, Any] |
 def _candidate(kind: str, endpoint: str, purpose: str, evidence: list[dict[str, Any]],
                steps: list[str], limitations: list[str], *, call_chain: list[Any],
                authorization: Mapping[str, Any], database: list[Any],
-               identity_flow: list[Any] | None = None) -> dict[str, Any]:
+               identity_flow: list[Any] | None = None,
+               business_function_id: str | None = None) -> dict[str, Any]:
     identity = {"kind": kind, "endpoint": endpoint, "evidence": evidence, "steps": steps}
     return {
         "test_id": _stable_id(kind, identity),
+        "business_function_id": business_function_id,
         "category": "security_" + kind,
         "target": endpoint,
         "purpose": purpose,
@@ -117,11 +119,24 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                  if isinstance(node, Mapping) and node.get("business_kind") == "endpoint"]
     candidates: list[dict[str, Any]] = []
     endpoint_rows: list[dict[str, Any]] = []
+    understanding = _dict(business_graph.get("business_understanding"))
+    raw_views = _list(understanding.get("business_function_views"))
+    views_by_endpoint: dict[str, list[str]] = {}
+    for view in raw_views:
+        if not isinstance(view, Mapping):
+            continue
+        endpoint_id = view.get("endpoint_id")
+        function_id = view.get("business_function_id")
+        if isinstance(endpoint_id, str) and isinstance(function_id, str) and function_id:
+            views_by_endpoint.setdefault(endpoint_id, []).append(function_id)
 
     for node in endpoints:
         label = _endpoint_label(node)
         if not label:
             continue
+        endpoint_id = node.get("id")
+        matched_functions = views_by_endpoint.get(endpoint_id, []) if isinstance(endpoint_id, str) else []
+        business_function_id = matched_functions[0] if len(matched_functions) == 1 else None
         source = _dict(node.get("evidence"))
         auth = _dict(node.get("authorization_evidence"))
         association = _dict(node.get("handler_association"))
@@ -202,6 +217,8 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
             refs, steps,
             limitations + ["NOT_DETECTED_STATIC_SCAN 只表示当前有限静态扫描未发现线索，不代表接口缺少认证。"],
             call_chain=chain, authorization=auth, database=database, identity_flow=identity_flow,
+
+            business_function_id=business_function_id,
         ))
 
         guards = []
@@ -222,6 +239,8 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                  "使用获准角色执行对照请求，比较访问结果和数据副作用"],
                 limitations + ["检测到角色/权限 guard 名称不证明角色判定正确，也不证明所有分支均受保护。"],
                 call_chain=chain, authorization=auth, database=sensitive_db,
+
+                business_function_id=business_function_id,
             ))
 
         request_to_owner = [
@@ -245,6 +264,8 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                     "必须检查完整参数数组、变量赋值、框架绑定规则和运行时身份；当前证据不是 IDOR 或漏洞结论。",
                 ],
                 call_chain=chain, authorization=auth, database=database, identity_flow=identity_flow,
+
+                business_function_id=business_function_id,
             ))
         if trusted_to_owner:
             candidates.append(_candidate(
@@ -259,6 +280,8 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                     "同一行模式不代表完整参数数据流；未验证跨行赋值、别名、闭包、包装器或 ORM。",
                 ],
                 call_chain=chain, authorization=auth, database=database, identity_flow=identity_flow,
+
+                business_function_id=business_function_id,
             ))
 
         owner_columns = sorted({
@@ -279,6 +302,8 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                     "必须由需求明确资源归属规则；不得把可控 ID 参数本身判定为 IDOR。",
                 ],
                 call_chain=chain, authorization=auth, database=sensitive_db,
+
+                business_function_id=business_function_id,
             ))
             candidates.append(_candidate(
                 "owner_parameter_tampering", label,
@@ -292,10 +317,12 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                     "只有在接口契约确认参数存在后才执行该测试；禁止据此推断已存在漏洞。",
                 ],
                 call_chain=chain, authorization=auth, database=sensitive_db,
+
+                business_function_id=business_function_id,
             ))
 
         endpoint_rows.append({
-            "label": label, "database_ids": {
+            "label": label, "business_function_id": business_function_id, "database_ids": {
                 str(item.get("database_access_id")) for item in database
                 if isinstance(item, Mapping) and item.get("database_access_id")
             },
@@ -327,6 +354,7 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                         "权限状态不同不证明存在绕过；中间件顺序、包装器和运行时路由尚未完整建模。",
                     ],
                     call_chain=row["chain"], authorization=row["auth"], database=shared_db,
+                    business_function_id=row.get("business_function_id"),
                 ))
 
     if len(candidates) > _LIMIT:
@@ -339,8 +367,9 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "model": "SecurityTestPlanner",
         "candidate_count": len(candidates),
+        "unlinked_business_function_candidate_count": sum(1 for item in candidates if not item.get("business_function_id")),
         "category_counts": dict(sorted(counts.items())),
         "execution_status": "NOT_EXECUTED",
-        "design_note": "安全测试候选仅用于需求审查；静态线索不是漏洞结论，执行前必须另行授权。",
+        "design_note": "安全测试候选仅用于需求审查；仅当 endpoint_id 与业务功能视图唯一匹配时才建立 business_function_id；静态线索不是漏洞结论，执行前必须另行授权。",
         "candidates": candidates,
     }
