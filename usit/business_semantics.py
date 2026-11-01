@@ -32,6 +32,7 @@ from typing import Any
 
 from . import safety
 from .safeio import open_no_follow
+from .database_access import extract_database_accesses
 
 SCHEMA_VERSION = "usit-business-semantics-v1"
 
@@ -646,6 +647,7 @@ class BusinessSemanticsAdapter:
             if data["read_ok"]:
                 code_blob_by_file[self._rel(cf)] = data["text"]
         all_code = "\n".join(code_blob_by_file.values())
+        database_accesses = extract_database_accesses(code_blob_by_file)
 
         # (3) PRD features marked ✅ DONE whose backing permission field is never
         #     referenced in code.  This is the strongest "documented-but-fake"
@@ -730,6 +732,8 @@ class BusinessSemanticsAdapter:
                 {"kind": d.kind, "message": d.message, "evidence": d.evidence, "confidence": d.confidence}
                 for d in discrepancies
             ],
+            "database_access_count": len(database_accesses),
+            "database_accesses": database_accesses,
             "field_gap_count": len(field_gaps),
             "field_gaps": [
                 {"field": g.field_name, "entity": g.entity, "anchors": g.anchors,
