@@ -452,7 +452,7 @@ def main(argv=None):
             if output.exists(): raise ValueError("Android adapter output already exists; choose a new path to preserve prior evidence")
             result=adapt_android_jsonl_file(a.input,a.graph,a.session_id,a.captured_at)
             output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\\n',encoding='utf-8')
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             print(json.dumps({"schema_version":result["schema_version"],"event_count":len(result["events"]),
                 "session_id":result["session"]["session_id"],"platform":"ANDROID","result_path":str(output)},ensure_ascii=False,indent=2))
             return 0
