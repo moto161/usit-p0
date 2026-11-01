@@ -95,9 +95,9 @@ class DatabaseAccessSemanticsTests(unittest.TestCase):
     def test_analyze_emits_function_line_database_access_candidates(self):
         p = SyntheticProject(self)
         p.route("server/repos/photo_repo.py", (
-            "def load_photos(cursor):\\n"
-            '    cursor.execute("SELECT id, owner_id FROM photos WHERE id = 1")\\n'
-            "    cursor.execute(sql)\\n"
+            "def load_photos(cursor):\n"
+            '    cursor.execute("SELECT id, owner_id FROM photos WHERE id = 1")\n'
+            "    cursor.execute(sql)\n"
         ))
         result = BusinessSemanticsAdapter(p.root).analyze()
         self.assertEqual(result["database_access_count"], 2)
