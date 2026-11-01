@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_ROUTE = re.compile(r"\b(?:router|app)\.(?:get|post|put|delete|patch|all)\s*\(")
+_ROUTE = re.compile(r"\b(?:router|app)\.(?:get|post|put|delete|patch|all|use)\s*\(")
 _GUARD = re.compile(
     r"\b(authRequired|adminRequired|requireAuth|authenticate|authorize|"
     r"requireRole|requirePermission|hasPermission|canAccess|isOwner|"
