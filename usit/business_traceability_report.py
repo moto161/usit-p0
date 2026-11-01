@@ -71,6 +71,37 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                 lines.append("- 映射但未出现在报告中的 testcase：")
                 for case_id in missing_cases:
                     lines.append(f"  - {_cell(case_id)}")
+        test_candidates = row.get("test_candidates", [])
+        if isinstance(test_candidates, list) and test_candidates:
+            lines.append("- 测试设计候选详情：")
+            for candidate in test_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                lines.append(
+                    f"  - {_cell(candidate.get('test_id'))} / {_cell(candidate.get('category'))}："
+                    f"{_cell(candidate.get('purpose'))}"
+                )
+                lines.append(
+                    f"    - 设计状态：{_cell(candidate.get('design_status'))}；"
+                    f"执行状态：{_cell(candidate.get('execution_status'))}；"
+                    f"预期结果：{_cell(candidate.get('expected_results_status'))}"
+                )
+                for precondition in candidate.get("preconditions", []):
+                    lines.append(f"    - 前置条件：{_cell(precondition)}")
+                for action in candidate.get("actions", []):
+                    if isinstance(action, dict):
+                        lines.append(
+                            f"    - 步骤 { _cell(action.get('step')) }：{_cell(action.get('action'))}；"
+                            f"预期：{_cell(action.get('expected_result'))}"
+                        )
+                        for evidence in action.get("evidence_to_collect", []):
+                            lines.append(f"      - 采集证据：{_cell(evidence)}")
+                for requirement in candidate.get("evidence_requirements", []):
+                    if isinstance(requirement, dict):
+                        lines.append(
+                            f"    - 证据要求：{_cell(requirement.get('evidence_type'))} / "
+                            f"{_cell(requirement.get('requirement') or requirement.get('source_path'))}"
+                        )
         lines.append("- 证据引用：")
         refs = row.get("evidence_refs", [])
         if refs:
