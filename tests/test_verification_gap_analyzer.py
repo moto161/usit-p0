@@ -38,6 +38,8 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
         result=build_verification_gap_backlog(self.semantics,self.graph,self.plan,self.matrix)
         kinds={x["gap_kind"] for x in result["gaps"]}
         self.assertIn("REQUIREMENT_TRACEABILITY_GAP",kinds)
+        feature_gap=next(x for x in result["gaps"] if x["gap_kind"]=="REQUIREMENT_TRACEABILITY_GAP")
+        self.assertEqual(feature_gap["priority"],"P0")
         self.assertIn("DOCUMENTED_ENDPOINT_UNMATCHED",kinds)
         self.assertIn("UNDOCUMENTED_CODE_ENDPOINT",kinds)
         self.assertIn("AMBIGUOUS_ENDPOINT_CONTRACT",kinds)
