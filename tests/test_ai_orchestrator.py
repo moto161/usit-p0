@@ -93,5 +93,46 @@ class AIOrchestratorTests(unittest.TestCase):
         self.assertFalse(registry_template()["models"][0]["enabled"])
 
 
+    def test_cli_creates_registry_template_without_overwriting(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from usit import cli
+
+        with tempfile.TemporaryDirectory() as td:
+            output_path = Path(td) / "registry.json"
+            output = StringIO()
+            with redirect_stdout(output):
+                code = cli.main(["ai-init-registry", "--out", str(output_path)])
+            self.assertEqual(code, 0)
+            self.assertFalse(json.loads(output_path.read_text(encoding="utf-8"))["models"][0]["enabled"])
+            with redirect_stdout(StringIO()):
+                code = cli.main(["ai-init-registry", "--out", str(output_path)])
+            self.assertEqual(code, 2)
+
+    def test_cli_ai_ensemble_reports_partial_exit_status(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from usit import cli
+
+        with tempfile.TemporaryDirectory() as td:
+            config_path = Path(td) / "registry.json"
+            config_path.write_text(json.dumps(self.registry), encoding="utf-8")
+            fake_result = {
+                "schema": "usit-ai-ensemble-result-v1", "task": "architecture",
+                "required_role": "architecture_analysis", "selected_model_count": 2,
+                "succeeded_model_count": 1, "failed_model_count": 1,
+                "status": "PARTIAL", "prompt_logged": False,
+                "execution_claim": "MODEL_RESPONSES_ONLY_NOT_PROJECT_TEST_EXECUTION",
+                "results": [],
+            }
+            output = StringIO()
+            with patch.object(cli, "run_ensemble", return_value=fake_result):
+                with redirect_stdout(output):
+                    code = cli.main(["ai-ensemble", "--config", str(config_path),
+                                     "--task", "architecture", "--prompt", "safe prompt"])
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads(output.getvalue())["status"], "PARTIAL")
+
+
 if __name__ == "__main__":
     unittest.main()
