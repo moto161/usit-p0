@@ -842,6 +842,48 @@ function main(input) {
       ts.forEachChild(node, collectRouteHandlers);
     }
     collectRouteHandlers(sourceFile);
+
+    // S2.13-A: explicit JSX event-prop -> named handler evidence.
+    row.ui_event_bindings = [];
+    const uiEventProps = new Set(["onClick", "onSubmit", "onChange", "onPress", "onTap", "onLongPress"]);
+    function collectUiEventBindings(node) {
+      if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name) && uiEventProps.has(node.name.text)) {
+        const position = loc(sourceFile, node);
+        const initializer = node.initializer;
+        const expression = initializer && ts.isJsxExpression(initializer) ? initializer.expression : null;
+        const item = { event_name: node.name.text, line: position.line, column: position.column,
+          binding_expression: expression ? expression.getText(sourceFile).slice(0, 240) : null,
+          resolution_status: "UNKNOWN", candidate_targets: [], confidence: "STATIC_INFERENCE",
+          verification_status: "NOT_VERIFIED" };
+        if (expression && (ts.isIdentifier(expression) || ts.isPropertyAccessExpression(expression))) {
+          const symbolNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
+          const resolved = symbolAfterAliases(checker.getSymbolAtLocation(symbolNode));
+          const targets = declarationTargets(resolved);
+          const unique = new Map(targets.map((target) => [target.id, target]));
+          if (unique.size === 1) {
+            const target = Array.from(unique.values())[0];
+            if (target.entry && !/\\.d\\.(?:ts|mts|cts)$/i.test(target.full)) {
+              item.resolution_status = "RESOLVED";
+              item.target = { id: "symbol:" + target.entry + "#" + target.name + ":" + target.line,
+                path: target.entry, name: target.name, line: target.line };
+              item.evidence_chain = [{ kind: "jsx_event_attribute", file: entry.rel, line: position.line },
+                { kind: "handler_definition", file: target.entry, line: target.line, name: target.name }];
+            } else item.resolution_status = "EXTERNAL";
+          } else if (unique.size > 1) {
+            item.resolution_status = "AMBIGUOUS";
+            item.candidate_targets = Array.from(unique.keys()).sort();
+          }
+        } else if (expression && (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression))) {
+          item.resolution_status = "INLINE_CALLBACK_NOT_SYMBOL_LINKED";
+        } else if (initializer && ts.isStringLiteral(initializer)) {
+          item.resolution_status = "NON_EXPRESSION_ATTRIBUTE";
+        }
+        row.ui_event_bindings.push(item);
+      }
+      ts.forEachChild(node, collectUiEventBindings);
+    }
+    collectUiEventBindings(sourceFile);
+
     const importBindings = new Map();
     for (const item of imports) for (const binding of item.bindings || []) importBindings.set(binding.local, { module: item.module, line: item.line, imported: binding.imported, kind: binding.kind });
 
