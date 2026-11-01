@@ -52,6 +52,82 @@ def _source_line(record: Mapping[str, Any]) -> int | None:
     return None
 
 
+
+def _collect_call_chains(edges: list[dict[str, Any]], root_symbol_id: str,
+                         symbol_ids: set[str], *, max_depth: int = 8,
+                         max_chains: int = 100) -> tuple[list[dict[str, Any]], bool]:
+    """Expand statically resolved caller→callee evidence with cycle/size guards."""
+    adjacency: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        caller = edge.get("caller_symbol_id")
+        if edge.get("type") == "calls" and isinstance(caller, str):
+            adjacency.setdefault(caller, []).append(edge)
+
+    def sort_key(edge: Mapping[str, Any]) -> tuple[str, int, str]:
+        evidence = edge.get("evidence") or {}
+        return (
+            str(evidence.get("path") or ""),
+            int(evidence.get("line") or 0),
+            str(edge.get("target") or ""),
+        )
+
+    for rows in adjacency.values():
+        rows.sort(key=sort_key)
+
+    chains: list[dict[str, Any]] = []
+    truncated = False
+
+    def step_for(edge: Mapping[str, Any]) -> dict[str, Any]:
+        evidence = edge.get("evidence") or {}
+        return {
+            "caller_symbol_id": edge.get("caller_symbol_id"),
+            "target_id": edge.get("target"),
+            "resolution_status": edge.get("resolution_status") or "UNKNOWN",
+            "call_site": {"path": evidence.get("path"), "line": evidence.get("line")},
+            "target_location": edge.get("target_location"),
+            "method": edge.get("method"),
+            "confidence": edge.get("confidence"),
+        }
+
+    def walk(caller: str, steps: list[dict[str, Any]], visited: set[str]) -> None:
+        nonlocal truncated
+        outgoing = adjacency.get(caller, [])
+        if not outgoing:
+            if steps and len(chains) < max_chains:
+                chains.append({"steps": steps})
+            return
+        for edge in outgoing:
+            if len(chains) >= max_chains:
+                truncated = True
+                return
+            next_steps = steps + [step_for(edge)]
+            target = edge.get("target")
+            if edge.get("resolution_status") != "RESOLVED" or target not in symbol_ids:
+                chains.append({"steps": next_steps})
+                continue
+            if target in visited:
+                chains.append({"steps": next_steps, "cycle_detected": True})
+                continue
+            if len(next_steps) >= max_depth:
+                has_more = bool(adjacency.get(target))
+                chains.append({"steps": next_steps, "depth_limit_reached": has_more})
+                truncated = truncated or has_more
+                continue
+            if adjacency.get(target):
+                walk(target, next_steps, visited | {target})
+            else:
+                chains.append({"steps": next_steps})
+
+    walk(root_symbol_id, [], {root_symbol_id})
+    chains.sort(key=lambda chain: tuple(
+        (step.get("call_site", {}).get("path") or "",
+         step.get("call_site", {}).get("line") or 0,
+         step.get("target_id") or "")
+        for step in chain["steps"]
+    ))
+    return chains, truncated
+
+
 def project_business_graph(graph: Mapping[str, Any],
                            semantics: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copied graph with evidence-linked business candidate nodes.
@@ -97,6 +173,8 @@ def project_business_graph(graph: Mapping[str, Any],
     unlinked: list[dict[str, str]] = []
     handler_counts = {"RESOLVED": 0, "AMBIGUOUS": 0, "UNKNOWN": 0, "NOT_ANALYZED": 0}
     handler_downstream_calls = 0
+    handler_call_chains = 0
+    handler_call_chains_truncated = 0
     for kind in _ALLOWED_BUSINESS:
         records = semantics.get(kind, [])
         if not isinstance(records, list):
@@ -259,6 +337,17 @@ def project_business_graph(graph: Mapping[str, Any],
                             item.get("target_id") or "",
                         ))
                         handler_downstream_calls += len(downstream)
+                        symbol_ids = {
+                            item.get("id") for item in nodes
+                            if item.get("type") in {"function", "method"}
+                            and isinstance(item.get("id"), str)
+                        }
+                        call_chains, chains_truncated = _collect_call_chains(
+                            edges, target["id"], symbol_ids,
+                        )
+                        handler_call_chains += len(call_chains)
+                        if chains_truncated:
+                            handler_call_chains_truncated += 1
                         endpoint_node["handler_association"] = {
                             "reference": handler_ref, "resolution_status": "RESOLVED",
                             "target_symbol_id": target["id"],
@@ -266,6 +355,9 @@ def project_business_graph(graph: Mapping[str, Any],
                             "target_line": target_evidence.get("line"),
                             "confidence": "STATIC_INFERENCE",
                             "downstream_call_evidence": downstream,
+                            "call_chain_evidence": call_chains,
+                            "call_chain_truncated": chains_truncated,
+                            "call_chain_max_depth": 8,
                         }
                     relation = {
                         "source": node_id, "target": target["id"], "type": "references",
@@ -304,11 +396,14 @@ def project_business_graph(graph: Mapping[str, Any],
         "unlinked_records": unlinked,
         "route_handler_associations": handler_counts,
         "handler_downstream_call_evidence": handler_downstream_calls,
+        "handler_call_chains": handler_call_chains,
+        "handler_call_chains_truncated": handler_call_chains_truncated,
         "limitations": [
             "业务记录只与精确来源文件关联；命名路由 handler 可通过同文件唯一符号或 TypeScript Compiler API 的导入符号证据建立候选引用。",
             "跨文件 handler 仅在编译器符号解析唯一且目标符号存在于当前图谱时关联；动态、外部、歧义或缺少符号证据时保留原状态，不按名称猜测。",
             "未建立功能到接口、接口到数据实体、角色到权限的推断关系。",
             "candidate/verified=false 表示未验证，不代表运行时可达或功能已实现。",
+            "调用链仅沿唯一 RESOLVED 的图谱符号边进行有界静态展开；循环会标记，深度/数量上限会截断，不证明运行时执行。",
         ],
     }
     return result

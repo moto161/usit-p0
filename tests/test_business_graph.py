@@ -131,6 +131,45 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(downstream[0]["call_site"]["line"], 39)
         self.assertEqual(result["business_understanding"]["handler_downstream_call_evidence"], 1)
 
+    def test_handler_association_expands_cross_file_call_chain_and_marks_cycles(self):
+        source = graph()
+        handler = "symbol:server/routes/photos.js#uploadPhoto:35"
+        service = "symbol:server/services/photo_service.js#savePhoto:8"
+        repository = "symbol:server/repos/photo_repo.js#insert:12"
+        source["nodes"].extend([
+            {"id": handler, "type": "function", "label": "uploadPhoto",
+             "evidence": {"path": "server/routes/photos.js", "line": 35}},
+            {"id": service, "type": "function", "label": "savePhoto",
+             "evidence": {"path": "server/services/photo_service.js", "line": 8}},
+            {"id": repository, "type": "function", "label": "insert",
+             "evidence": {"path": "server/repos/photo_repo.js", "line": 12}},
+        ])
+        def call(caller, target, path, line):
+            return {
+                "source": "file:" + path, "target": target, "type": "calls",
+                "caller_symbol_id": caller, "resolution_status": "RESOLVED",
+                "resolved": True, "evidence": {"path": path, "line": line},
+                "target_location": {"path": target.split("#")[0].removeprefix("symbol:")},
+                "method": "typescript-compiler-api", "confidence": "high",
+            }
+        source["edges"].extend([
+            call(handler, service, "server/routes/photos.js", 39),
+            call(service, repository, "server/services/photo_service.js", 10),
+            call(repository, service, "server/repos/photo_repo.js", 14),
+        ])
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        association = endpoint["handler_association"]
+        self.assertEqual(len(association["downstream_call_evidence"]), 1)
+        chains = association["call_chain_evidence"]
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(len(chains[0]["steps"]), 3)
+        self.assertTrue(chains[0]["cycle_detected"])
+        self.assertEqual(result["business_understanding"]["handler_call_chains"], 1)
+
     def test_duplicate_same_file_handler_symbols_remain_ambiguous(self):
         source = graph()
         for line in (30, 45):
