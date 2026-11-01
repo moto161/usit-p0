@@ -40,6 +40,18 @@ def _source_path(record: Mapping[str, Any]) -> str:
     return path
 
 
+def _source_line(record: Mapping[str, Any]) -> int | None:
+    line = record.get("line")
+    if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+        return line
+    source = record.get("source")
+    if isinstance(source, str):
+        match = re.search(r":([1-9][0-9]*)$", source.strip())
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def project_business_graph(graph: Mapping[str, Any],
                            semantics: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copied graph with evidence-linked business candidate nodes.
@@ -107,9 +119,7 @@ def project_business_graph(graph: Mapping[str, Any],
                 unlinked.append({"kind": kind, "reason": "EMPTY_LABEL", "path": path})
                 continue
 
-            line = raw.get("line")
-            if not isinstance(line, int) or isinstance(line, bool) or line <= 0:
-                line = None
+            line = _source_line(raw)
             identity = {"kind": kind, "path": path, "label": label,
                         "line": line, "details": details}
             node_id = _stable_id(kind, identity)
