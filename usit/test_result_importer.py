@@ -196,10 +196,10 @@ def ingest_junit_results(
     status_counts = Counter(item["execution_status"] for item in function_results)
     return {
         "schema_version": SCHEMA_VERSION,
-        "model": "JUnitResultImporter",
+        "model": "TestResultImporter",
         "source_format": "JUNIT_XML" if report_format == "junit-xml" else "PYTEST_JSON",
         "source_hashes": {
-            "junit_xml_sha256": _sha256(report_bytes),
+            "test_report_sha256": _sha256(report_bytes),
             "mapping_json_sha256": _sha256(mapping_bytes),
             "business_graph_sha256": _sha256(graph_bytes),
         },
@@ -214,6 +214,7 @@ def ingest_junit_results(
             "功能关联完全依赖显式 mapping；不使用名称相似度或 endpoint 猜测。",
             "JUnit 测试通过不等于业务需求完整正确，也不等于代码覆盖率。",
             "没有映射测试结果的功能标记 NOT_EXECUTED；被跳过的功能标记 UNKNOWN。",
-            "本版本仅导入 JUnit XML；未读取 pytest 原生 JSON、Android instrumentation 专用格式或覆盖率文件。",
+            "JUnit XML 可接收 Android instrumentation 等兼容报告；pytest 支持 pytest-json-report JSON。",
+            "代码覆盖率由独立 coverage importer 读取，并要求显式源码文件/行范围映射。",
         ],
     }
