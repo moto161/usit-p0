@@ -95,7 +95,7 @@ def _route_handler_reference(line: str, start: int) -> str:
     if not args:
         return ""
     candidate = args[-1].strip()
-    return candidate if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", candidate) else ""
+    return candidate if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*", candidate) else ""
 
 
 # Markdown table row: `| a | b | c |`.
