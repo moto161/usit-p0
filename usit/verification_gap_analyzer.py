@@ -88,16 +88,26 @@ def build_verification_gap_backlog(
     # A PRD feature without an explicit feature→function contract remains a
     # requirement-traceability gap. Names/module similarity are not associations.
     documented_links=understanding.get("documented_feature_linkage",[])
-    link_by_name={}
+    link_by_identity={}
     if isinstance(documented_links,list):
         for row in documented_links:
-            if isinstance(row,dict) and isinstance(row.get("feature_name"),str):
-                link_by_name.setdefault(row["feature_name"],[]).append(row)
+            if not isinstance(row,dict) or not isinstance(row.get("feature_name"),str):
+                continue
+            source=row.get("source") if isinstance(row.get("source"),str) else ""
+            line=row.get("line")
+            if not isinstance(line,int) or isinstance(line,bool) or line < 1:
+                line=None
+            key=(row["feature_name"].strip(),source,line)
+            link_by_identity.setdefault(key,[]).append(row)
     for feature in semantics.get("features",[]):
         if not isinstance(feature,dict) or not isinstance(feature.get("name"),str) or not feature["name"].strip():
             continue
         name=feature["name"].strip()
-        links=link_by_name.get(name,[])
+        source=feature.get("source") if isinstance(feature.get("source"),str) else ""
+        line=feature.get("line")
+        if not isinstance(line,int) or isinstance(line,bool) or line < 1:
+            line=None
+        links=link_by_identity.get((name,source,line),[])
         linked=any(x.get("linkage_status")=="EXPLICIT_REVIEWED_LINK" for x in links)
         if not linked:
             evidence=[]
