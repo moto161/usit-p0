@@ -210,6 +210,12 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
             unique[key] = ref
         return [unique[key] for key in sorted(unique)]
 
+    function_views = []
+    if isinstance(understanding, Mapping):
+        raw_function_views = understanding.get("business_function_views", [])
+        if isinstance(raw_function_views, list):
+            function_views = [item for item in raw_function_views if isinstance(item, Mapping)]
+
     alignments = semantics.get("endpoint_contract_alignment", [])
     if isinstance(alignments, list):
         for alignment in alignments:
