@@ -101,6 +101,32 @@ class BusinessTraceabilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate mapping"):
             build_business_traceability(self.semantics, self.graph, duplicate_mapping, input_hashes=self.hashes)
 
+    def test_cli_writes_parseable_traceability_matrix_and_hashes(self):
+        import hashlib
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from usit.cli import main
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            sem_path, graph_path = base / "sem.json", base / "graph.json"
+            mapping_path, out_path = base / "mapping.json", base / "trace.json"
+            sem_path.write_text(json.dumps(self.semantics), encoding="utf-8")
+            graph_bytes = json.dumps(self.graph).encode("utf-8")
+            graph_path.write_bytes(graph_bytes)
+            mapping = dict(self.mapping, source_graph_sha256=hashlib.sha256(graph_bytes).hexdigest())
+            mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                code = main(["trace-business", "--semantics", str(sem_path), "--graph", str(graph_path),
+                    "--mapping", str(mapping_path), "--out", str(out_path)])
+            self.assertEqual(code, 0)
+            report = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["schema_version"], "usit-business-traceability-matrix-v1")
+            self.assertEqual(report["input_hashes"]["business_graph_sha256"], hashlib.sha256(graph_bytes).hexdigest())
+            self.assertEqual(report["reviewed_mapping_count"], 2)
+
     def test_rejects_invalid_runtime_evidence_shape(self):
         evidence = {"schema_version": "usit-business-evidence-verification-v1",
             "business_function_evidence": [{"business_function_id": "bf-list"}, {"business_function_id": "bf-list"}]}
