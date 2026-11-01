@@ -641,7 +641,11 @@ The optional provenance layer is implemented in `usit.scan_attestation` using th
 - `verify_scan_attestation(...)` validates the signature using the public key embedded in the sidecar, then checks that exact key against a caller-supplied independent trust mapping (`key_id -> 32-byte raw public key`).
 - A valid signature from a key absent from the trust mapping is reported as `ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY`, never trusted.
 - The verifier reports freshness as `NOT_ASSESSED`; timestamps are signer-provided metadata, not trusted timestamps.
-- This is currently a library/API core. Scanner auto-signing, CLI commands, trust-store persistence/enrollment/revocation, OS-backed private-key custody, and integration into `verify-evidence-bindings` remain pending.
+- The read-only `verify-scan-attestation` CLI verifies a detached sidecar against independently provisioned public keys.
+- `verify-evidence-bindings` now accepts optional `snapshot_attestation_path` on `SOURCE_CODE` entries and repeatable `--trusted-public-key` arguments. The sidecar's signed manifest path must match `snapshot_manifest_path`; an optional catalog `expected_snapshot_id` enforces caller policy.
+- Evidence reports keep `snapshot_binding_status` separate from `attestation_status`; claim summaries include `snapshot_provenance_status` and a per-source `snapshot_provenance` list so multiple manifests are never collapsed into one identity.
+- Legacy entries without sidecars remain compatible and report `ATTESTATION_NOT_PROVIDED`. A valid signature without an independently supplied key remains `ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY`; it is not trusted.
+- Scanner auto-signing, trust-store persistence/enrollment/revocation, OS-backed private-key custody, and automated key lifecycle remain pending.
 - Private keys must be kept outside the project and evidence artifacts. Tests use ephemeral keys only.
 
 Install the project dependencies with `python -m pip install .`. Synthetic tests: `python -m unittest tests.test_scan_attestation -v`.
