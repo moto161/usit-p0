@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -264,8 +265,14 @@ class BusinessSemanticsAdapter:
             raise SemanticsBlocked("SAFE_OPEN_FAILED", f"Could not safely open {path}: {type(exc).__name__}") from exc
         try:
             before = os.fstat(fd)
-            if before.st_size > MAX_FILE_BYTES:
-                raise SemanticsBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeds {MAX_FILE_BYTES} bytes.")
+            if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_FILE_BYTES:
+                raise SemanticsBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeds {MAX_FILE_BYTES} regular-file limit.")
+            self._validate_project_path(path)
+            path_before = os.stat(resolved, follow_symlinks=False)
+            identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            if identity != (path_before.st_dev, path_before.st_ino, path_before.st_size,
+                            path_before.st_mtime_ns, path_before.st_ctime_ns):
+                raise SemanticsBlocked("FILE_CHANGED_DURING_OPEN", f"{path} changed while being opened.")
             if self._total_read_bytes + before.st_size > MAX_TOTAL_READ_BYTES:
                 raise SemanticsBlocked("BYTE_BUDGET_EXCEEDED", f"Business analysis exceeds {MAX_TOTAL_READ_BYTES} total bytes.")
             chunks = []
