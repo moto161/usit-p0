@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .ai_claim_review import load_claim_ledger
-from .test_result_importer import MAX_REPORT_BYTES, _parse_junit
+from .test_result_importer import _parse_junit
 
 BINDING_SCHEMA = "usit-ai-evidence-binding-v1"
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
@@ -21,8 +21,9 @@ TEST_STATUSES = {"PASSED", "FAILED", "SKIPPED"}
 def _artifact_path(root: Path, relative: Any) -> Path:
     if not isinstance(relative, str) or not relative or "\\" in relative:
         raise ValueError("artifact_path must be a non-empty relative POSIX path")
+    raw_parts = relative.split("/")
     pure = PurePosixPath(relative)
-    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+    if pure.is_absolute() or any(part in {"", ".", ".."} for part in raw_parts):
         raise ValueError("artifact_path must not be absolute or contain traversal")
     candidate = root
     for part in pure.parts:
@@ -76,9 +77,9 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
             row.update(binding_status="MISSING", detail="Referenced artifact does not exist under evidence_root.")
             bindings[evidence_id] = row
             continue
-        raw = artifact.read_bytes()
-        if len(raw) > MAX_ARTIFACT_BYTES:
+        if artifact.stat().st_size > MAX_ARTIFACT_BYTES:
             raise ValueError(f"{evidence_id}: evidence artifact exceeds 50 MiB")
+        raw = artifact.read_bytes()
         actual = hashlib.sha256(raw).hexdigest()
         row["actual_sha256"] = actual
         if actual != entry["source_sha256"]:
