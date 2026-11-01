@@ -127,7 +127,8 @@ def project_business_graph(graph: Mapping[str, Any],
                 endpoint = str(raw.get("path") or "").strip()
                 label = f"{method} {endpoint}".strip()
                 details = {"method": method, "endpoint": endpoint,
-                           "code_auth": raw.get("code_auth") or "UNKNOWN"}
+                           "code_auth": raw.get("code_auth") or "UNKNOWN",
+                           "handler_reference": raw.get("handler_reference") or ""}
             if not label:
                 unlinked.append({"kind": kind, "reason": "EMPTY_LABEL", "path": path})
                 continue
