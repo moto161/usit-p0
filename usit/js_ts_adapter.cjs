@@ -695,10 +695,27 @@ function main(input) {
     }
     collectRequireImports(sourceFile);
     importsBySource.set(path.resolve(sourceFile.fileName), importEvidenceRows);
+    function isFunctionBoundary(node) {
+      return ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)
+        || ts.isArrowFunction(node) || ts.isFunctionExpression(node)
+        || ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node)
+        || ts.isSetAccessorDeclaration(node);
+    }
+
     function declaredFunctionOwner(node) {
       let name = null;
+      let locationNode = node;
       if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name) {
         name = node.name.getText(sourceFile);
+      } else if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+        const parent = node.parent;
+        if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+          name = parent.name.text;
+        } else if (ts.isPropertyDeclaration(parent)) {
+          name = parent.name.getText(sourceFile);
+        } else if (node.name && ts.isIdentifier(node.name)) {
+          name = node.name.text;
+        }
       } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
           && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
         name = node.name.text;
@@ -707,13 +724,19 @@ function main(input) {
         name = node.name.getText(sourceFile);
       }
       if (!name) return null;
-      const position = loc(sourceFile, node);
+      const position = loc(sourceFile, locationNode);
       return { name, line: position.line,
         symbol_id: "symbol:" + entry.rel + "#" + name + ":" + position.line };
     }
 
     function visit(node, testContext, callerOwner) {
-      const currentOwner = declaredFunctionOwner(node) || callerOwner || null;
+      // Anonymous callbacks/lambdas are real scope boundaries. They have no
+      // stable symbol yet, so calls inside them must not inherit the outer
+      // named function's identity. Named declarations and assigned arrows
+      // retain their own exact owner symbol.
+      const currentOwner = isFunctionBoundary(node)
+        ? declaredFunctionOwner(node)
+        : (declaredFunctionOwner(node) || callerOwner || null);
       let childTestContext = testContext;
       if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && /^test\\w*/i.test(node.name.getText(sourceFile))) {
         childTestContext = node.name.getText(sourceFile);

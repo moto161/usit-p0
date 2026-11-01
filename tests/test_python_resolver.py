@@ -122,5 +122,38 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(helper["caller_symbol_id"], "symbol:sample.js#run:2")
 
 
+    def test_python_lambda_calls_do_not_inherit_outer_function_owner(self):
+        source = "def run():\n    callback = lambda: helper()\n    helper()\n"
+        (self.root / "lambda_scope.py").write_text(source, encoding="utf-8")
+        rows = [analyze_file(self.root, path) for path in discover_files(self.root)
+                if path.suffix == ".py"]
+        resolve_python_calls(str(self.root), rows)
+        row = next(item for item in rows if item["path"] == "lambda_scope.py")
+        calls = [item for item in row["calls"] if item["callee"] == "helper"]
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("caller_symbol_id", calls[0])
+        self.assertEqual(calls[1]["caller_symbol_id"], "symbol:lambda_scope.py#run:1")
+
+    def test_javascript_anonymous_callback_does_not_inherit_outer_owner(self):
+        (self.root / "callback.js").write_text(
+            "function helper() {}\\n"
+            "function run() {\\n"
+            "  router.get('/x', (req, res) => { helper(); });\\n"
+            "  helper();\\n"
+            "}\\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "callback-scan-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        calls = [edge for edge in graph["edges"] if edge["type"] == "calls"
+                 and edge.get("evidence", {}).get("path") == "callback.js"
+                 and edge.get("target_location", {}).get("qualified_name", "").endswith(".helper")]
+        self.assertEqual(len(calls), 2)
+        callback_call = next(edge for edge in calls if edge["evidence"]["line"] == 3)
+        outer_call = next(edge for edge in calls if edge["evidence"]["line"] == 4)
+        self.assertNotIn("caller_symbol_id", callback_call)
+        self.assertEqual(outer_call["caller_symbol_id"], "symbol:callback.js#run:2")
+
 if __name__ == "__main__":
     unittest.main()

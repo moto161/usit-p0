@@ -91,7 +91,7 @@ class _CallVisitor(ast.NodeVisitor):
     def __init__(self):
         self.calls: list[tuple[ast.Call, set[str], tuple[str, int] | None]] = []
         self.scopes: list[set[str]] = []
-        self.owners: list[tuple[str, int]] = []
+        self.owners: list[tuple[str, int] | None] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self.owners.append((node.name, node.lineno))
@@ -109,9 +109,14 @@ class _CallVisitor(ast.NodeVisitor):
             names.add(node.args.vararg.arg)
         if node.args.kwarg:
             names.add(node.args.kwarg.arg)
+        # A lambda is a distinct callable scope but has no stable symbol in
+        # the current graph model. Mask an enclosing named function rather
+        # than falsely attributing lambda-body calls to that outer function.
+        self.owners.append(None)
         self.scopes.append(names)
         self.visit(node.body)
         self.scopes.pop()
+        self.owners.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
         shadowed = set().union(*self.scopes) if self.scopes else set()
