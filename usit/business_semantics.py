@@ -285,7 +285,13 @@ class BusinessSemanticsAdapter:
                 remaining -= len(block)
             raw = b"".join(chunks)
             after = os.fstat(fd)
-            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            self._validate_project_path(path)
+            path_after = os.stat(resolved, follow_symlinks=False)
+            before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            path_identity = (path_after.st_dev, path_after.st_ino, path_after.st_size,
+                             path_after.st_mtime_ns, path_after.st_ctime_ns)
+            if before_identity != after_identity or after_identity != path_identity:
                 raise SemanticsBlocked("FILE_CHANGED_DURING_READ", f"{path} changed while being read.")
             if len(raw) != before.st_size or len(raw) > MAX_FILE_BYTES:
                 raise SemanticsBlocked("FILE_SIZE_LIMIT_EXCEEDED", f"{path} exceeded its size budget during read.")
