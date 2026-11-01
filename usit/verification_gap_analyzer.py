@@ -104,7 +104,7 @@ def build_verification_gap_backlog(
             if feature.get("source"):
                 evidence.append({"path":feature.get("source"),"line":feature.get("line"),"kind":"documented_feature"})
             add("REQUIREMENT_TRACEABILITY_GAP","REQUIREMENT",name,
-                "P1" if feature.get("priority") in {"P0","P1"} else "P2",
+                feature.get("priority") if feature.get("priority") in {"P0","P1","P2"} else "P2",
                 "文档功能尚无经审阅的 feature → business_function 显式关联；不能按名称猜测覆盖关系。",
                 "由需求负责人确认功能边界、验收标准，并建立带文档行号和目标 business_function_id 的显式映射。",
                 evidence)
