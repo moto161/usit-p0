@@ -369,7 +369,8 @@ def verify_manifest(evidence_dir: str | os.PathLike[str]) -> dict[str, Any]:
                 errors.append("invalid artifact path in manifest")
                 continue
             pure = PurePosixPath(name)
-            if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts) or pure.as_posix() != name:
+            if (pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts)
+                    or any(":" in part for part in pure.parts) or pure.as_posix() != name):
                 errors.append(f"unsafe artifact path: {name!r}")
                 continue
             if name == _MANIFEST_NAME or name in seen:
