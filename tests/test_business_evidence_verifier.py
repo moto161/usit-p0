@@ -63,6 +63,44 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
         self.assertEqual(result["evidence_conflicts"][0]["kind"],"INVALID_TEST_STATUS")
 
+    def test_incomplete_mapped_report_cannot_remain_passed_in_evidence_matrix(self):
+        tests = {
+            "schema_version": "usit-test-execution-results-v1",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_results": [{
+                "business_function_id": "bf-upload",
+                "execution_status": "PASSED",
+                "mapped_test_case_count": 1,
+                "failed": 0,
+                "skipped": 0,
+                "expected_mapped_test_case_count": 2,
+                "reported_mapped_test_case_count": 1,
+                "mapped_case_completeness": "INCOMPLETE",
+                "mapped_cases_missing_from_report": ["tests.PhotoTests::test_upload_permissions"],
+                "mapped_test_cases": [{
+                    "test_case_id": "tests.PhotoTests::test_upload",
+                    "status": "PASSED",
+                }],
+            }],
+        }
+        result = verify_business_function_evidence(
+            self.graph, tests, business_graph_sha256=self.graph_hash
+        )
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["reported_test_execution_status"], "PASSED")
+        self.assertEqual(upload["test_execution_status"], "UNKNOWN")
+        self.assertEqual(upload["verification_conclusion"], "EVIDENCE_CONFLICT")
+        self.assertTrue(upload["evidence_conflict"])
+        self.assertEqual(
+            upload["test_execution_detail"]["mapped_cases_missing_from_report"],
+            ["tests.PhotoTests::test_upload_permissions"],
+        )
+        self.assertIn(
+            "TEST_PASS_WITH_INCOMPLETE_MAPPED_CASES",
+            {item["kind"] for item in result["evidence_conflicts"]},
+        )
+
     def test_cli_writes_evidence_matrix_and_returns_conflict_exit_code(self):
         import tempfile
         from contextlib import redirect_stdout
