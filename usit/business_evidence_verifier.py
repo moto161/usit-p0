@@ -84,6 +84,7 @@ def verify_business_function_evidence(
     for function_id, view in sorted(views.items()):
         test=test_by_id.get(function_id); cov=coverage_by_id.get(function_id)
         ts=test.get("execution_status","NOT_MEASURED") if test else "NOT_MEASURED"
+        reported_test_status = ts
         cs=cov.get("code_coverage_status","NOT_MEASURED") if cov else "NOT_MEASURED"
         if ts not in {"PASSED","FAILED","UNKNOWN","NOT_EXECUTED","NOT_MEASURED"}:
             conflicts.append({"kind":"INVALID_TEST_STATUS","business_function_id":function_id,"status":ts})
@@ -176,6 +177,7 @@ def verify_business_function_evidence(
                     "business_function_id": function_id,
                     "missing_test_case_ids": missing_test_case_ids,
                 })
+                ts = "UNKNOWN"
             if inferred_incomplete:
                 completeness_status = "INCOMPLETE"
             elif claimed_completeness in {"COMPLETE", "NO_EXPECTED_MAPPED_CASES"}:
@@ -193,6 +195,7 @@ def verify_business_function_evidence(
             "basis":view.get("basis","UNKNOWN"),
             "static_verification_status":view.get("verification_status","UNKNOWN"),
             "test_execution_status":ts,
+            "reported_test_execution_status":reported_test_status,
             "test_case_count":test.get("mapped_test_case_count",0) if test else 0,
             "failed_test_count":test.get("failed",0) if test else 0,
             "skipped_test_count":test.get("skipped",0) if test else 0,
