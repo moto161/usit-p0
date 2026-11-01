@@ -127,6 +127,18 @@ class BusinessTraceabilityTests(unittest.TestCase):
             self.assertEqual(report["input_hashes"]["business_graph_sha256"], hashlib.sha256(graph_bytes).hexdigest())
             self.assertEqual(report["reviewed_mapping_count"], 2)
 
+    def test_rejects_invalid_review_timestamp_and_reports_invalid_runtime_state(self):
+        invalid = dict(self.mapping, mappings=[dict(self.mapping["mappings"][0], reviewed_at="yesterday")])
+        with self.assertRaisesRegex(ValueError, "ISO-8601"):
+            build_business_traceability(self.semantics, self.graph, invalid, input_hashes=self.hashes)
+        evidence = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{"business_function_id": "bf-list",
+                "test_execution_status": "MAYBE", "code_coverage_status": "COVERED"}]}
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            evidence_matrix=evidence, input_hashes=self.hashes)
+        self.assertEqual(result["rows"][0]["stage_status"]["test_execution"], "INVALID")
+        self.assertEqual(result["invalid_runtime_status_function_ids"], ["bf-list"])
+
     def test_rejects_invalid_runtime_evidence_shape(self):
         evidence = {"schema_version": "usit-business-evidence-verification-v1",
             "business_function_evidence": [{"business_function_id": "bf-list"}, {"business_function_id": "bf-list"}]}
