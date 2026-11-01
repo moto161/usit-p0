@@ -96,6 +96,44 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertIn("保留原始报告", markdown)
         self.assertIn("OWNER_CONFIRMATION_REQUIRED", markdown)
 
+    def test_security_candidates_flow_into_explicitly_approved_requirement_trace(self):
+        security_plan = {"schema_version": "usit-security-test-candidates-v1", "candidate_count": 1,
+            "candidates": [{
+                "test_id": "sec-cross-user-001", "business_function_id": "bf-list",
+                "category": "security_cross_user_resource_isolation", "target": "GET /api/photos",
+                "purpose": "验证跨用户资源隔离", "basis": "STATIC_INFERENCE",
+                "design_status": "CANDIDATE_NEEDS_REQUIREMENTS", "execution_status": "NOT_EXECUTED",
+                "preconditions": ["隔离测试环境"],
+                "actions": [{"step": 1, "action": "使用用户 A 访问用户 B 资源",
+                    "expected_result": "OWNER_CONFIRMATION_REQUIRED", "evidence_to_collect": ["响应", "审计日志"]}],
+                "expected_results_status": "OWNER_CONFIRMATION_REQUIRED",
+                "evidence_requirements": [{"evidence_type": "AUTHORIZATION_DECISION"}],
+                "authorization_evidence": {"status": "DETECTED"},
+                "database_access_evidence": [{"operation": "SELECT", "path": "db.py"}],
+                "identity_dataflow_evidence": [{"kind": "request_identity"}],
+                "call_chain_evidence": [{"steps": []}], "limitations": ["静态证据不是漏洞结论"],
+            }]}
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            security_test_plan=security_plan, input_hashes=self.hashes)
+        linked = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(linked["test_candidate_ids"], ["sec-cross-user-001"])
+        self.assertEqual(linked["test_candidates"][0]["category"], "security_cross_user_resource_isolation")
+        self.assertEqual(linked["test_candidates"][0]["execution_status"], "NOT_EXECUTED")
+        self.assertEqual(linked["test_candidates"][0]["authorization_evidence"]["status"], "DETECTED")
+        self.assertEqual(linked["test_candidates"][0]["expected_results_status"], "OWNER_CONFIRMATION_REQUIRED")
+        self.assertEqual(result["unlinked_security_test_candidate_ids"], [])
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("验证跨用户资源隔离", markdown)
+        self.assertIn("静态证据不是漏洞结论", markdown)
+
+    def test_unlinked_security_candidate_is_reported_not_guessed(self):
+        security_plan = {"schema_version": "usit-security-test-candidates-v1",
+            "candidates": [{"test_id": "sec-unlinked", "business_function_id": None}]}
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            security_test_plan=security_plan, input_hashes=self.hashes)
+        self.assertEqual(result["unlinked_security_test_candidate_ids"], ["sec-unlinked"])
+        self.assertNotIn("sec-unlinked", [item for row in result["rows"] for item in row["test_candidate_ids"]])
+
     def test_no_mapping_never_uses_feature_name_or_module_to_guess(self):
         result = build_business_traceability(self.semantics, self.graph,
             {"schema_version": "usit-feature-function-mapping-v1", "source_graph_sha256": self.graph_hash, "mappings": []},
@@ -153,13 +191,22 @@ class BusinessTraceabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             sem_path, graph_path = base / "sem.json", base / "graph.json"
-            mapping_path, out_path, md_path, runtime_path = base / "mapping.json", base / "trace.json", base / "trace.md", base / "runtime.json"
+            mapping_path, out_path, md_path, runtime_path, security_path = (
+                base / "mapping.json", base / "trace.json", base / "trace.md",
+                base / "runtime.json", base / "security.json"
+            )
             sem_path.write_text(json.dumps(self.semantics), encoding="utf-8")
             graph_bytes = json.dumps(self.graph).encode("utf-8")
             graph_path.write_bytes(graph_bytes)
             graph_hash = hashlib.sha256(graph_bytes).hexdigest()
             mapping = dict(self.mapping, source_graph_sha256=graph_hash)
             mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+            security_path.write_text(json.dumps({"schema_version": "usit-security-test-candidates-v1",
+                "candidates": [{"test_id": "sec-cli-1", "business_function_id": "bf-list",
+                    "category": "security_cross_user_resource_isolation", "purpose": "验证跨用户资源隔离",
+                    "design_status": "CANDIDATE_NEEDS_REQUIREMENTS", "execution_status": "NOT_EXECUTED",
+                    "expected_results_status": "OWNER_CONFIRMATION_REQUIRED",
+                    "authorization_evidence": {"status": "DETECTED"}}]}), encoding="utf-8")
             runtime_path.write_text(json.dumps({
                 "schema_version": "usit-runtime-evidence-validation-v1",
                 "assessment_status": "VALIDATED_EVENT_STRUCTURE",
@@ -170,6 +217,7 @@ class BusinessTraceabilityTests(unittest.TestCase):
             with redirect_stdout(StringIO()):
                 code = main(["trace-business", "--semantics", str(sem_path), "--graph", str(graph_path),
                     "--mapping", str(mapping_path), "--runtime-evidence", str(runtime_path),
+                    "--security-test-plan", str(security_path),
                     "--out", str(out_path), "--out-md", str(md_path)])
             self.assertEqual(code, 0)
             report = json.loads(out_path.read_text(encoding="utf-8"))
@@ -177,6 +225,9 @@ class BusinessTraceabilityTests(unittest.TestCase):
             self.assertEqual(report["input_hashes"]["business_graph_sha256"], hashlib.sha256(graph_bytes).hexdigest())
             self.assertEqual(report["reviewed_mapping_count"], 2)
             self.assertEqual(report["input_hashes"]["runtime_evidence_validation_sha256"], hashlib.sha256(runtime_path.read_bytes()).hexdigest())
+            self.assertEqual(report["input_hashes"]["security_test_plan_sha256"], hashlib.sha256(security_path.read_bytes()).hexdigest())
+            linked = next(row for row in report["rows"] if row["feature_name"] == "查看照片")
+            self.assertIn("sec-cli-1", linked["test_candidate_ids"])
             self.assertEqual(next(row for row in report["rows"] if row["feature_name"] == "查看照片")["stage_status"]["runtime_observation"], "RUNTIME_OBSERVED")
             markdown = md_path.read_text(encoding="utf-8")
             self.assertIn("# USIT 业务需求跨层追溯报告", markdown)
