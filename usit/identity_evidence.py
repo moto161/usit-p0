@@ -113,7 +113,7 @@ def _call_parameter_code(line: str, call_start: int) -> str:
                 break
             code_parts.append(char)
             index += 1
-    return " ".join(code_parts)
+    return "".join(code_parts)
 
 def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, Any]]:
     """Extract identity evidence plus bounded, same-scope local-variable propagation.
