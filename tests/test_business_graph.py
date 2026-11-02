@@ -428,5 +428,110 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(understanding["documented_feature_linkage"][0]["linkage_status"],
                          "NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION")
 
+
+    def test_propagates_python_identity_source_to_exact_resolved_call_parameter(self):
+        source = graph()
+        route_path = "server/routes/photos.py"
+        service_path = "server/services/photo_service.py"
+        source["nodes"].extend([
+            {"id": "file:" + service_path, "type": "file", "label": service_path,
+             "evidence": {"path": service_path}},
+            {"id": "symbol:" + route_path + "#listPhotos:10", "type": "function",
+             "label": "listPhotos", "evidence": {"path": route_path, "line": 10}},
+            {"id": "symbol:" + service_path + "#findOwnedPhotos:4", "type": "function",
+             "label": "findOwnedPhotos", "evidence": {"path": service_path, "line": 4}},
+        ])
+        handler = "symbol:" + route_path + "#listPhotos:10"
+        callee = "symbol:" + service_path + "#findOwnedPhotos:4"
+        source["edges"].append({
+            "source": "file:" + route_path, "target": callee, "type": "calls",
+            "caller_symbol_id": handler, "resolution_status": "RESOLVED",
+            "evidence": {"path": route_path, "line": 14},
+            "argument_binding_status": "EXACT_STATIC_MAPPING",
+            "argument_bindings": [{
+                "argument_index": 0, "argument_kind": "POSITIONAL",
+                "argument_expression": "uid",
+                "argument_location": {"path": route_path, "line": 14, "column": 25},
+                "parameter_name": "owner_id", "parameter_index": 0,
+                "parameter_kind": "positional_or_keyword",
+                "parameter_declaration": {"path": service_path, "line": 4, "column": 22},
+            }],
+            "target_location": {"path": service_path, "line": 4},
+        })
+        result = project_business_graph(source, {
+            "endpoints": [{
+                "method": "GET", "path": "/photos", "source": route_path + ":5",
+                "line": 5, "handler_reference": "listPhotos",
+            }],
+            "identity_evidence": [{
+                "evidence_id": "identity-source-1",
+                "kind": "authenticated_identity_source",
+                "source": route_path, "line": 12,
+                "details": {"identity_expressions": ["request.user.id"],
+                            "source_variable": "uid"},
+                "scope": "SAME_LINE_PATTERN",
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "owner_symbol_id": handler,
+                "owner_resolution_status": "RESOLVED",
+            }],
+        })
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        association = endpoint["handler_association"]
+        propagated = association["identity_parameter_propagation_evidence"]
+        self.assertEqual(len(propagated), 1)
+        self.assertEqual(propagated[0]["caller_symbol_id"], handler)
+        self.assertEqual(propagated[0]["callee_symbol_id"], callee)
+        self.assertEqual(propagated[0]["argument_expression"], "uid")
+        self.assertEqual(propagated[0]["parameter_name"], "owner_id")
+        self.assertEqual(propagated[0]["verification_status"], "NOT_VERIFIED")
+        self.assertEqual(propagated[0]["propagation_status"],
+                         "CALL_ARGUMENT_TO_PARAMETER_STATIC_MAPPING")
+        flow = result["business_understanding"]["endpoint_execution_paths"][0]
+        self.assertEqual(len(flow["identity_parameter_propagation"]), 1)
+        self.assertEqual(flow["stage_status"]["identity_parameter_propagation"],
+                         "STATIC_MAPPING_DETECTED")
+
+    def test_does_not_propagate_identity_without_exact_owner_or_argument_mapping(self):
+        source = graph()
+        route_path = "server/routes/photos.py"
+        service_path = "server/services/photo_service.py"
+        source["nodes"].extend([
+            {"id": "file:" + service_path, "type": "file", "label": service_path,
+             "evidence": {"path": service_path}},
+            {"id": "symbol:" + route_path + "#listPhotos:10", "type": "function",
+             "label": "listPhotos", "evidence": {"path": route_path, "line": 10}},
+            {"id": "symbol:" + service_path + "#findOwnedPhotos:4", "type": "function",
+             "label": "findOwnedPhotos", "evidence": {"path": service_path, "line": 4}},
+        ])
+        handler = "symbol:" + route_path + "#listPhotos:10"
+        callee = "symbol:" + service_path + "#findOwnedPhotos:4"
+        source["edges"].append({
+            "source": "file:" + route_path, "target": callee, "type": "calls",
+            "caller_symbol_id": handler, "resolution_status": "RESOLVED",
+            "evidence": {"path": route_path, "line": 14},
+            "argument_binding_status": "UNSUPPORTED_ARGUMENT_SHAPE",
+            "argument_bindings": [],
+        })
+        result = project_business_graph(source, {
+            "endpoints": [{
+                "method": "GET", "path": "/photos", "source": route_path + ":5",
+                "line": 5, "handler_reference": "listPhotos",
+            }],
+            "identity_evidence": [{
+                "evidence_id": "identity-source-2",
+                "kind": "authenticated_identity_source",
+                "source": route_path, "line": 12,
+                "details": {"identity_expressions": ["request.user.id"],
+                            "source_variable": "uid"},
+                "scope": "SAME_LINE_PATTERN",
+                "owner_symbol_id": handler,
+                "owner_resolution_status": "RESOLVED",
+            }],
+        })
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["identity_parameter_propagation_evidence"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
