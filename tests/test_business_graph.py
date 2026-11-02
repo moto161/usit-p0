@@ -539,5 +539,84 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(endpoint["handler_association"]["identity_parameter_propagation_evidence"], [])
 
 
+    def test_propagates_identity_across_multiple_exact_resolved_call_edges(self):
+        source = graph()
+        route_path = "server/routes/photos.py"
+        service_path = "server/services/photo_service.py"
+        repository_path = "server/repositories/photo_repository.py"
+        symbols = {
+            "handler": "symbol:" + route_path + "#listPhotos:10",
+            "service": "symbol:" + service_path + "#findOwnedPhotos:4",
+            "repository": "symbol:" + repository_path + "#queryOwnedPhotos:8",
+        }
+        for path in (route_path, service_path, repository_path):
+            source["nodes"].append({
+                "id": "file:" + path, "type": "file", "label": path,
+                "evidence": {"path": path},
+            })
+        for key, path, name, line in (
+            ("handler", route_path, "listPhotos", 10),
+            ("service", service_path, "findOwnedPhotos", 4),
+            ("repository", repository_path, "queryOwnedPhotos", 8),
+        ):
+            source["nodes"].append({
+                "id": symbols[key], "type": "function", "label": name,
+                "evidence": {"path": path, "line": line},
+            })
+
+        def call_edge(caller, callee, path, line, expression, parameter):
+            return {
+                "source": "file:" + path, "target": callee, "type": "calls",
+                "caller_symbol_id": caller, "resolution_status": "RESOLVED",
+                "evidence": {"path": path, "line": line},
+                "argument_binding_status": "EXACT_STATIC_MAPPING",
+                "argument_bindings": [{
+                    "argument_index": 0, "argument_kind": "POSITIONAL",
+                    "argument_expression": expression,
+                    "argument_location": {"path": path, "line": line, "column": 20},
+                    "parameter_name": parameter, "parameter_index": 0,
+                    "parameter_kind": "positional_or_keyword",
+                    "parameter_declaration": {"path": path, "line": line, "column": 24},
+                }],
+                "target_location": {"path": path, "line": line},
+            }
+
+        source["edges"].extend([
+            call_edge(symbols["handler"], symbols["service"], route_path, 14, "uid", "owner_id"),
+            call_edge(symbols["service"], symbols["repository"], service_path, 9, "owner_id", "user_id"),
+        ])
+        result = project_business_graph(source, {
+            "endpoints": [{
+                "method": "GET", "path": "/photos", "source": route_path + ":5",
+                "line": 5, "handler_reference": "listPhotos",
+            }],
+            "identity_evidence": [{
+                "evidence_id": "identity-source-multihop",
+                "kind": "authenticated_identity_source",
+                "source": route_path, "line": 12,
+                "details": {"identity_expressions": ["request.user.id"],
+                            "source_variable": "uid"},
+                "scope": "SAME_LINE_PATTERN",
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "owner_symbol_id": symbols["handler"],
+                "owner_resolution_status": "RESOLVED",
+            }],
+        })
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        propagated = endpoint["handler_association"]["identity_parameter_propagation_evidence"]
+        self.assertEqual(len(propagated), 2)
+        by_depth = {item["propagation_depth"]: item for item in propagated}
+        self.assertEqual(by_depth[1]["parameter_name"], "owner_id")
+        self.assertEqual(by_depth[1]["propagation_status"],
+                         "CALL_ARGUMENT_TO_PARAMETER_STATIC_MAPPING")
+        self.assertEqual(by_depth[2]["argument_expression"], "owner_id")
+        self.assertEqual(by_depth[2]["parameter_name"], "user_id")
+        self.assertEqual(by_depth[2]["propagation_status"],
+                         "MULTI_HOP_STATIC_PARAMETER_MAPPING")
+        self.assertEqual(len(by_depth[2]["propagation_chain"]), 2)
+        self.assertEqual(by_depth[2]["verification_status"], "NOT_VERIFIED")
+
+
 if __name__ == "__main__":
     unittest.main()
