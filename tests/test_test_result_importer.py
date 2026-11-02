@@ -159,7 +159,14 @@ class TestResultImporterTests(unittest.TestCase):
             report, mapping, graph = self._inputs(base, '<testsuite><testcase classname="tests.PhotoTests" name="test_delete"/></testsuite>')
             result = ingest_junit_results(report, mapping, graph)
             upload = next(x for x in result["business_function_results"] if x["business_function_id"] == "bf-upload")
-            self.assertEqual(upload["execution_status"], "NOT_EXECUTED")
+            self.assertEqual(upload["execution_status"], "UNKNOWN")
+            self.assertEqual(
+                upload["execution_status_reason"],
+                "MAPPED_TEST_CASES_MISSING_FROM_REPORT",
+            )
+            self.assertEqual(upload["expected_mapped_test_case_count"], 1)
+            self.assertEqual(upload["reported_mapped_test_case_count"], 0)
+            self.assertEqual(upload["mapped_case_completeness"], "INCOMPLETE")
             self.assertEqual(upload["mapped_cases_missing_from_report"], ["tests.PhotoTests::test_upload"])
 
 
