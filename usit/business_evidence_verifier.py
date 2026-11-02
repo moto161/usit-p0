@@ -178,6 +178,58 @@ def verify_business_function_evidence(
                     "missing_test_case_ids": missing_test_case_ids,
                 })
                 ts = "UNKNOWN"
+
+            # When the importer supplies testcase-level evidence, independently
+            # derive the function status and cross-check its summary fields.
+            # A hand-edited PASSED summary must never override observed failures
+            # or incomplete testcase coverage.
+            if isinstance(raw_cases, list):
+                case_ids = [item["test_case_id"] for item in test_case_evidence]
+                case_counts = Counter(item["status"] for item in test_case_evidence)
+                if len(case_ids) != len(set(case_ids)):
+                    conflicts.append({
+                        "kind": "DUPLICATE_MAPPED_TEST_CASE_ID",
+                        "business_function_id": function_id,
+                    })
+                observed_summaries = {
+                    "mapped_test_case_count": len(test_case_evidence),
+                    "passed": case_counts["PASSED"],
+                    "failed": case_counts["FAILED"],
+                    "skipped": case_counts["SKIPPED"],
+                }
+                for field_name, observed_value in observed_summaries.items():
+                    supplied_value = test.get(field_name)
+                    if supplied_value is not None and supplied_value != observed_value:
+                        conflicts.append({
+                            "kind": "TEST_CASE_SUMMARY_MISMATCH",
+                            "business_function_id": function_id,
+                            "field": field_name,
+                            "supplied": supplied_value,
+                            "observed": observed_value,
+                        })
+                if expected_count is None or reported_count is None:
+                    derived_status = "UNKNOWN"
+                elif case_counts["FAILED"]:
+                    derived_status = "FAILED"
+                elif expected_count == 0 and reported_count == 0 and not test_case_evidence:
+                    derived_status = "NOT_EXECUTED"
+                elif (expected_count > reported_count or inferred_incomplete
+                      or case_counts["SKIPPED"] or reported_count != len(test_case_evidence)
+                      or reported_count != expected_count):
+                    derived_status = "UNKNOWN"
+                elif case_counts["PASSED"] == len(test_case_evidence):
+                    derived_status = "PASSED"
+                else:
+                    derived_status = "UNKNOWN"
+                if ts != derived_status:
+                    conflicts.append({
+                        "kind": "TEST_EXECUTION_STATUS_MISMATCH",
+                        "business_function_id": function_id,
+                        "reported": ts,
+                        "derived": derived_status,
+                    })
+                    ts = "FAILED" if derived_status == "FAILED" else "UNKNOWN"
+
             if inferred_incomplete:
                 completeness_status = "INCOMPLETE"
             elif claimed_completeness in {"COMPLETE", "NO_EXPECTED_MAPPED_CASES"}:
