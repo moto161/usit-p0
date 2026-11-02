@@ -31,7 +31,7 @@ class IdentityEvidenceTests(unittest.TestCase):
         self.assertIn("direct_authenticated_identity_to_sql_owner_binding", kinds)
         binding = next(row for row in rows
                        if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
-        self.assertEqual(binding["details"]["binding_status"], "SAME_LINE_PATTERN_ONLY")
+        self.assertEqual(binding["details"]["binding_status"], "SAME_LINE_PARAMETER_EXPRESSION")
 
     def test_detects_direct_request_identity_to_sql_owner_binding_without_claiming_vulnerability(self):
         rows = extract_identity_evidence({
@@ -140,6 +140,51 @@ class IdentityEvidenceTests(unittest.TestCase):
         source = {"repo/photos.ts": "const count = 1;\n"}
         self.assertEqual(extract_identity_evidence(source), [])
         self.assertEqual(extract_identity_evidence(source), extract_identity_evidence(source))
+
+
+    def test_does_not_bind_identity_mentioned_only_inside_sql_string(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": 'db.query("SELECT req.user.id FROM photos WHERE owner_id = ?", [otherId]);\n'
+        })
+        bindings = [row for row in rows if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"]
+        self.assertEqual(bindings, [])
+
+    def test_does_not_bind_identity_used_only_after_sql_call(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": 'db.query("SELECT id FROM photos WHERE owner_id = ?", [otherId]); audit(req.user.id);\n'
+        })
+        bindings = [row for row in rows if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"]
+        self.assertEqual(bindings, [])
+
+    def test_alias_must_appear_in_sql_parameter_argument_not_sql_text(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": (
+                "function load(req) {\n"
+                "  const uid = req.user.id;\n"
+                '  db.query("SELECT uid FROM photos WHERE owner_id = ?", [otherId]);\n'
+                "}\n"
+            )
+        })
+        propagated = [row for row in rows
+                      if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                      and row["scope"] == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT"]
+        self.assertEqual(propagated, [])
+
+    def test_direct_request_identity_requires_parameter_expression(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": 'db.query("SELECT id FROM photos WHERE owner_id = ?", [otherId, req.body.user_id]);\n'
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["binding_status"], "SAME_LINE_PARAMETER_EXPRESSION")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+
+    def test_does_not_infer_binding_when_sql_call_has_no_parameter_argument(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": 'db.query("SELECT id FROM photos WHERE owner_id = ?");\n'
+        })
+        bindings = [row for row in rows if row["kind"].endswith("_to_sql_owner_binding")]
+        self.assertEqual(bindings, [])
 
 
 if __name__ == "__main__":
