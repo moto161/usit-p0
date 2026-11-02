@@ -362,7 +362,7 @@ Python AST 与 TypeScript Compiler API 现在会在调用目标唯一且状态�
 
 遇到 `*args` / `**kwargs`、JS/TS spread、rest 参数、解构形参、超出可映射形参数量或不支持的参数形态时，整体标记 `UNSUPPORTED_ARGUMENT_SHAPE` 并输出空映射，不保留部分映射。非 `RESOLVED` 调用不生成参数映射。
 
-这只是跨函数数据流分析所需的结构化调用证据，不等于身份值已经传播到形参，也不证明运行时调用发生、参数值、控制流或副作用。下一步才会在唯一调用边、实参/形参映射和目标函数内 sink 证据同时齐备时建立有限的跨函数身份→资源归属候选；所有结果继续保持 `STATIC_INFERENCE / NOT_VERIFIED`。 参数映射也已随唯一 `RESOLVED` calls 边写入 `knowledge_graph.json`，并由图级回归测试检查；不支持的参数形态只保留状态，不写入部分映射。
+这只是跨函数数据流分析所需的结构化调用证据，不等于身份值已经传播到形参，也不证明运行时调用发生、参数值、控制流或副作用。下一步才会在唯一调用边、实参/形参映射和目标函数内 sink 证据同时齐备时建立有限的跨函数身份→资源归属候选；所有结果继续保持 `STATIC_INFERENCE / NOT_VERIFIED`。 参数映射也已随唯一 `RESOLVED` calls 边写入 `knowledge_graph.json`，并由图级回归测试检查；不支持的参数形态只保留状态，不写入部分映射。 图校验器同时检查映射状态与调用解析状态一致、字段及源码位置完整、参数目标不重复，并拒绝未解析调用上的映射和不支持形态的部分映射。
 
 ### Mapping manifest example
 
