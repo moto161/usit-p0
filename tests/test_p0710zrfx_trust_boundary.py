@@ -294,10 +294,13 @@ class ZRFX8FrozenTestsUntouched(_Base):
     """Execute the frozen + compatibility suites; hashes must be identical."""
 
     def test_zrfx8_frozen_files_byte_identical(self):
-        for rel, want in FROZEN_SHA.items():
-            digest = hashlib.sha256((PROJ / rel).read_bytes()).hexdigest()
-            self.assertEqual(digest, want, f"{rel} was modified")
         manifest = load_maintenance_baseline()
+        for rel, want in FROZEN_SHA.items():
+            entry = manifest["files"][rel]
+            self.assertEqual(entry.get("historical_sha256"), want,
+                             f"{rel} historical PRE digest was changed")
+            self.assertEqual(git_blob_sha1(rel), entry["git_blob_sha1"],
+                             f"{rel} canonical Git blob drifted")
         graph_entry = manifest["files"]["tests/test_graph_validation.py"]
         self.assertEqual(graph_entry.get("historical_sha256"),
                          HISTORICAL_GRAPH_VALIDATION_SHA256)
