@@ -29,9 +29,17 @@ jobs:
         run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_test_result_importer tests.test_pytest_result_importer tests.test_test_report_adapters tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_verification_gap_analyzer tests.test_project_quality_assessment tests.test_business_traceability tests.test_traceability_template tests.test_business_graph tests.test_database_access tests.test_permission_evidence tests.test_python_resolver tests.test_security_test_planner tests.test_identity_evidence tests.test_identity_graph tests.test_runtime_evidence tests.test_android_event_adapter tests.test_ai_gateway tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_ai_evidence_binding tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_p074_identity_ctime tests.test_p079_public_paths tests.test_js_ts_adapter_regressions -v
       - name: Run USIT self-test
         run: python -m usit selftest
-      - name: Run full repository regression suite (baseline comparison)
+      - name: Diagnostic full repository regression suite (non-gating; see step summary)
+        id: full_repository_regression
         continue-on-error: true
         run: python -m unittest discover -s tests -v
+      - name: Report full repository regression outcome
+        if: always()
+        env:
+          REGRESSION_OUTCOME: ${{ steps.full_repository_regression.outcome }}
+        run: |
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Full repository regression (diagnostic)\\n\\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\\n- This run is non-gating; targeted business-understanding tests and USIT self-test are the required gates.\\n', encoding='utf-8')"
+
 
   windows-regression:
     runs-on: windows-latest
@@ -52,9 +60,17 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run USIT self-test on Windows
         run: python -m usit selftest
-      - name: Run full repository regression suite on Windows (baseline comparison)
+      - name: Diagnostic full repository regression suite on Windows (non-gating; see step summary)
+        id: full_repository_regression
         continue-on-error: true
         run: python -m unittest discover -s tests -v
+      - name: Report Windows full repository regression outcome
+        if: always()
+        env:
+          REGRESSION_OUTCOME: ${{ steps.full_repository_regression.outcome }}
+        run: |
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Windows full repository regression (diagnostic)\\n\\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\\n- This run is non-gating; USIT self-test is the required gate.\\n', encoding='utf-8')"
+
   main-baseline-regression:
     strategy:
       fail-fast: false
@@ -78,7 +94,8 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run main baseline self-test
         run: python -m usit selftest
-      - name: Run main baseline full repository suite (exclude interrupt-test harness defect)
+      - name: Diagnostic main baseline suite (exclude known interrupt-test harness defect; non-gating)
+        id: main_baseline_full_regression
         continue-on-error: true
         shell: bash
         run: |
@@ -101,3 +118,9 @@ jobs:
           outcome = unittest.TextTestRunner(verbosity=2).run(filtered(discovered))
           raise SystemExit(0 if outcome.wasSuccessful() else 1)
           PY
+      - name: Report main baseline regression outcome
+        if: always()
+        env:
+          REGRESSION_OUTCOME: ${{ steps.main_baseline_full_regression.outcome }}
+        run: |
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Main baseline regression (diagnostic)\\n\\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\\n- One known interrupt-test harness case is excluded; this is not a complete pass claim.\\n', encoding='utf-8')"
