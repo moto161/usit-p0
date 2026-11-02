@@ -17,18 +17,22 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
 
     def test_cross_checks_test_and_coverage_without_claiming_business_correctness(self):
         tests={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
             "business_function_results":[
                 {"business_function_id":"bf-upload","execution_status":"PASSED","mapped_test_case_count":3,"failed":0,"skipped":0},
                 {"business_function_id":"bf-delete","execution_status":"FAILED","mapped_test_case_count":2,"failed":1,"skipped":0}]}
         coverage={"schema_version":"usit-code-coverage-results-v1",
-            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
             "business_function_coverage":[
                 {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0},
                 {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0}]}
         result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
         by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
         self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED")
+        self.assertEqual(
+            by_id["bf-upload"]["code_coverage_detail"]["source_hashes"]["coverage_report_sha256"],
+            "3"*64,
+        )
         self.assertEqual(by_id["bf-delete"]["verification_conclusion"],"TEST_FAILURE_OBSERVED")
         self.assertEqual(by_id["bf-share"]["verification_conclusion"],"NO_RUNTIME_TEST_EVIDENCE")
         self.assertTrue(all(x["business_correctness"]=="NOT_PROVEN" for x in by_id.values()))
@@ -36,7 +40,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
 
     def test_graph_hash_mismatch_is_global_conflict(self):
         tests={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"business_graph_sha256":"0"*64},"business_function_results":[]}
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":"0"*64},"business_function_results":[]}
         result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
         self.assertEqual(result["evidence_conflict_count"],1)
         self.assertTrue(all(x["evidence_conflict"] for x in result["business_function_evidence"]))
@@ -44,12 +48,12 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
 
     def test_unknown_function_and_duplicate_records_are_rejected_or_reported(self):
         tests={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
             "business_function_results":[{"business_function_id":"not-in-graph","execution_status":"PASSED"}]}
         result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
         self.assertEqual(result["evidence_conflicts"][0]["kind"],"UNKNOWN_BUSINESS_FUNCTION")
         duplicate={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
             "business_function_results":[{"business_function_id":"bf-upload"},{"business_function_id":"bf-upload"}]}
         with self.assertRaisesRegex(ValueError,"duplicate business_function_id"):
             verify_business_function_evidence(self.graph,duplicate,None,self.graph_hash)
@@ -58,7 +62,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"usit-graph-v1"):
             verify_business_function_evidence({"schema_version":"wrong"})
         tests={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
             "business_function_results":[{"business_function_id":"bf-upload","execution_status":"MAGIC_PASS"}]}
         result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
         self.assertEqual(result["evidence_conflicts"][0]["kind"],"INVALID_TEST_STATUS")
@@ -66,7 +70,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
     def test_incomplete_mapped_report_cannot_remain_passed_in_evidence_matrix(self):
         tests = {
             "schema_version": "usit-test-execution-results-v1",
-            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "source_hashes": {"test_report_sha256": "1"*64, "mapping_json_sha256": "2"*64, "business_graph_sha256": self.graph_hash},
             "business_function_results": [{
                 "business_function_id": "bf-upload",
                 "execution_status": "PASSED",
@@ -104,7 +108,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
     def test_case_level_failure_overrides_forged_pass_summary(self):
         tests = {
             "schema_version": "usit-test-execution-results-v1",
-            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "source_hashes": {"test_report_sha256": "1"*64, "mapping_json_sha256": "2"*64, "business_graph_sha256": self.graph_hash},
             "business_function_results": [{
                 "business_function_id": "bf-upload",
                 "execution_status": "PASSED",
@@ -144,7 +148,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
             graph=base/"graph.json"; tests=base/"tests.json"; out=base/"evidence.json"
             graph.write_bytes(self.graph_bytes)
             tests.write_text(json.dumps({"schema_version":"usit-test-execution-results-v1",
-                "source_hashes":{"business_graph_sha256":self.graph_hash},
+                "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
                 "business_function_results":[]}),encoding="utf-8")
             output=StringIO()
             with redirect_stdout(output):
@@ -154,12 +158,76 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
             self.assertEqual(saved["business_function_count"],3)
             bad=base/"bad.json"
             tests.write_text(json.dumps({"schema_version":"usit-test-execution-results-v1",
-                "source_hashes":{"business_graph_sha256":"0"*64},
+                "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":"0"*64},
                 "business_function_results":[]}),encoding="utf-8")
             with redirect_stdout(StringIO()):
                 code=main(["verify-evidence","--graph",str(graph),"--test-results",str(tests),"--out",str(bad)])
             self.assertEqual(code,1)
             self.assertEqual(json.loads(bad.read_text(encoding="utf-8"))["evidence_conflict_count"],1)
+
+    def test_coverage_provenance_is_preserved_and_invalid_measurements_conflict(self):
+        tests = {
+            "schema_version": "usit-test-execution-results-v1",
+            "source_hashes": {
+                "test_report_sha256": "1"*64,
+                "mapping_json_sha256": "2"*64,
+                "business_graph_sha256": self.graph_hash,
+            },
+            "business_function_results": [],
+        }
+        coverage = {
+            "schema_version": "usit-code-coverage-results-v1",
+            "source_hashes": {
+                "coverage_report_sha256": "3"*64,
+                "mapping_json_sha256": "4"*64,
+                "business_graph_sha256": self.graph_hash,
+            },
+            "business_function_coverage": [{
+                "business_function_id": "bf-upload",
+                "code_coverage_status": "COVERED",
+                "line_coverage_percent": 120,
+                "executable_line_count": 5,
+                "covered_line_count": 5,
+                "uncovered_line_count": 0,
+                "mapping_ranges": [{
+                    "source_file": "src/upload.py",
+                    "line_start": 10,
+                    "line_end": 14,
+                }],
+                "coverage_source_files_missing": [],
+            }],
+        }
+        result = verify_business_function_evidence(
+            self.graph, tests, coverage, self.graph_hash
+        )
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(
+            upload["code_coverage_detail"]["source_hashes"]["mapping_json_sha256"],
+            "4"*64,
+        )
+        self.assertEqual(
+            upload["code_coverage_detail"]["mapping_ranges"][0]["source_file"],
+            "src/upload.py",
+        )
+        self.assertTrue(upload["evidence_conflict"])
+        self.assertIn(
+            "INVALID_COVERAGE_PERCENT",
+            {item["kind"] for item in result["evidence_conflicts"]},
+        )
+
+    def test_source_hashes_must_be_complete_sha256_digests(self):
+        malformed = {
+            "schema_version": "usit-test-execution-results-v1",
+            "source_hashes": {
+                "test_report_sha256": "not-a-hash",
+                "mapping_json_sha256": "2"*64,
+                "business_graph_sha256": self.graph_hash,
+            },
+            "business_function_results": [],
+        }
+        with self.assertRaisesRegex(ValueError, "test_report_sha256"):
+            verify_business_function_evidence(self.graph, malformed, business_graph_sha256=self.graph_hash)
 
     def test_missing_inputs_remain_not_measured(self):
         result=verify_business_function_evidence(self.graph)
