@@ -139,6 +139,27 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(validation["quality"]["errors"], 0)
         self.assertEqual(validation["quality"]["resolved_calls"], len(expected))
 
+    def test_graph_call_edge_preserves_resolved_argument_mapping(self):
+        source = self.root / "mapping.py"
+        source.write_text(
+            "def sink(owner_id):\n"
+            "    return owner_id\n"
+            "def caller(req):\n"
+            "    sink(req.user.id)\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "mapping-graph-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        edge = next(item for item in graph["edges"]
+                    if item["type"] == "calls"
+                    and item["evidence"]["path"] == "mapping.py"
+                    and item["resolution_status"] == "RESOLVED")
+        self.assertEqual(edge["argument_binding_status"], "EXACT_STATIC_MAPPING")
+        self.assertEqual(edge["argument_bindings"][0]["argument_expression"], "req.user.id")
+        self.assertEqual(edge["argument_bindings"][0]["parameter_name"], "owner_id")
+        self.assertEqual(edge["argument_bindings"][0]["parameter_declaration"]["path"], "mapping.py")
+
     def test_python_call_records_identify_enclosing_function(self):
         rows, _ = self.analyze()
         call = next(call for row in rows if row["path"] == "main.py"
