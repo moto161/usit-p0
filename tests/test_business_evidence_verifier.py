@@ -267,6 +267,8 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                     if item["business_function_id"] == "bf-upload"
                 )
                 self.assertTrue(upload["evidence_conflict"])
+                # Even malformed non-finite input must not make the emitted artifact invalid JSON.
+                json.dumps(result, allow_nan=False)
 
     def test_source_hashes_must_be_complete_sha256_digests(self):
         malformed = {
