@@ -26,6 +26,19 @@ def _index(rows: Any, key: str, label: str) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _validated_hashes(value: Any, required: tuple[str, ...], label: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} source_hashes must be an object")
+    result = {}
+    for field in required:
+        digest = value.get(field)
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError(f"{label} source_hashes.{field} must be a lowercase SHA-256 hex digest")
+        result[field] = digest
+    return result
+
+
 def verify_business_function_evidence(
     business_graph: dict[str, Any],
     test_results: dict[str, Any] | None = None,
@@ -54,9 +67,11 @@ def verify_business_function_evidence(
     if test_results is not None:
         if not isinstance(test_results, dict) or test_results.get("schema_version") != TEST_SCHEMA:
             raise ValueError(f"test results must use {TEST_SCHEMA}")
-        hashes = test_results.get("source_hashes")
-        if not isinstance(hashes, dict) or not isinstance(hashes.get("business_graph_sha256"), str):
-            raise ValueError("test results missing business_graph_sha256")
+        hashes = _validated_hashes(
+            test_results.get("source_hashes"),
+            ("test_report_sha256", "mapping_json_sha256", "business_graph_sha256"),
+            "test results",
+        )
         if hashes["business_graph_sha256"] != graph_hash:
             conflicts.append({"kind":"GRAPH_HASH_MISMATCH","source":"test_results",
                               "expected":graph_hash,"actual":hashes["business_graph_sha256"]})
@@ -65,9 +80,11 @@ def verify_business_function_evidence(
     if coverage_results is not None:
         if not isinstance(coverage_results, dict) or coverage_results.get("schema_version") != COVERAGE_SCHEMA:
             raise ValueError(f"coverage results must use {COVERAGE_SCHEMA}")
-        hashes = coverage_results.get("source_hashes")
-        if not isinstance(hashes, dict) or not isinstance(hashes.get("business_graph_sha256"), str):
-            raise ValueError("coverage results missing business_graph_sha256")
+        hashes = _validated_hashes(
+            coverage_results.get("source_hashes"),
+            ("coverage_report_sha256", "mapping_json_sha256", "business_graph_sha256"),
+            "coverage results",
+        )
         if hashes["business_graph_sha256"] != graph_hash:
             conflicts.append({"kind":"GRAPH_HASH_MISMATCH","source":"coverage_results",
                               "expected":graph_hash,"actual":hashes["business_graph_sha256"]})
