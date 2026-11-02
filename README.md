@@ -689,3 +689,11 @@ Use `usit verify-scan-attestation --manifest scan_manifest.json --attestation sc
 - For an endpoint-reachable call edge, identity evidence propagates only when the edge is RESOLVED, argument_binding_status=EXACT_STATIC_MAPPING, and the explicit argument expression equals the source variable or identity expression. The output records caller/callee symbols, callsite, argument and parameter declaration.
 - Output field: identity_parameter_propagation_evidence; status is CALL_ARGUMENT_TO_PARAMETER_STATIC_MAPPING, confidence STATIC_INFERENCE, verification NOT_VERIFIED.
 - This stage stops at the callee parameter. It does not yet prove that the parameter reaches a SQL/resource sink, does not propagate through return values/fields/collections/closures, and does not infer JavaScript/TypeScript function ownership. Unsupported or ambiguous cases remain unlinked.
+
+## S2.30-C — 多跳身份参数静态传播（实现中，等待 CI）
+
+- 在 S2.30-B 单跳实参→形参映射基础上，沿唯一 `RESOLVED` 调用边和 `EXACT_STATIC_MAPPING` 参数绑定继续传播身份表达式；每一跳必须满足前一跳形参名与下一跳实参表达式精确相等。
+- 输出逐跳传播记录、深度和完整传播链；仅处理已关联 endpoint 调用链中的符号，要求身份来源 owner 明确为 `RESOLVED`。
+- 对同一调用位置多目标、重复/歧义参数绑定、动态/不支持参数形态、缺失形参名、循环回访均不继续传播；不按函数名猜测。
+- 所有结果仍为 `STATIC_INFERENCE` / `NOT_VERIFIED`；不证明运行时执行、变量值、SQL sink 到达或资源归属正确。
+- 新增两跳合成回归用例，验证 `uid → owner_id → user_id` 及完整链条。当前提交待 CI 验证。
