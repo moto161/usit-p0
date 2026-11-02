@@ -216,6 +216,10 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
         if isinstance(raw_function_views, list):
             function_views = [item for item in raw_function_views if isinstance(item, Mapping)]
 
+    function_views = []
+    if isinstance(understanding, Mapping) and isinstance(understanding.get("business_function_views", []), list):
+        function_views = [item for item in understanding.get("business_function_views", []) if isinstance(item, Mapping)]
+
     alignments = semantics.get("endpoint_contract_alignment", [])
     if isinstance(alignments, list):
         for alignment in alignments:
@@ -379,11 +383,6 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
             ],
         ))
 
-    function_views = []
-    if isinstance(business_graph, Mapping):
-        understanding = business_graph.get("business_understanding")
-        if isinstance(understanding, Mapping) and isinstance(understanding.get("business_function_views", []), list):
-            function_views = [item for item in understanding.get("business_function_views", []) if isinstance(item, Mapping)]
     function_views_by_endpoint: dict[str, list[Mapping[str, Any]]] = {}
     for item in function_views:
         endpoint_id = item.get("endpoint_id")
