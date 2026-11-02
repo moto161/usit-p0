@@ -115,7 +115,7 @@ def verify_business_function_evidence(
                 conflicts.append({
                     "kind": "INVALID_COVERAGE_PERCENT",
                     "business_function_id": function_id,
-                    "value": percent,
+                    "value": repr(percent) if isinstance(percent, float) and not math.isfinite(percent) else percent,
                 })
             counts = {}
             counts_valid = True
@@ -372,7 +372,7 @@ def verify_business_function_evidence(
                 "mapped_test_cases": test_case_evidence,
             } if test else None,
             "code_coverage_status":cs,
-            "line_coverage_percent":cov.get("line_coverage_percent") if cov else None,
+            "line_coverage_percent": (cov.get("line_coverage_percent") if cov and percent_valid else None),
             "code_coverage_detail": {
                 "source_hashes": dict(coverage_results.get("source_hashes", {})) if cov else {},
                 "coverage_basis": cov.get("coverage_basis"),
