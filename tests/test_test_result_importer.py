@@ -168,6 +168,21 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(upload["reported_mapped_test_case_count"], 0)
             self.assertEqual(upload["mapped_case_completeness"], "INCOMPLETE")
             self.assertEqual(upload["mapped_cases_missing_from_report"], ["tests.PhotoTests::test_upload"])
+            from usit.business_evidence_verifier import verify_business_function_evidence
+            graph_doc = json.loads(graph.read_text(encoding="utf-8"))
+            matrix = verify_business_function_evidence(
+                graph_doc, result,
+                business_graph_sha256=result["source_hashes"]["business_graph_sha256"],
+            )
+            verified_upload = next(
+                item for item in matrix["business_function_evidence"]
+                if item["business_function_id"] == "bf-upload"
+            )
+            self.assertEqual(verified_upload["test_execution_status"], "UNKNOWN")
+            self.assertEqual(
+                verified_upload["verification_conclusion"],
+                "TEST_EVIDENCE_INCONCLUSIVE",
+            )
 
 
     def test_cli_writes_result_file_without_running_tests(self):
