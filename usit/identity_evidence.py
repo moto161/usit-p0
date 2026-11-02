@@ -121,16 +121,18 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                             "identity_expressions": [origin["expression"]],
                             "resource_fields": owner_fields,
                             "binding_status": "INTRAPROCEDURAL_LINEAR_ASSIGNMENT",
-                            "propagation": [{"path": path, "line": origin["line"], "variable": name},
-                                            {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}],
+                            "propagation": origin["propagation"] + [
+                                {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}
+                            ],
                         }))
                     elif origin["kind"] == "request":
                         kinds.append(("direct_request_identity_to_sql_owner_binding", {
                             "request_expressions": [origin["expression"]],
                             "resource_fields": owner_fields,
                             "binding_status": "INTRAPROCEDURAL_LINEAR_ASSIGNMENT",
-                            "propagation": [{"path": path, "line": origin["line"], "variable": name},
-                                            {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}],
+                            "propagation": origin["propagation"] + [
+                                {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}
+                            ],
                         }))
 
             for kind, details in kinds:
@@ -150,11 +152,16 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                 name, rhs = match.groups()
                 rhs = rhs.strip().rstrip(";")
                 if _TRUSTED.fullmatch(rhs):
-                    aliases[name] = {"kind": "trusted", "expression": rhs, "line": line_no}
+                    aliases[name] = {"kind": "trusted", "expression": rhs, "line": line_no,
+                                     "propagation": [{"path": path, "line": line_no, "variable": name}]}
                 elif _REQUEST.fullmatch(rhs):
-                    aliases[name] = {"kind": "request", "expression": rhs, "line": line_no}
+                    aliases[name] = {"kind": "request", "expression": rhs, "line": line_no,
+                                     "propagation": [{"path": path, "line": line_no, "variable": name}]}
                 elif re.fullmatch(r"[A-Za-z_$][\w$]*", rhs) and rhs in aliases:
-                    aliases[name] = {**aliases[rhs], "line": line_no}
+                    aliases[name] = {**aliases[rhs],
+                                     "propagation": aliases[rhs]["propagation"] + [
+                                         {"path": path, "line": line_no, "variable": name}
+                                     ]}
                 else:
                     aliases.pop(name, None)
 
