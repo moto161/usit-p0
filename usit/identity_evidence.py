@@ -42,9 +42,8 @@ def _id(record: Mapping[str, Any]) -> str:
 def _call_parameter_code(line: str, call_start: int) -> str:
     """Return code-only text from positional arguments after the SQL string argument.
 
-    String literals (including SQL text and template literals) and comments are
-    excluded. Nested arrays/objects/calls are kept as part of their argument.
-    Unsupported or unbalanced calls return an empty string.
+    String literals and comments are excluded. Nested arrays/objects/calls are
+    retained. Unsupported or unbalanced calls return an empty string.
     """
     stack = ["("]
     args: list[str] = []
@@ -57,13 +56,13 @@ def _call_parameter_code(line: str, call_start: int) -> str:
         if quote:
             if escaped:
                 escaped = False
-            elif char == "\\\\":
+            elif char == "\\":
                 escaped = True
             elif char == quote:
                 quote = None
             index += 1
             continue
-        if char in {"'", '"', "\`"}:
+        if char in {"'", '"'} or char == chr(96):
             quote = char
             index += 1
             continue
@@ -98,14 +97,14 @@ def _call_parameter_code(line: str, call_start: int) -> str:
             if quote:
                 if escaped:
                     escaped = False
-                elif char == "\\\\":
+                elif char == "\\":
                     escaped = True
                 elif char == quote:
                     quote = None
                 code_parts.append(" ")
                 index += 1
                 continue
-            if char in {"'", '"', "\`"}:
+            if char in {"'", '"'} or char == chr(96):
                 quote = char
                 code_parts.append(" ")
                 index += 1
