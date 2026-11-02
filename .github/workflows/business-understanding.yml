@@ -1,5 +1,11 @@
 name: USIT business-understanding tests
 
+# Keep only the newest validation for a branch; push and PR events share
+# the same group so stale queued runs cannot starve the current HEAD.
+concurrency:
+  group: usit-validation-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
