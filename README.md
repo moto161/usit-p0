@@ -324,7 +324,7 @@ The conclusion vocabulary is deliberately limited:
 - `NO_RUNTIME_TEST_EVIDENCE`: no imported runtime test evidence exists.
 - `EVIDENCE_CONFLICT`: source graph identity, business-function linkage or testcase completeness metadata conflicts; a `PASSED` row with missing mapped testcases is downgraded to `UNKNOWN` and reported as a conflict.
 
-The evidence row preserves the testcase-level IDs/statuses, expected and reported mapped testcase counts, completeness state and missing testcase IDs. `trace-business` carries those fields into each linked requirement row, and its Markdown report lists reported and missing testcase IDs separately. An incomplete report is never treated as a function-level pass.
+The evidence row preserves the testcase-level IDs/statuses, expected and reported mapped testcase counts, completeness state and missing testcase IDs. It also preserves, per business function, the coverage report/mapping/graph SHA-256 values, exact source-file line ranges, measured line counts and missing source files. Imported source hashes must be complete lowercase SHA-256 digests; invalid coverage percentages, counts or mapping ranges are recorded as evidence conflicts. `trace-business` carries those fields into each linked requirement row, and its Markdown report lists reported and missing testcase IDs separately. An incomplete report is never treated as a function-level pass.
 
 Example:
 
