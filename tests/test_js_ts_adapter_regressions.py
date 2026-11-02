@@ -27,6 +27,41 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
             self.assertEqual(by_callee["axios.get"]["test_name"], "testLoadsItems")
             self.assertEqual(by_callee["client.post"]["test_name"], "testSavesItems")
 
+    def test_resolved_typescript_call_records_exact_argument_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "flow.ts").write_text(
+                "function sink(ownerId: string) { return ownerId; }\\n"
+                "function caller(req: any) { const uid = req.user.id; sink(uid); }\\n",
+                encoding="utf-8",
+            )
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            row = parsed["files"]["flow.ts"]
+            call = next(item for item in row["calls"] if item["callee"] == "sink")
+            self.assertEqual(call["resolution_status"], "RESOLVED", call)
+            self.assertEqual(call["argument_binding_status"], "EXACT_STATIC_MAPPING")
+            self.assertEqual(len(call["argument_bindings"]), 1)
+            binding = call["argument_bindings"][0]
+            self.assertEqual(binding["argument_expression"], "uid")
+            self.assertEqual(binding["parameter_name"], "ownerId")
+            self.assertEqual(binding["parameter_index"], 0)
+            self.assertEqual(binding["argument_location"]["line"], 2)
+            self.assertEqual(binding["parameter_declaration"]["line"], 1)
+
+    def test_typescript_spread_arguments_do_not_emit_partial_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "flow.ts").write_text(
+                "function sink(ownerId: string) { return ownerId; }\\n"
+                "function caller(args: any[]) { sink(...args); }\\n",
+                encoding="utf-8",
+            )
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            call = next(item for item in parsed["files"]["flow.ts"]["calls"] if item["callee"] == "sink")
+            self.assertEqual(call["resolution_status"], "RESOLVED", call)
+            self.assertEqual(call["argument_binding_status"], "UNSUPPORTED_ARGUMENT_SHAPE")
+            self.assertEqual(call["argument_bindings"], [])
+
     def test_top_level_math_random_resolves_to_typescript_lib_declaration(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
