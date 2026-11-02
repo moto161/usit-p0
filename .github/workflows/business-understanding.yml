@@ -38,7 +38,7 @@ jobs:
         env:
           REGRESSION_OUTCOME: ${{ steps.full_repository_regression.outcome }}
         run: |
-          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Full repository regression (diagnostic)\\n\\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\\n- This run is non-gating; targeted business-understanding tests and USIT self-test are the required gates.\\n', encoding='utf-8')"
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Full repository regression (diagnostic)\n\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\n- This run is non-gating; targeted business-understanding tests and USIT self-test are the required gates.\n', encoding='utf-8')"
 
 
   windows-regression:
@@ -69,7 +69,7 @@ jobs:
         env:
           REGRESSION_OUTCOME: ${{ steps.full_repository_regression.outcome }}
         run: |
-          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Windows full repository regression (diagnostic)\\n\\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\\n- This run is non-gating; USIT self-test is the required gate.\\n', encoding='utf-8')"
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Windows full repository regression (diagnostic)\n\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\n- This run is non-gating; USIT self-test is the required gate.\n', encoding='utf-8')"
 
   main-baseline-regression:
     strategy:
@@ -123,4 +123,4 @@ jobs:
         env:
           REGRESSION_OUTCOME: ${{ steps.main_baseline_full_regression.outcome }}
         run: |
-          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Main baseline regression (diagnostic)\\n\\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\\n- One known interrupt-test harness case is excluded; this is not a complete pass claim.\\n', encoding='utf-8')"
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text('### Main baseline regression (diagnostic)\n\n- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**\n- One known interrupt-test harness case is excluded; this is not a complete pass claim.\n', encoding='utf-8')"
