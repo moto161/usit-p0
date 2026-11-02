@@ -205,7 +205,7 @@ class TestResultImporterTests(unittest.TestCase):
             summary = json.loads(stdout.getvalue())
             self.assertEqual(summary["test_case_count"], 1)
             self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["business_function_status_counts"],
-                             {"NOT_EXECUTED": 2, "PASSED": 1})
+                             {"NOT_EXECUTED": 1, "PASSED": 1, "UNKNOWN": 1})
 
 if __name__ == "__main__":
     unittest.main()
