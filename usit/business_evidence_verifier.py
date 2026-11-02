@@ -103,6 +103,42 @@ def verify_business_function_evidence(
         ts=test.get("execution_status","NOT_MEASURED") if test else "NOT_MEASURED"
         reported_test_status = ts
         cs=cov.get("code_coverage_status","NOT_MEASURED") if cov else "NOT_MEASURED"
+        if cov is not None:
+            percent = cov.get("line_coverage_percent")
+            if percent is not None and (
+                not isinstance(percent, (int, float)) or isinstance(percent, bool)
+                or percent < 0 or percent > 100
+            ):
+                conflicts.append({
+                    "kind": "INVALID_COVERAGE_PERCENT",
+                    "business_function_id": function_id,
+                    "value": percent,
+                })
+            for count_field in ("executable_line_count", "covered_line_count", "uncovered_line_count"):
+                count_value = cov.get(count_field)
+                if count_value is not None and (
+                    not isinstance(count_value, int) or isinstance(count_value, bool) or count_value < 0
+                ):
+                    conflicts.append({
+                        "kind": "INVALID_COVERAGE_COUNT",
+                        "business_function_id": function_id,
+                        "field": count_field,
+                    })
+            ranges = cov.get("mapping_ranges", [])
+            if not isinstance(ranges, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("source_file"), str)
+                or not isinstance(item.get("line_start"), int)
+                or isinstance(item.get("line_start"), bool)
+                or not isinstance(item.get("line_end"), int)
+                or isinstance(item.get("line_end"), bool)
+                or item["line_start"] < 1 or item["line_end"] < item["line_start"]
+                for item in ranges
+            ):
+                conflicts.append({
+                    "kind": "INVALID_COVERAGE_MAPPING_EVIDENCE",
+                    "business_function_id": function_id,
+                })
         if ts not in {"PASSED","FAILED","UNKNOWN","NOT_EXECUTED","NOT_MEASURED"}:
             conflicts.append({"kind":"INVALID_TEST_STATUS","business_function_id":function_id,"status":ts})
         if cs not in {"COVERED","PARTIAL","NOT_COVERED","UNKNOWN","NOT_MEASURED"}:
@@ -279,6 +315,16 @@ def verify_business_function_evidence(
             } if test else None,
             "code_coverage_status":cs,
             "line_coverage_percent":cov.get("line_coverage_percent") if cov else None,
+            "code_coverage_detail": {
+                "source_hashes": dict(coverage_results.get("source_hashes", {})) if cov else {},
+                "coverage_basis": cov.get("coverage_basis"),
+                "verification_status": cov.get("verification_status"),
+                "executable_line_count": cov.get("executable_line_count"),
+                "covered_line_count": cov.get("covered_line_count"),
+                "uncovered_line_count": cov.get("uncovered_line_count"),
+                "mapping_ranges": cov.get("mapping_ranges", []),
+                "coverage_source_files_missing": cov.get("coverage_source_files_missing", []),
+            } if cov else None,
             "verification_conclusion":conclusion,"business_correctness":"NOT_PROVEN",
             "evidence_conflict":False,
         })
@@ -304,6 +350,8 @@ def verify_business_function_evidence(
             "静态业务功能视图仍是 STATIC_INFERENCE；本报告不会把它升级为 VERIFIED_FACT。",
             "测试结果与覆盖率必须引用同一份业务图；图哈希不一致时标记证据冲突。",
             "已映射 testcase 的报告完整性会被单独保留；缺失预期 testcase 的 PASSED 工件会被标记为证据冲突。",
+            "测试与覆盖率报告、映射文件和业务图的 SHA-256 来源哈希会保留；覆盖率行范围与缺失源文件会随功能证据输出。",
+            "覆盖率百分比、行计数和映射范围会执行结构校验；无效值产生证据冲突，不得作为可信覆盖结论。",
             "未提供的测试或覆盖率证据标记 NOT_MEASURED，不推断为失败或零覆盖。",
         ],
     }
