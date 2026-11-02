@@ -681,3 +681,11 @@ Install the project dependencies with `python -m pip install .`. Synthetic tests
 ### Verify a detached scan attestation
 
 Use `usit verify-scan-attestation --manifest scan_manifest.json --attestation scan_attestation.json --trusted-public-key <external-public-key.pem> --out attestation-report.json`. Repeat `--trusted-public-key` for additional trusted keys. Public keys may be raw 32-byte Ed25519 data or PEM Ed25519 public keys. An optional `--expected-snapshot-id` applies an explicit snapshot-identity policy. Exit code 0 means the signature is valid under a supplied trusted key; exit code 2 means verification or trust policy did not pass. Keep trust keys outside the evidence bundle and provision them independently; this CLI does not manage enrollment or revocation.
+
+## S2.30-B — Python identity source ownership and one-edge parameter propagation
+
+- Python identity-source records now receive owner_symbol_id only when the source line is inside an AST-parsed function with a valid end_lineno; nested functions select the innermost containing function. Syntax-invalid Python, module-level statements, and non-Python files retain owner_resolution_status=UNKNOWN.
+- A simple direct assignment such as uid = request.user.id records source_variable=uid. The business graph accepts this owner only when the exact symbol ID exists and its source path matches the evidence path.
+- For an endpoint-reachable call edge, identity evidence propagates only when the edge is RESOLVED, argument_binding_status=EXACT_STATIC_MAPPING, and the explicit argument expression equals the source variable or identity expression. The output records caller/callee symbols, callsite, argument and parameter declaration.
+- Output field: identity_parameter_propagation_evidence; status is CALL_ARGUMENT_TO_PARAMETER_STATIC_MAPPING, confidence STATIC_INFERENCE, verification NOT_VERIFIED.
+- This stage stops at the callee parameter. It does not yet prove that the parameter reaches a SQL/resource sink, does not propagate through return values/fields/collections/closures, and does not infer JavaScript/TypeScript function ownership. Unsupported or ambiguous cases remain unlinked.
