@@ -82,13 +82,13 @@ def raw_write(path: Path, data: bytes) -> None:
 # Git-blob baseline; the original PRE_SHA256.json is never rewritten.
 ZXRXF7_HISTORICAL_WATCH = (
     "usit/safeio.py",
-    "tests/test_graph_validation.py",
     "tests/test_p073_budget_race.py",
-    "tests/test_p0710z_snapshot_trust.py",
 )
 ZXRXF7_MAINTENANCE_WATCH = (
     "usit/graph.py",
     "usit/scanner.py",
+    "tests/test_graph_validation.py",
+    "tests/test_p0710z_snapshot_trust.py",
     "tests/test_p0710zrf_descriptor_binding.py",
 )
 ZXRXF7_WATCH = ZXRXF7_HISTORICAL_WATCH + ZXRXF7_MAINTENANCE_WATCH
