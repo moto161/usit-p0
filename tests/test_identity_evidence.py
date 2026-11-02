@@ -84,8 +84,8 @@ class IdentityEvidenceTests(unittest.TestCase):
     def test_extracts_exact_bare_parameter_used_in_sql_owner_binding(self):
         rows = extract_identity_evidence({
             "repo/photos.py": (
-                "def query_photos(owner_id):\\n"
-                '    cursor.execute("SELECT id FROM photos WHERE owner_id = ?", [owner_id])\\n'
+                "def query_photos(owner_id):\n"
+                '    cursor.execute("SELECT id FROM photos WHERE owner_id = ?", [owner_id])\n'
             )
         })
         binding = next(row for row in rows
