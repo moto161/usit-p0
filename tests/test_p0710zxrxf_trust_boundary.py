@@ -130,15 +130,22 @@ def _git_blob_sha1(rel: str, base_dir: Path = PROJ) -> str | None:
 
 def _maintenance_guard_unchanged(watch_files, baseline_path, base_dir=PROJ) -> dict:
     """Check explicitly authorized maintenance files against a successor baseline."""
+    base = Path(base_dir)
     manifest = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
     entries = manifest.get("files", {})
+    pre = json.loads((base / "outputs" / "p0710zxrxf" / "PRE_SHA256.json").read_text(encoding="utf-8"))
+    pre_hashes = {
+        key.replace("\\\\", "/").split("/usit_p0/", 1)[-1]: value
+        for key, value in pre.items()
+    }
     unchanged = {}
     for rel in watch_files:
         entry = entries.get(rel, {})
-        current = _git_blob_sha1(rel, Path(base_dir))
+        current = _git_blob_sha1(rel, base)
         unchanged[rel] = (
             current is not None
             and current == entry.get("git_blob_sha1")
+            and entry.get("historical_sha256") == pre_hashes.get(rel)
             and isinstance(entry.get("reason"), str)
             and bool(entry["reason"].strip())
         )
