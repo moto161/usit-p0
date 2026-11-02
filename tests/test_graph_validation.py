@@ -108,6 +108,35 @@ class GraphValidationTests(unittest.TestCase):
         self.assertEqual(result["quality"]["unknown_calls"], 1)
         self.assertIn("LEGACY_RESOLUTION_STATE", self.codes(result, "unknown"))
 
+    def test_valid_resolved_argument_mapping_is_accepted(self):
+        graph = copy.deepcopy(self.graph)
+        edge = graph["edges"][1]
+        edge["argument_binding_status"] = "EXACT_STATIC_MAPPING"
+        edge["argument_bindings"] = [{
+            "argument_index": 0, "argument_kind": "POSITIONAL",
+            "argument_expression": "user_id",
+            "argument_location": {"path": "app.py", "line": 2, "column": 9},
+            "parameter_name": "owner_id", "parameter_index": 0,
+            "parameter_declaration": {"path": "app.py", "line": 1, "column": 9},
+        }]
+        self.assertTrue(validate_graph(graph, self.root)["is_valid"])
+
+    def test_unsupported_argument_shape_rejects_partial_mapping(self):
+        graph = copy.deepcopy(self.graph)
+        edge = graph["edges"][1]
+        edge["argument_binding_status"] = "UNSUPPORTED_ARGUMENT_SHAPE"
+        edge["argument_bindings"] = [{"parameter_name": "owner_id"}]
+        self.assertIn("PARTIAL_UNSUPPORTED_ARGUMENT_BINDINGS", self.codes(validate_graph(graph, self.root)))
+
+    def test_argument_mapping_on_unresolved_call_is_rejected(self):
+        graph = copy.deepcopy(self.graph)
+        edge = graph["edges"][1]
+        edge["resolved"] = False
+        edge["resolution_status"] = "UNKNOWN"
+        edge["argument_binding_status"] = "EXACT_STATIC_MAPPING"
+        edge["argument_bindings"] = []
+        self.assertIn("ARGUMENT_BINDING_ON_UNRESOLVED_CALL", self.codes(validate_graph(graph, self.root)))
+
     def test_wrong_version_blocks_valid_status(self):
         graph = copy.deepcopy(self.graph)
         graph["schema_version"] = "usit-graph-v99"
