@@ -25,7 +25,7 @@
       "reason": "Updated the frozen-fixture assertion to verify both the retained historical digest and the explicit successor Git baseline, rather than falsely claiming the old bytes remain in the current tree."
     },
     "tests/test_p0710zrf_descriptor_binding.py": {
-      "git_blob_sha1": "e797c34f39fdb7dc379b8bf9ae5e09e8240cbcc7",
+      "git_blob_sha1": "7ece6063fb0a79a4889a15368fd2a7efd6aa18b9",
       "historical_sha256": "ef452a224d5c0b0efbdfc22017fa2e7410eb2d73329b05e851597eceebe00322",
       "reason": "Corrected the LF fixture fallback for the same-size rewrite test and migrated graph-fixture integrity checks to the reviewed successor baseline; historical PRE hashes remain recorded."
     }
