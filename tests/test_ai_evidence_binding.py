@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from usit.ai_evidence_binding import verify_evidence_bindings
 from usit.cli import main
@@ -243,6 +244,34 @@ class AIEvidenceBindingTests(unittest.TestCase):
         )
         self.assertEqual(result["evidence_bindings"][0]["attestation_status"],
                          "ATTESTATION_MANIFEST_MISMATCH")
+
+    def test_manifest_change_between_integrity_and_attestation_checks_is_not_trusted(self):
+        self._attach_scan_manifest()
+        self._attach_scan_attestation()
+        manifest = self.root / "scan_manifest.json"
+        real_read_bytes = Path.read_bytes
+        reads = 0
+
+        def changed_second_read(path):
+            nonlocal reads
+            data = real_read_bytes(path)
+            if path.resolve() == manifest.resolve():
+                reads += 1
+                if reads == 2:
+                    return data + b" "
+            return data
+
+        with patch.object(Path, "read_bytes", new=changed_second_read):
+            result = verify_evidence_bindings(
+                self.ledger, self.root,
+                trusted_public_keys={self.attestation_key_id: self.attestation_public},
+            )
+        self.assertEqual(reads, 2)
+        self.assertEqual(
+            result["evidence_bindings"][0]["attestation_status"],
+            "ATTESTATION_MANIFEST_CHANGED_DURING_VERIFICATION",
+        )
+        self.assertEqual(result["claims"][0]["snapshot_provenance_status"], "CHECK_REQUIRED")
 
     def test_tampered_attestation_signature_is_rejected(self):
         self._attach_scan_manifest()
