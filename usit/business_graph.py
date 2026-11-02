@@ -237,6 +237,7 @@ def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[st
                 "evidence": auth_refs,
             },
             "identity_resource_flow": identity_refs,
+            "identity_parameter_propagation": association.get("identity_parameter_propagation_evidence", []),
             "stage_status": {
                 "entrypoint": "SOURCE_IDENTIFIED",
                 "handler": handler_status,
@@ -244,6 +245,11 @@ def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[st
                 "database": "LINKED" if db_refs else "NOT_LINKED_OR_UNKNOWN",
                 "authorization": authorization.get("status") or "UNKNOWN",
                 "identity_resource": "DETECTED" if identity_refs else "NOT_DETECTED_STATIC_SCAN",
+                "identity_parameter_propagation": (
+                    "STATIC_MAPPING_DETECTED"
+                    if association.get("identity_parameter_propagation_evidence")
+                    else "NOT_DETECTED_OR_UNKNOWN"
+                ),
             },
             "unknowns": [
                 "静态调用链不证明运行时执行、路由注册顺序或请求可达。",
