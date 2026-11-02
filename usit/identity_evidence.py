@@ -5,6 +5,7 @@ general taint engine and never proves runtime identity or authorization.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -115,6 +116,31 @@ def _call_parameter_code(line: str, call_start: int) -> str:
             index += 1
     return "".join(code_parts)
 
+def _python_function_owners(path: str, source: str) -> dict[int, str]:
+    """Map source lines to the innermost AST-proven Python function symbol.
+
+    Non-Python files and syntax-invalid Python deliberately produce no owner.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    scopes: list[tuple[int, int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end_line = getattr(node, "end_lineno", None)
+            if isinstance(end_line, int) and end_line >= node.lineno:
+                scopes.append((node.lineno, end_line, end_line - node.lineno,
+                               f"symbol:{path}#{node.name}:{node.lineno}"))
+    owners: dict[int, str] = {}
+    for start, end, _span, symbol_id in sorted(scopes, key=lambda item: (item[2], item[0], item[3])):
+        for line_no in range(start, end + 1):
+            owners.setdefault(line_no, symbol_id)
+    return owners
+
+
 def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, Any]]:
     """Extract identity evidence plus bounded, same-scope local-variable propagation.
 
@@ -128,6 +154,7 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
     )
     identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
     for path, source in sorted(code_by_file.items()):
+        function_owners = _python_function_owners(path, source)
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -164,6 +191,14 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                     "identity_expression": match.group(2),
                     "operator": re.search(r"(?:===|==|!==|!=)", match.group(0)).group(0),
                 })
+            assignment_match = assignment.match(line)
+            assigned_variable = None
+            if assignment_match:
+                candidate_name, candidate_rhs = assignment_match.groups()
+                candidate_rhs = candidate_rhs.strip().rstrip(";")
+                if _TRUSTED.fullmatch(candidate_rhs) or _REQUEST.fullmatch(candidate_rhs):
+                    assigned_variable = candidate_name
+
             kinds: list[tuple[str, dict[str, Any]]] = []
             if trusted:
                 kinds.append(("authenticated_identity_source", {"identity_expressions": trusted}))
@@ -219,11 +254,17 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                         }))
 
             for kind, details in kinds:
+                if assigned_variable and kind in {
+                    "authenticated_identity_source", "request_controlled_identity_input"
+                }:
+                    details["source_variable"] = assigned_variable
                 scope = "INTRAPROCEDURAL_LINEAR_ASSIGNMENT" if details.get("binding_status") == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT" else "SAME_LINE_PATTERN"
                 row = {
                     "evidence_id": "", "kind": kind, "source": path, "line": line_no,
                     "details": details, "confidence": "STATIC_INFERENCE",
                     "verification_status": "NOT_VERIFIED", "scope": scope,
+                    "owner_symbol_id": function_owners.get(line_no),
+                    "owner_resolution_status": "RESOLVED" if line_no in function_owners else "UNKNOWN",
                 }
                 row["evidence_id"] = _id(row)
                 records.append(row)
