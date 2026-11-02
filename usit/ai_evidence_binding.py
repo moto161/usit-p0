@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .ai_claim_review import load_claim_ledger
-from .test_result_importer import _parse_junit
+from .test_result_importer import _parse_junit, _read_regular
 from .scan_attestation import verify_scan_attestation
 from .safeio import is_reparse
 
@@ -66,7 +66,7 @@ def _verify_scan_manifest_integrity(root: Path, entry: dict[str, Any], source_pa
                 "manifest_sha256": None, "detail": "Referenced scan manifest is missing."}
     if path.stat().st_size > MAX_ARTIFACT_BYTES:
         raise ValueError("scan manifest exceeds 50 MiB")
-    raw = path.read_bytes()
+    raw = _read_regular(path, MAX_ARTIFACT_BYTES)
     actual_manifest_sha = hashlib.sha256(raw).hexdigest()
     if actual_manifest_sha != manifest_sha:
         return {"status": "MANIFEST_STALE", "manifest_path": manifest_path,
@@ -139,12 +139,16 @@ def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
     except FileNotFoundError:
         snapshot["attestation_status"] = "ATTESTATION_MISSING"
         return snapshot
-    if sidecar_file.stat().st_size > 64 * 1024:
+    try:
+        sidecar_bytes = _read_regular(sidecar_file, 64 * 1024)
+        manifest_bytes = _read_regular(manifest_file, MAX_ARTIFACT_BYTES)
+    except ValueError as exc:
         snapshot["attestation_status"] = "ATTESTATION_INVALID_FORMAT"
-        snapshot["attestation"] = {"status": "ATTESTATION_INVALID_FORMAT",
-                                   "detail": "Attestation exceeds 64 KiB."}
+        snapshot["attestation"] = {
+            "status": "ATTESTATION_INVALID_FORMAT",
+            "detail": str(exc),
+        }
         return snapshot
-    manifest_bytes = manifest_file.read_bytes()
     if hashlib.sha256(manifest_bytes).hexdigest() != snapshot.get("manifest_sha256"):
         snapshot["attestation_status"] = "ATTESTATION_MANIFEST_CHANGED_DURING_VERIFICATION"
         snapshot["attestation"] = {
@@ -153,7 +157,7 @@ def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
         }
         return snapshot
     attestation = verify_scan_attestation(
-        manifest_bytes, sidecar_file.read_bytes(),
+        manifest_bytes, sidecar_bytes,
         trusted_public_keys or {},
         expected_snapshot_id=entry.get("expected_snapshot_id"),
     )
@@ -211,7 +215,7 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
             continue
         if artifact.stat().st_size > MAX_ARTIFACT_BYTES:
             raise ValueError(f"{evidence_id}: evidence artifact exceeds 50 MiB")
-        raw = artifact.read_bytes()
+        raw = _read_regular(artifact, MAX_ARTIFACT_BYTES)
         actual = hashlib.sha256(raw).hexdigest()
         row["actual_sha256"] = actual
         if actual != entry["source_sha256"]:
