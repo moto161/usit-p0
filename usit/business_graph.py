@@ -300,6 +300,7 @@ def project_business_graph(graph: Mapping[str, Any],
     # Only exact, unique function/method declarations in the route's own file
     # are eligible. Imported/member handlers remain UNKNOWN in this slice.
     symbols_by_file_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    symbols_by_id: dict[str, dict[str, Any]] = {}
     for node in nodes:
         if node.get("type") not in {"function", "method"}:
             continue
@@ -308,6 +309,8 @@ def project_business_graph(graph: Mapping[str, Any],
         label = node.get("label")
         if isinstance(path, str) and isinstance(label, str) and path and label:
             symbols_by_file_name.setdefault((path, label), []).append(node)
+            if isinstance(node.get("id"), str):
+                symbols_by_id[node["id"]] = node
 
     linked_counts = {"features": 0, "entities": 0, "endpoints": 0}
     linked = 0
@@ -632,6 +635,13 @@ def project_business_graph(graph: Mapping[str, Any],
             unlinked.append({"kind": "identity_evidence", "reason": "INVALID_OR_MISSING_SOURCE"})
             continue
         details = raw.get("details") if isinstance(raw.get("details"), Mapping) else {}
+        raw_owner = raw.get("owner_symbol_id")
+        owner_node = symbols_by_id.get(raw_owner) if isinstance(raw_owner, str) else None
+        owner_evidence = owner_node.get("evidence") if isinstance(owner_node, Mapping) else {}
+        owner_symbol_id = (
+            raw_owner if isinstance(owner_evidence, Mapping) and owner_evidence.get("path") == path
+            and raw.get("owner_resolution_status") == "RESOLVED" else None
+        )
         identity_id = raw.get("evidence_id")
         if not isinstance(identity_id, str) or not identity_id:
             identity_id = _stable_id("identity-evidence", {
@@ -645,8 +655,8 @@ def project_business_graph(graph: Mapping[str, Any],
                 "kind": raw.get("kind") or "UNKNOWN",
                 "details": dict(details),
                 "scope": raw.get("scope") or "UNKNOWN",
-                "owner_symbol_id": None,
-                "owner_resolution_status": "UNKNOWN",
+                "owner_symbol_id": owner_symbol_id,
+                "owner_resolution_status": "RESOLVED" if owner_symbol_id else "UNKNOWN",
             },
             "evidence": {"path": path, "line": line, "confidence": "STATIC_INFERENCE"},
             "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
@@ -790,7 +800,77 @@ def project_business_graph(graph: Mapping[str, Any],
         related_identity.sort(key=lambda item: (
             item["path"], item["line"], item["kind"], item["identity_evidence_id"]
         ))
+
+        # S2.30-B: carry identity evidence across exactly one statically resolved
+        # call edge, but only when the source function owner and argument mapping
+        # are both explicit. This records caller argument -> callee parameter;
+        # it does not yet claim that the callee parameter reaches a sink.
+        identity_parameter_evidence: list[dict[str, Any]] = []
+        reachable_symbols = {association.get("target_symbol_id")}
+        for chain in association.get("call_chain_evidence", []):
+            for step in chain.get("steps", []):
+                if isinstance(step.get("caller_symbol_id"), str):
+                    reachable_symbols.add(step["caller_symbol_id"])
+                if isinstance(step.get("target_id"), str):
+                    reachable_symbols.add(step["target_id"])
+        for identity_node in identity_nodes:
+            identity_details = identity_node.get("business_details") or {}
+            identity_owner = identity_details.get("owner_symbol_id")
+            if identity_owner not in reachable_symbols:
+                continue
+            source_details = identity_details.get("details") or {}
+            source_variable = source_details.get("source_variable")
+            source_expressions = (
+                source_details.get("identity_expressions")
+                or source_details.get("request_expressions") or []
+            )
+            accepted_expressions = {
+                item for item in [source_variable, *source_expressions]
+                if isinstance(item, str) and item
+            }
+            if not accepted_expressions:
+                continue
+            for call_edge in edges:
+                if (call_edge.get("type") != "calls"
+                        or call_edge.get("resolution_status") != "RESOLVED"
+                        or call_edge.get("caller_symbol_id") != identity_owner
+                        or call_edge.get("target") not in reachable_symbols
+                        or call_edge.get("argument_binding_status") != "EXACT_STATIC_MAPPING"):
+                    continue
+                for binding in call_edge.get("argument_bindings", []):
+                    if not isinstance(binding, Mapping):
+                        continue
+                    argument_expression = binding.get("argument_expression")
+                    if not isinstance(argument_expression, str) or argument_expression.strip() not in accepted_expressions:
+                        continue
+                    call_evidence = call_edge.get("evidence") or {}
+                    identity_parameter_evidence.append({
+                        "identity_evidence_id": identity_node.get("id"),
+                        "identity_kind": identity_details.get("kind") or "UNKNOWN",
+                        "caller_symbol_id": identity_owner,
+                        "callee_symbol_id": call_edge.get("target"),
+                        "call_site": {
+                            "path": call_evidence.get("path"),
+                            "line": call_evidence.get("line"),
+                        },
+                        "argument_expression": argument_expression.strip(),
+                        "argument_index": binding.get("argument_index"),
+                        "argument_kind": binding.get("argument_kind"),
+                        "parameter_name": binding.get("parameter_name"),
+                        "parameter_index": binding.get("parameter_index"),
+                        "parameter_declaration": binding.get("parameter_declaration"),
+                        "propagation_status": "CALL_ARGUMENT_TO_PARAMETER_STATIC_MAPPING",
+                        "confidence": "STATIC_INFERENCE",
+                        "verification_status": "NOT_VERIFIED",
+                    })
+        identity_parameter_evidence.sort(key=lambda item: (
+            str(item.get("call_site", {}).get("path") or ""),
+            int(item.get("call_site", {}).get("line") or 0),
+            str(item.get("parameter_name") or ""),
+            str(item.get("identity_evidence_id") or ""),
+        ))
         association["identity_dataflow_evidence"] = related_identity
+        association["identity_parameter_propagation_evidence"] = identity_parameter_evidence
 
     # Route middleware evidence is file/line anchored; function-level guard
     # calls are attached only when their exact caller symbol is reachable.
