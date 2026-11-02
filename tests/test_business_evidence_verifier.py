@@ -101,6 +101,38 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
             {item["kind"] for item in result["evidence_conflicts"]},
         )
 
+    def test_case_level_failure_overrides_forged_pass_summary(self):
+        tests = {
+            "schema_version": "usit-test-execution-results-v1",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_results": [{
+                "business_function_id": "bf-upload",
+                "execution_status": "PASSED",
+                "expected_mapped_test_case_count": 1,
+                "reported_mapped_test_case_count": 1,
+                "mapped_case_completeness": "COMPLETE",
+                "mapped_test_case_count": 1,
+                "passed": 1,
+                "failed": 0,
+                "skipped": 0,
+                "mapped_cases_missing_from_report": [],
+                "mapped_test_cases": [{
+                    "test_case_id": "tests.PhotoTests::test_upload",
+                    "status": "FAILED",
+                }],
+            }],
+        }
+        result = verify_business_function_evidence(
+            self.graph, tests, business_graph_sha256=self.graph_hash
+        )
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        kinds = {item["kind"] for item in result["evidence_conflicts"]}
+        self.assertEqual(upload["test_execution_status"], "FAILED")
+        self.assertTrue(upload["evidence_conflict"])
+        self.assertIn("TEST_CASE_SUMMARY_MISMATCH", kinds)
+        self.assertIn("TEST_EXECUTION_STATUS_MISMATCH", kinds)
+
     def test_cli_writes_evidence_matrix_and_returns_conflict_exit_code(self):
         import tempfile
         from contextlib import redirect_stdout
