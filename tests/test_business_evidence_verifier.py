@@ -17,12 +17,12 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
 
     def test_cross_checks_test_and_coverage_without_claiming_business_correctness(self):
         tests={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
             "business_function_results":[
                 {"business_function_id":"bf-upload","execution_status":"PASSED","mapped_test_case_count":3,"failed":0,"skipped":0},
                 {"business_function_id":"bf-delete","execution_status":"FAILED","mapped_test_case_count":2,"failed":1,"skipped":0}]}
         coverage={"schema_version":"usit-code-coverage-results-v1",
-            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"coverage_report_sha256":"3"*64,"mapping_json_sha256":"4"*64,"business_graph_sha256":self.graph_hash},
             "business_function_coverage":[
                 {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0},
                 {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0}]}
@@ -48,12 +48,12 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
 
     def test_unknown_function_and_duplicate_records_are_rejected_or_reported(self):
         tests={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
             "business_function_results":[{"business_function_id":"not-in-graph","execution_status":"PASSED"}]}
         result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
         self.assertEqual(result["evidence_conflicts"][0]["kind"],"UNKNOWN_BUSINESS_FUNCTION")
         duplicate={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
             "business_function_results":[{"business_function_id":"bf-upload"},{"business_function_id":"bf-upload"}]}
         with self.assertRaisesRegex(ValueError,"duplicate business_function_id"):
             verify_business_function_evidence(self.graph,duplicate,None,self.graph_hash)
@@ -62,7 +62,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"usit-graph-v1"):
             verify_business_function_evidence({"schema_version":"wrong"})
         tests={"schema_version":"usit-test-execution-results-v1",
-            "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
             "business_function_results":[{"business_function_id":"bf-upload","execution_status":"MAGIC_PASS"}]}
         result=verify_business_function_evidence(self.graph,tests,None,self.graph_hash)
         self.assertEqual(result["evidence_conflicts"][0]["kind"],"INVALID_TEST_STATUS")
@@ -148,7 +148,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
             graph=base/"graph.json"; tests=base/"tests.json"; out=base/"evidence.json"
             graph.write_bytes(self.graph_bytes)
             tests.write_text(json.dumps({"schema_version":"usit-test-execution-results-v1",
-                "source_hashes":{"test_report_sha256":"1".repeat(64),"mapping_json_sha256":"2".repeat(64),"business_graph_sha256":self.graph_hash},
+                "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
                 "business_function_results":[]}),encoding="utf-8")
             output=StringIO()
             with redirect_stdout(output):
