@@ -133,9 +133,9 @@ class TestResultImporterTests(unittest.TestCase):
                 base, '<testsuite><testcase name="test_upload"/></testsuite>'
             )
             padded = (
-                b'<?xml version="1.0"?>\\n<!--'
+                b'<?xml version="1.0"?>\n<!--'
                 + (b'x' * 1_000_001)
-                + b'-->\\n<!DOCTYPE x [<!ENTITY a "x">]>'
+                + b'-->\n<!DOCTYPE x [<!ENTITY a "x">]>'
                 + b'<testsuite><testcase name="test_upload"/></testsuite>'
             )
             report.write_bytes(padded)
