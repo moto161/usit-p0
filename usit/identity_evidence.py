@@ -116,6 +116,83 @@ def _call_parameter_code(line: str, call_start: int) -> str:
             index += 1
     return "".join(code_parts)
 
+def _call_parameter_expressions(line: str, call_start: int) -> list[str]:
+    """Return cleaned positional binding arguments after the SQL string argument."""
+    stack = ["("]
+    args: list[str] = []
+    start = call_start + 1
+    quote: str | None = None
+    escaped = False
+    index = start
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'} or char == chr(96):
+            quote = char
+            index += 1
+            continue
+        if line.startswith("//", index) or char == "#":
+            break
+        if char in "([{":
+            stack.append(char)
+        elif char in ")]}":
+            if not stack:
+                return []
+            expected = {")": "(", "]": "[", "}": "{"}[char]
+            if stack[-1] != expected:
+                return []
+            stack.pop()
+            if not stack:
+                args.append(line[start:index])
+                break
+        elif char == "," and len(stack) == 1 and stack[0] == "(":
+            args.append(line[start:index])
+            start = index + 1
+        index += 1
+    if stack or len(args) < 2:
+        return []
+
+    cleaned: list[str] = []
+    for argument in args[1:]:
+        output: list[str] = []
+        quote = None
+        escaped = False
+        index = 0
+        while index < len(argument):
+            char = argument[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                output.append(" ")
+                index += 1
+                continue
+            if char in {"'", '"'} or char == chr(96):
+                quote = char
+                output.append(" ")
+                index += 1
+                continue
+            if argument.startswith("//", index) or char == "#":
+                break
+            output.append(char)
+            index += 1
+        value = "".join(output).strip()
+        if value:
+            cleaned.append(value)
+    return cleaned
+
+
 def _python_function_owners(path: str, source: str) -> dict[int, str]:
     """Map source lines to the innermost AST-proven Python function symbol.
 
@@ -211,12 +288,31 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
             if sink:
                 call_match = _DB_CALL.search(line)
                 parameter_code = _call_parameter_code(line, call_match.end() - 1)
+                parameter_expressions = _call_parameter_expressions(line, call_match.end() - 1)
                 parameter_trusted = sorted(set(
                     match.group(0) for match in _TRUSTED.finditer(parameter_code)
                 ))
                 parameter_request = sorted(set(
                     match.group(0) for match in _REQUEST.finditer(parameter_code)
                 ))
+                # Record only binding arguments that are exactly a bare identifier
+                # (optionally wrapped as a one-item list/tuple). Compound expressions
+                # are deliberately excluded from interprocedural matching.
+                binding_parameters = sorted({
+                    match.group(1)
+                    for expression in parameter_expressions
+                    for match in [re.fullmatch(
+                        r"[\\[\\(\\s]*([A-Za-z_$][\\w$]*)[\\]\\),\\s]*",
+                        expression,
+                    )]
+                    if match
+                })
+                if binding_parameters:
+                    kinds.append(("sql_owner_parameter_binding", {
+                        "resource_fields": owner_fields,
+                        "binding_parameters": binding_parameters,
+                        "binding_status": "EXACT_BARE_IDENTIFIER_ARGUMENT",
+                    }))
                 if parameter_trusted:
                     kinds.append(("direct_authenticated_identity_to_sql_owner_binding", {
                         "identity_expressions": parameter_trusted, "resource_fields": owner_fields,
