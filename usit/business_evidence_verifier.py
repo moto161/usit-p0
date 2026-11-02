@@ -106,10 +106,12 @@ def verify_business_function_evidence(
         cs=cov.get("code_coverage_status","NOT_MEASURED") if cov else "NOT_MEASURED"
         if cov is not None:
             percent = cov.get("line_coverage_percent")
-            if percent is not None and (
-                not isinstance(percent, (int, float)) or isinstance(percent, bool)
-                or percent < 0 or percent > 100
-            ):
+            percent_valid = percent is None or (
+                isinstance(percent, (int, float)) and not isinstance(percent, bool)
+                and not (isinstance(percent, float) and not math.isfinite(percent))
+                and 0 <= percent <= 100
+            )
+            if not percent_valid:
                 conflicts.append({
                     "kind": "INVALID_COVERAGE_PERCENT",
                     "business_function_id": function_id,
@@ -142,7 +144,7 @@ def verify_business_function_evidence(
                         "covered_line_count": covered,
                         "uncovered_line_count": uncovered,
                     })
-                if percent is not None and executable > 0:
+                if percent_valid and percent is not None and executable > 0:
                     expected_percent = round(100 * covered / executable, 2)
                     if not math.isclose(float(percent), expected_percent, rel_tol=0, abs_tol=0.01):
                         conflicts.append({
@@ -151,7 +153,7 @@ def verify_business_function_evidence(
                             "reported_percent": percent,
                             "derived_percent": expected_percent,
                         })
-                if percent is not None:
+                if percent_valid and percent is not None:
                     expected_status = "COVERED" if covered == executable else ("PARTIAL" if covered > 0 else "NOT_COVERED")
                     if cs != expected_status:
                         conflicts.append({
@@ -160,7 +162,7 @@ def verify_business_function_evidence(
                             "reported_status": cs,
                             "derived_status": expected_status,
                         })
-            elif percent is not None:
+            elif percent_valid and percent is not None:
                 conflicts.append({
                     "kind": "INCOMPLETE_COVERAGE_MEASUREMENTS",
                     "business_function_id": function_id,
