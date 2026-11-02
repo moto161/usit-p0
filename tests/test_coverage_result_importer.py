@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from usit.coverage_result_importer import ingest_coverage_results
+from usit.coverage_result_importer import MAX_COVERAGE_BYTES, ingest_coverage_results
+from usit.test_report_adapters import parse_jacoco_xml
 
 
 def _write_graph_and_mapping(base: Path, function_ids: list[str], mappings: list[dict]) -> tuple[Path, Path]:
@@ -62,6 +63,35 @@ class CoverageImporterTests(unittest.TestCase):
             report.write_text('<!DOCTYPE report [<!ENTITY x "x">]><report/>', encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "DTD/entity"):
                 ingest_coverage_results(report, mapping, graph, "jacoco-xml")
+
+    def test_jacoco_rejects_declarations_after_long_prolog(self):
+        data = b"<!--" + (b"x" * 1_000_001) + b"--><!DOCTYPE report [<!ENTITY x 'x'>]><report/>"
+        with self.assertRaisesRegex(ValueError, "DTD/entity"):
+            parse_jacoco_xml(data)
+
+    def test_coverage_report_size_limit_is_enforced_before_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            with report.open("wb") as stream:
+                stream.truncate(MAX_COVERAGE_BYTES + 1)
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [])
+            with self.assertRaisesRegex(ValueError, "exceeds size limit"):
+                ingest_coverage_results(report, mapping, graph, "coverage-py-json")
+
+    def test_coverage_report_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            target = base / "target.json"
+            link = base / "link.json"
+            target.write_text('{"files":{}}', encoding="utf-8")
+            try:
+                link.symlink_to(target)
+            except OSError as exc:
+                self.skipTest(f"platform does not permit symlink creation: {exc}")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [])
+            with self.assertRaisesRegex(ValueError, "symbolic links or reparse points"):
+                ingest_coverage_results(link, mapping, graph, "coverage-py-json")
 
 
 if __name__ == "__main__":
