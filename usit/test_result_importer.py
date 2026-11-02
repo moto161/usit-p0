@@ -202,18 +202,20 @@ def ingest_junit_results(
         expected_not_seen = sorted(case_id for case_id, target in explicit_map.items()
                                    if target == function_id and case_id not in actual_ids)
         expected_mapped_count = sum(1 for target in explicit_map.values() if target == function_id)
-        if not linked:
-            execution_status = "NOT_EXECUTED"
-            execution_status_reason = "NO_MAPPED_TEST_CASE_REPORTED"
-        elif counts["FAILED"]:
+        if counts["FAILED"]:
             # An observed failure remains a failure even when other expected
             # cases are absent; missing cases are still retained separately.
             execution_status = "FAILED"
             execution_status_reason = "MAPPED_TEST_FAILURE_OBSERVED"
         elif expected_not_seen:
-            # A partial report cannot certify the whole mapped function as PASS.
+            # Missing every expected case is still an incomplete report, not
+            # proof that no test was executed. Preserve it as UNKNOWN.
             execution_status = "UNKNOWN"
             execution_status_reason = "MAPPED_TEST_CASES_MISSING_FROM_REPORT"
+        elif not linked:
+            # NOT_EXECUTED is reserved for functions with no expected mapping.
+            execution_status = "NOT_EXECUTED"
+            execution_status_reason = "NO_MAPPED_TEST_CASE_REPORTED"
         elif counts["SKIPPED"]:
             execution_status = "UNKNOWN"
             execution_status_reason = "MAPPED_TEST_CASE_SKIPPED"
