@@ -25,9 +25,19 @@
       "reason": "Updated the frozen-fixture assertion to verify both the retained historical digest and the explicit successor Git baseline, rather than falsely claiming the old bytes remain in the current tree."
     },
     "tests/test_p0710zrf_descriptor_binding.py": {
-      "git_blob_sha1": "7ece6063fb0a79a4889a15368fd2a7efd6aa18b9",
+      "git_blob_sha1": "ed60c1950abfa395672ebfb01f6b8b6459f7ceec",
       "historical_sha256": "ef452a224d5c0b0efbdfc22017fa2e7410eb2d73329b05e851597eceebe00322",
       "reason": "Corrected the LF fixture fallback for the same-size rewrite test and migrated graph-fixture integrity checks to the reviewed successor baseline; historical PRE hashes remain recorded."
+    },
+    "usit/safeio.py": {
+      "git_blob_sha1": "d1a45c017b768911de960a8684fbd224d1be5a77",
+      "historical_sha256": "d8d8a42e6cb72dcfe2dedb66f80af80acb793a6a777d69d9e9d5411e1233ad7c",
+      "reason": "Unmodified historical safety I/O implementation; its original PRE digest is retained and the canonical Git blob is pinned so Windows CRLF checkout cannot create a false drift report."
+    },
+    "tests/test_p073_budget_race.py": {
+      "git_blob_sha1": "5f897498548d6ec7942a6a4e751b34f6eb8a167d",
+      "historical_sha256": "470851778ee2224593ab146109b86b613f52fcd60149ddc23092da33dd3fbeb6",
+      "reason": "Unmodified historical budget-race fixture; retain the original PRE digest and pin its canonical Git blob independent of working-tree line endings."
     }
   }
 }
