@@ -356,6 +356,14 @@ The manifest is bound to the exact graph bytes using SHA-256. When the graph cha
 
 该能力不是通用污点分析：不跨函数、文件、模块或异步边界传播；进入/离开显式代码块会清空别名；不解析条件分支汇合、循环、闭包、对象属性、解构、参数传递、ORM 绑定、多行 SQL 或动态 SQL。重新赋值为无法证明来源的表达式会使别名失效。所有结果仍为 `STATIC_INFERENCE` / `NOT_VERIFIED`，只用于生成待审查测试候选，不能证明运行时身份可信、SQL 实际执行、授权正确或存在漏洞。
 
+### S2.30-A — 已解析调用点的实参→形参映射证据
+
+Python AST 与 TypeScript Compiler API 现在会在调用目标唯一且状态为 `RESOLVED` 时，额外记录有限的调用参数映射：`argument_binding_status` 与 `argument_bindings`。每条映射保留调用实参表达式及位置、目标形参名称/索引/种类、形参声明文件及位置。Python 当前覆盖显式位置参数和显式关键字参数；JS/TS 当前覆盖显式位置参数。映射只使用解析器已证明的唯一目标，不按函数名猜测。
+
+遇到 `*args` / `**kwargs`、JS/TS spread、rest 参数、解构形参、超出可映射形参数量或不支持的参数形态时，整体标记 `UNSUPPORTED_ARGUMENT_SHAPE` 并输出空映射，不保留部分映射。非 `RESOLVED` 调用不生成参数映射。
+
+这只是跨函数数据流分析所需的结构化调用证据，不等于身份值已经传播到形参，也不证明运行时调用发生、参数值、控制流或副作用。下一步才会在唯一调用边、实参/形参映射和目标函数内 sink 证据同时齐备时建立有限的跨函数身份→资源归属候选；所有结果继续保持 `STATIC_INFERENCE / NOT_VERIFIED`。
+
 ### Mapping manifest example
 
 ```json
