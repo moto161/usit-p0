@@ -80,6 +80,8 @@ class FrozenHashGuardR2Tests(unittest.TestCase):
                         f"historical or authorized baseline mismatch: {combined}")
 
         manifest = json.loads(MAINTENANCE_BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(manifest.get("schema_version"), "usit-frozen-maintenance-baseline-v1")
+        self.assertTrue(isinstance(manifest.get("policy"), str) and manifest["policy"].strip())
         self.assertEqual(set(manifest.get("files", {})), set(ZXRXF7_MAINTENANCE_WATCH))
         self.assertEqual(
             _git_blob_sha1("outputs/p0710zxrxf/PRE_SHA256.json"),
