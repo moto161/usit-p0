@@ -129,7 +129,7 @@ def _call_parameter_expressions(line: str, call_start: int) -> list[str]:
         if quote:
             if escaped:
                 escaped = False
-            elif char == "\\\\":
+            elif char == "\\":
                 escaped = True
             elif char == quote:
                 quote = None
@@ -171,7 +171,7 @@ def _call_parameter_expressions(line: str, call_start: int) -> list[str]:
             if quote:
                 if escaped:
                     escaped = False
-                elif char == "\\\\":
+                elif char == "\\":
                     escaped = True
                 elif char == quote:
                     quote = None
@@ -302,7 +302,7 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                     match.group(1)
                     for expression in parameter_expressions
                     for match in [re.fullmatch(
-                        r"[\\[\\(\\s]*([A-Za-z_$][\\w$]*)[\\]\\),\\s]*",
+                        r"[\[\(\s]*([A-Za-z_$][\w$]*)[\]\),\s]*",
                         expression,
                     )]
                     if match
