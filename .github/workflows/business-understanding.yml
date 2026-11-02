@@ -60,7 +60,7 @@ jobs:
       - name: Run USIT self-test on Windows
         run: python -m usit selftest
       - name: Run TypeScript parser trust-boundary tests on Windows
-        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths -v
+        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_test_result_importer -v
       - name: Diagnostic full repository regression suite on Windows (non-gating; see step summary)
         id: full_repository_regression
         continue-on-error: true
