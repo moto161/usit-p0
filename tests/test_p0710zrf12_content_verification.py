@@ -14,15 +14,16 @@ open: a same-inode / same-size / same-mtime_ns in-place rewrite is invisible to
 metadata checks but is caught here.
 
 Nothing here modifies a frozen test, ``scanner.py``, ``graph.py`` or any
-historical evidence.  A few sub-cases that need privileges or a deterministic
-mid-read race injector (which would require instrumenting the function and
-changing its API) are explicitly ``skipTest``-ed and reported as NOT TESTED.
+historical evidence. Privilege-dependent junction cases remain explicitly
+skipped when the operating system refuses their creation. The mid-read race is
+injected at the OS read boundary without changing the production API.
 """
 from __future__ import annotations
 
 import hashlib
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -285,8 +286,8 @@ class VerifyCurrentContentTests(unittest.TestCase):
     # ---- ZB-9: concurrent / replacement contract ----------------------
     def test_zb9_replacement_not_match(self):
         # Deterministic part of ZB-9: under a path replacement the method must
-        # never claim MATCH.  A genuine mid-read race injector is NOT TESTED
-        # (see test_zb9_mid_read_race).
+        # never claim MATCH. The separate mid-read race test injects a
+        # same-size rewrite between the descriptor read and post-read fstat.
         root = Path(tempfile.mkdtemp())
         p = write_file(root, "app.py", A)
         snap = build_descriptor_snapshot(root, {"app.py": A})
@@ -294,13 +295,55 @@ class VerifyCurrentContentTests(unittest.TestCase):
         r = snap.verify_current_content("app.py")
         self.assertNotEqual(r.status, "MATCH")
 
-    def test_zb9_mid_read_race_not_tested(self):
-        # Injecting a perturbation between the two fstats of a single descriptor
-        # read requires instrumenting the function (a hook), which would change
-        # its public API and is out of scope.  We therefore do NOT claim to prove
-        # every concurrent scenario safe; the method returns UNAVAILABLE whenever
-        # it cannot confirm identity stability.
-        self.skipTest("deterministic mid-read race injection not available (NOT TESTED)")
+    def test_zb9_mid_read_race_never_yields_false_match(self):
+        root = Path(tempfile.mkdtemp())
+        p = write_file(root, "app.py", A)
+        snap = build_descriptor_snapshot(root, {"app.py": A})
+        before = os.stat(p, follow_symlinks=False)
+        real_read = os.read
+        real_open = safeio.open_no_follow
+        target_fd = None
+        triggered = False
+        write_blocked = False
+
+        def recording_open(path):
+            nonlocal target_fd
+            fd = real_open(path)
+            target_fd = fd
+            return fd
+
+        def racing_read(fd, size):
+            nonlocal triggered, write_blocked
+            data = real_read(fd, size)
+            if fd == target_fd and not triggered:
+                triggered = True
+                time.sleep(0.01)
+                try:
+                    rewrite_in_place_same_length(p, B_SAME_LEN, before.st_mtime_ns)
+                except OSError:
+                    # Windows opens the descriptor with FILE_SHARE_READ only;
+                    # a concurrent writer must be denied while it is held.
+                    write_blocked = True
+            return data
+
+        with patch("usit.snapshot.safeio.open_no_follow", side_effect=recording_open):
+            with patch("usit.snapshot.os.read", side_effect=racing_read):
+                result = snap.verify_current_content("app.py")
+
+        self.assertTrue(triggered, "the rewrite attempt must occur during descriptor reading")
+        if os.name == "nt":
+            self.assertTrue(write_blocked, "Windows descriptor sharing must block concurrent writes")
+            self.assertEqual(result.status, "MATCH")
+            self.assertEqual(p.read_bytes(), A)
+        else:
+            self.assertFalse(write_blocked)
+            self.assertEqual(result.status, "UNAVAILABLE")
+            after = os.stat(p, follow_symlinks=False)
+            self.assertEqual(after.st_mtime_ns, before.st_mtime_ns,
+                             "the test must restore mtime to exercise ctime stability")
+            self.assertNotEqual(after.st_ctime_ns, before.st_ctime_ns,
+                                "the in-place rewrite must change POSIX ctime")
+            self.assertEqual(p.read_bytes(), B_SAME_LEN)
 
     # ---- ZB-10: verify must not mutate snapshot/source ----------------
     def test_zb10_no_mutation(self):
