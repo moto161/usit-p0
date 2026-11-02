@@ -6,8 +6,9 @@ branch) re-reads the file at the path and requires a content-digest match; the
 strict entry (usit/graph.py) is unchanged and keeps consuming only records the
 snapshot marks verifiable.
 
-Rules honoured here: every existing test file stays byte-identical; no real
-project is scanned; everything runs in TemporaryDirectory fixtures.
+Rules honoured here: historical PRE evidence is retained, maintained files
+use an explicit successor baseline, no real project is scanned, and everything
+runs in TemporaryDirectory fixtures.
 """
 from __future__ import annotations
 
