@@ -144,8 +144,16 @@ def _verify_scan_manifest(root: Path, entry: dict[str, Any], source_path: str,
         snapshot["attestation"] = {"status": "ATTESTATION_INVALID_FORMAT",
                                    "detail": "Attestation exceeds 64 KiB."}
         return snapshot
+    manifest_bytes = manifest_file.read_bytes()
+    if hashlib.sha256(manifest_bytes).hexdigest() != snapshot.get("manifest_sha256"):
+        snapshot["attestation_status"] = "ATTESTATION_MANIFEST_CHANGED_DURING_VERIFICATION"
+        snapshot["attestation"] = {
+            "status": "ATTESTATION_MANIFEST_CHANGED_DURING_VERIFICATION",
+            "detail": "Manifest bytes changed between snapshot-integrity and attestation verification.",
+        }
+        return snapshot
     attestation = verify_scan_attestation(
-        manifest_file.read_bytes(), sidecar_file.read_bytes(),
+        manifest_bytes, sidecar_file.read_bytes(),
         trusted_public_keys or {},
         expected_snapshot_id=entry.get("expected_snapshot_id"),
     )
