@@ -24,7 +24,12 @@ from pathlib import Path
 
 from tests.test_p0710zxrxf_trust_boundary import (  # noqa: E402
     ZXRXF7_WATCH,
+    ZXRXF7_HISTORICAL_WATCH,
+    ZXRXF7_MAINTENANCE_WATCH,
+    MAINTENANCE_BASELINE,
     _frozen_guard_unchanged,
+    _maintenance_guard_unchanged,
+    _git_blob_sha1,
     OUT,
 )
 
@@ -62,27 +67,42 @@ class FrozenHashGuardR2Tests(unittest.TestCase):
         res = _frozen_guard_unchanged(["usit/graph.py"], str(baseline), base_dir=tmp)
         self.assertTrue(all(res.values()), f"no-change guard must pass: {res}")
 
-    # ---- 3. AUTHORIZED MAINTENANCE: real repo, harness excluded ------------
+    # ---- 3. AUTHORIZED MAINTENANCE: versioned successor baseline ----------
     def test_guard_real_repo_authorized_maintenance_tolerated(self):
-        # The ZRFX harness was legitimately edited by R1 (its hash now differs
-        # from PRE).  The guard must NOT flag it because ZXRXF7_WATCH excludes
-        # it by design -- proving the "test guards its own test" circular
-        # dependency is resolved, while production source + frozen fixtures stay
-        # protected.
+        # The original PRE manifest remains immutable.  Files intentionally
+        # maintained since PRE are covered by a separate, explicit successor
+        # baseline with per-file reasons and canonical Git blob IDs.
         self.assertNotIn("tests/test_p0710zrfx_trust_boundary.py", ZXRXF7_WATCH)
-        unchanged = _frozen_guard_unchanged(ZXRXF7_WATCH, OUT / "PRE_SHA256.json")
-        self.assertTrue(all(unchanged.values()),
-                        f"protected files must be unchanged: {unchanged}")
-        # Sanity: if the harness were still guarded, the guard would (correctly)
-        # flag its authorized R1 edit -- this is exactly the old failure, now
-        # scoped out.  The OTHER protected files remain consistent with the real
-        # guard.
-        with_harness = list(ZXRXF7_WATCH) + ["tests/test_p0710zrfx_trust_boundary.py"]
+        historical = _frozen_guard_unchanged(
+            ZXRXF7_HISTORICAL_WATCH, OUT / "PRE_SHA256.json")
+        maintained = _maintenance_guard_unchanged(
+            ZXRXF7_MAINTENANCE_WATCH, MAINTENANCE_BASELINE)
+        combined = {**historical, **maintained}
+        self.assertTrue(all(combined.values()),
+                        f"historical or authorized baseline mismatch: {combined}")
+
+        manifest = json.loads(MAINTENANCE_BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(set(manifest.get("files", {})), set(ZXRXF7_MAINTENANCE_WATCH))
+        self.assertEqual(
+            _git_blob_sha1("outputs/p0710zxrxf/PRE_SHA256.json"),
+            manifest.get("historical_manifest_git_blob_sha1"),
+            "the original PRE evidence manifest must remain byte-identical",
+        )
+        self.assertTrue(all(
+            isinstance(item.get("reason"), str) and item["reason"].strip()
+            for item in manifest["files"].values()
+        ), "every maintained file requires a non-empty authorization rationale")
+
+        # The actively-maintained ZRFX harness remains outside both baselines.
+        with_harness = list(ZXRXF7_HISTORICAL_WATCH) + [
+            "tests/test_p0710zrfx_trust_boundary.py"
+        ]
         res_h = _frozen_guard_unchanged(with_harness, OUT / "PRE_SHA256.json")
         self.assertFalse(res_h["tests/test_p0710zrfx_trust_boundary.py"],
-                        "the R1-edited harness still drifts from PRE (expected)")
-        self.assertTrue(all(res_h[k] for k in ZXRXF7_WATCH),
-                        "production source + frozen fixtures must still match")
+                         "the R1-edited harness must remain outside PRE (expected)")
+        self.assertTrue(all(res_h[k] for k in ZXRXF7_HISTORICAL_WATCH),
+                        "all still-frozen historical files must match PRE")
+
 
 
 if __name__ == "__main__":
