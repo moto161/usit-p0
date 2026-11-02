@@ -299,13 +299,10 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                 # (optionally wrapped as a one-item list/tuple). Compound expressions
                 # are deliberately excluded from interprocedural matching.
                 binding_parameters = sorted({
-                    match.group(1)
+                    candidate
                     for expression in parameter_expressions
-                    for match in [re.fullmatch(
-                        r"[\[\(\s]*([A-Za-z_$][\w$]*)[\]\),\s]*",
-                        expression,
-                    )]
-                    if match
+                    for candidate in [expression.strip().strip("[](), \\t\\r\\n")]
+                    if re.fullmatch(r"[A-Za-z_$][\\w$]*", candidate)
                 })
                 if binding_parameters:
                     kinds.append(("sql_owner_parameter_binding", {
