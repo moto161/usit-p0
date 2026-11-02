@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import usit.ai_evidence_binding as evidence_binding
 from usit.ai_evidence_binding import verify_evidence_bindings
 from usit.cli import main
 from usit.scan_attestation import create_scan_attestation, public_key_id
@@ -249,19 +250,19 @@ class AIEvidenceBindingTests(unittest.TestCase):
         self._attach_scan_manifest()
         self._attach_scan_attestation()
         manifest = self.root / "scan_manifest.json"
-        real_read_bytes = Path.read_bytes
+        real_read_regular = evidence_binding._read_regular
         reads = 0
 
-        def changed_second_read(path):
+        def changed_second_read(path, limit):
             nonlocal reads
-            data = real_read_bytes(path)
-            if path.resolve() == manifest.resolve():
+            data = real_read_regular(path, limit)
+            if Path(path).resolve() == manifest.resolve():
                 reads += 1
                 if reads == 2:
                     return data + b" "
             return data
 
-        with patch.object(Path, "read_bytes", new=changed_second_read):
+        with patch.object(evidence_binding, "_read_regular", new=changed_second_read):
             result = verify_evidence_bindings(
                 self.ledger, self.root,
                 trusted_public_keys={self.attestation_key_id: self.attestation_public},
