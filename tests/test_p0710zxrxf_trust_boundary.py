@@ -126,7 +126,7 @@ def _git_blob_sha1(rel: str, base_dir: Path = PROJ) -> str | None:
     if result.returncode != 0:
         return None
     data = result.stdout
-    payload = b"blob " + str(len(data)).encode("ascii") + b"\\0" + data
+    payload = b"blob " + str(len(data)).encode("ascii") + b"\0" + data
     return hashlib.sha1(payload).hexdigest()
 
 
