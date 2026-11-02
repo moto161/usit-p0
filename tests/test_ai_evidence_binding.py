@@ -4,6 +4,8 @@ import contextlib
 import hashlib
 import io
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -383,6 +385,29 @@ class AIEvidenceBindingTests(unittest.TestCase):
         result = verify_evidence_bindings(self.ledger, self.root)
         self.assertEqual(result["claims"][0]["binding_status"], "UNKNOWN_REFERENCE")
         self.assertEqual(result["claims"][0]["unknown_evidence_refs"], ["not-in-catalog"])
+
+    def test_windows_junction_in_artifact_path_is_rejected(self):
+        if os.name != "nt":
+            self.skipTest("Windows junctions are only available on Windows")
+        outside = self.root / "outside-evidence"
+        outside.mkdir()
+        (outside / "photo.py").write_text("outside\\n", encoding="utf-8")
+        junction = self.root / "linked-evidence"
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+            capture_output=True, timeout=30,
+        )
+        if created.returncode != 0 or not junction.exists():
+            self.skipTest("OS refused junction creation")
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["cmd", "/c", "rmdir", str(junction)],
+                capture_output=True, timeout=30,
+            ) if junction.exists() else None
+        )
+        self.ledger["evidence_catalog"][0]["artifact_path"] = "linked-evidence/photo.py"
+        with self.assertRaisesRegex(ValueError, "reparse points"):
+            verify_evidence_bindings(self.ledger, self.root)
 
     def test_path_traversal_and_symlink_are_rejected(self):
         self.ledger["evidence_catalog"][0]["artifact_path"] = "../outside.py"
