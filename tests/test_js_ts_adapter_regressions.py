@@ -48,6 +48,25 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
             self.assertEqual(binding["argument_location"]["line"], 2)
             self.assertEqual(binding["parameter_declaration"]["line"], 1)
 
+    def test_graph_call_edge_preserves_typescript_argument_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "flow.ts").write_text(
+                "function sink(ownerId: string) { return ownerId; }\n"
+                "function caller(req: any) { sink(req.user.id); }\n",
+                encoding="utf-8",
+            )
+            from tests.synthetic_scan import scan_project
+            out = root.parent / (root.name + "-graph-output")
+            scan_project(str(root), str(out), force=True)
+            graph = __import__("json").loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+            edge = next(item for item in graph["edges"]
+                        if item["type"] == "calls" and item["evidence"]["path"] == "flow.ts"
+                        and item["resolution_status"] == "RESOLVED")
+            self.assertEqual(edge["argument_binding_status"], "EXACT_STATIC_MAPPING")
+            self.assertEqual(edge["argument_bindings"][0]["argument_expression"], "req.user.id")
+            self.assertEqual(edge["argument_bindings"][0]["parameter_name"], "ownerId")
+
     def test_typescript_spread_arguments_do_not_emit_partial_mapping(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
