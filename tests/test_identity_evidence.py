@@ -78,6 +78,22 @@ class IdentityEvidenceTests(unittest.TestCase):
         self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [2, 3])
         self.assertEqual(binding["verification_status"], "NOT_VERIFIED")
 
+    def test_preserves_each_local_alias_hop_in_dataflow_evidence(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": (
+                "function load(req) {\n"
+                "  const uid = req.user.id;\n"
+                "  const owner = uid;\n"
+                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [owner]);\n'
+                "}\n"
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item.get("line") for item in binding["details"]["propagation"]], [2, 3, 4])
+        self.assertEqual([item.get("variable") for item in binding["details"]["propagation"][:2]],
+                         ["uid", "owner"])
+
     def test_tracks_request_identity_through_local_alias_to_sql_sink(self):
         rows = extract_identity_evidence({
             "repo/photos.ts": (
