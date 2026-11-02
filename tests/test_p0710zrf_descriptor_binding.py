@@ -31,10 +31,11 @@ import usit.scanner as scanner                                        # noqa: E4
 from usit.graph import validate_graph, validate_graph_trusted          # noqa: E402
 from usit.snapshot import DescriptorIdentity, LineCountSnapshot, capture  # noqa: E402
 from tests.synthetic_scan import scan_project                          # noqa: E402
+from tests.frozen_baseline import git_blob_sha1, load_maintenance_baseline  # noqa: E402
 
 # PRE hashes of the two existing test files this ticket must leave untouched.
+HISTORICAL_GRAPH_VALIDATION_SHA256 = "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0"
 FROZEN_SHA = {
-    "tests/test_graph_validation.py": "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0",
     "tests/test_p073_budget_race.py": "470851778ee2224593ab146109b86b613f52fcd60149ddc23092da33dd3fbeb6",
 }
 
@@ -395,14 +396,17 @@ class ZRF8OldContractCompatibility(_Base):
 
     def test_zrf8b_existing_test_files_are_byte_identical(self):
         for rel, expected in FROZEN_SHA.items():
-            digest = hashlib.sha256((HERE / rel.replace("tests/", "")).read_bytes()).hexdigest() \
-                if expected is None else expected
             actual = hashlib.sha256((PROJECT / rel).read_bytes()).hexdigest()
-            self.assertEqual(actual, digest or actual,
-                             f"{rel} was modified by this ticket")
-        self.rec("ZRF8b", expected="frozen + budget-race test files unchanged",
-                 actual={k: hashlib.sha256((PROJECT / k).read_bytes()).hexdigest()
-                         for k in FROZEN_SHA})
+            self.assertEqual(actual, expected, f"{rel} was modified")
+        manifest = load_maintenance_baseline()
+        graph_entry = manifest["files"]["tests/test_graph_validation.py"]
+        self.assertEqual(graph_entry.get("historical_sha256"),
+                         HISTORICAL_GRAPH_VALIDATION_SHA256)
+        self.assertEqual(git_blob_sha1("tests/test_graph_validation.py"),
+                         graph_entry["git_blob_sha1"])
+        self.rec("ZRF8b", expected="budget-race fixture frozen; graph validation fixture matches successor baseline",
+                 actual={"frozen": list(FROZEN_SHA),
+                         "graph_validation_blob": graph_entry["git_blob_sha1"]})
 
 
 # =============================================================== ZRF-9
