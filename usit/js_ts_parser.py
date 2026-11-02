@@ -152,14 +152,22 @@ def parser_availability(project_root: Path) -> dict[str, Any]:
     if not node:
         return {"available": False, "reason": "NODE_RUNTIME_MISSING", "parser_name": PARSER_NAME}
     trust = verify_ts_lib_trust(USIT_ROOT)
+    # Expose only the compiler's declared and canonical install paths so callers
+    # can audit which local parser was considered.  The canonical path is null
+    # when trust verification could not safely resolve it (for example, a
+    # reparse-point install); the declared path remains useful for diagnostics.
+    load_path = {
+        "ts_lib": trust.get("ts_lib"),
+        "ts_lib_real_path": trust.get("real_path"),
+    }
     if not trust["trusted"]:
         return {
             "available": False, "reason": trust["reason"], "node": node,
-            "parser_name": PARSER_NAME,
+            "parser_name": PARSER_NAME, **load_path,
         }
     return {
         "available": True, "node": node, "version": trust["version"],
-        "parser_name": PARSER_NAME,
+        "parser_name": PARSER_NAME, **load_path,
     }
 
 
