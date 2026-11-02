@@ -364,9 +364,19 @@ class ZXRXF7FrozenCompatibility(_Base):
         # R2: use the explicit, documented guard scope (ZXRXF7_WATCH) and the
         # shared helper so the comparison logic is also unit-tested in
         # tests.test_p0710zxrxf_guard_r2.
-        unchanged = _frozen_guard_unchanged(ZXRXF7_WATCH, OUT / "PRE_SHA256.json")
-        self.assertTrue(all(unchanged.values()), f"unexpectedly changed: {unchanged}")
-        self.rec("ZXRXF7", expected="frozen + related tests + graph/scanner/safeio unchanged",
+        historical = _frozen_guard_unchanged(
+            ZXRXF7_HISTORICAL_WATCH, OUT / "PRE_SHA256.json")
+        maintained = _maintenance_guard_unchanged(
+            ZXRXF7_MAINTENANCE_WATCH, MAINTENANCE_BASELINE)
+        unchanged = {**historical, **maintained}
+        self.assertTrue(all(unchanged.values()), f"historical or maintenance baseline mismatch: {unchanged}")
+        manifest = json.loads(MAINTENANCE_BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(set(manifest.get("files", {})), set(ZXRXF7_MAINTENANCE_WATCH))
+        self.assertEqual(
+            _git_blob_sha1("outputs/p0710zxrxf/PRE_SHA256.json"),
+            manifest.get("historical_manifest_git_blob_sha1"),
+        )
+        self.rec("ZXRXF7", expected="historical PRE preserved; explicitly maintained files match successor baseline",
                  actual=unchanged)
 
 
