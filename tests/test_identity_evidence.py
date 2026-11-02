@@ -58,10 +58,10 @@ class IdentityEvidenceTests(unittest.TestCase):
     def test_tracks_trusted_identity_through_local_variable_to_sql_sink(self):
         rows = extract_identity_evidence({
             "repo/photos.ts": (
-                "function load(req) {\\n"
-                "  const uid = req.user.id;\\n"
-                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [uid]);\\n'
-                "}\\n"
+                "function load(req) {\n"
+                "  const uid = req.user.id;\n"
+                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
             )
         })
         binding = next(row for row in rows
@@ -74,10 +74,10 @@ class IdentityEvidenceTests(unittest.TestCase):
     def test_tracks_request_identity_through_local_alias_to_sql_sink(self):
         rows = extract_identity_evidence({
             "repo/photos.ts": (
-                "function load(req) {\\n"
-                "  const requestedOwner = req.body.user_id;\\n"
-                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [requestedOwner]);\\n'
-                "}\\n"
+                "function load(req) {\n"
+                "  const requestedOwner = req.body.user_id;\n"
+                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [requestedOwner]);\n'
+                "}\n"
             )
         })
         binding = next(row for row in rows
@@ -88,9 +88,9 @@ class IdentityEvidenceTests(unittest.TestCase):
     def test_tracks_python_local_identity_assignment_to_sql_sink(self):
         rows = extract_identity_evidence({
             "repo/photos.py": (
-                "def load(request):\\n"
-                "    uid = request.user.id\\n"
-                '    cursor.execute("SELECT id FROM photos WHERE owner_id = ?", [uid])\\n'
+                "def load(request):\n"
+                "    uid = request.user.id\n"
+                '    cursor.execute("SELECT id FROM photos WHERE owner_id = ?", [uid])\n'
             )
         })
         binding = next(row for row in rows
@@ -101,11 +101,11 @@ class IdentityEvidenceTests(unittest.TestCase):
     def test_reassignment_to_unknown_value_invalidates_identity_alias(self):
         rows = extract_identity_evidence({
             "repo/photos.ts": (
-                "function load(req) {\\n"
-                "  let uid = req.user.id;\\n"
-                "  uid = getFallbackId();\\n"
-                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [uid]);\\n'
-                "}\\n"
+                "function load(req) {\n"
+                "  let uid = req.user.id;\n"
+                "  uid = getFallbackId();\n"
+                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
             )
         })
         propagated = [row for row in rows
