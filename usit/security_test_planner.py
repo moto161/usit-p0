@@ -260,7 +260,7 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                  "在隔离环境分别使用本人身份和另一用户身份提交不同归属 ID",
                  "记录服务端最终绑定的 SQL 参数、授权决策及数据副作用，并与需求定义的资源归属规则对照"],
                 limitations + [
-                    "同一行出现请求字段和 SQL owner 占位符仅为文本共现，不证明该表达式就是实际绑定参数。",
+                    "仅检查 SQL 调用第一个参数之后的同一行位置参数表达式；不解析 ORM、命名参数映射或多行调用，仍不证明数据库驱动实际绑定。",
                     "必须检查完整参数数组、变量赋值、框架绑定规则和运行时身份；当前证据不是 IDOR 或漏洞结论。",
                 ],
                 call_chain=chain, authorization=auth, database=database, identity_flow=identity_flow,
@@ -277,7 +277,7 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
                  "记录实际 SQL 参数和资源访问结果，确认数据库归属条件与认证身份一致"],
                 limitations + [
                     "req.user.id 等命名模式不证明对象可信、已认证或未被覆盖。",
-                    "同一行模式不代表完整参数数据流；未验证跨行赋值、别名、闭包、包装器或 ORM。",
+                    "局部别名仅覆盖同一简单语句块；未验证跨函数、闭包、包装器、ORM 或运行时认证上下文。",
                 ],
                 call_chain=chain, authorization=auth, database=database, identity_flow=identity_flow,
 
