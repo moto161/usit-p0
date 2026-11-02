@@ -80,11 +80,11 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
     def test_resolved_call_records_exact_positional_and_keyword_argument_mapping(self):
         source = self.root / "mapping.py"
         source.write_text(
-            "def sink(owner_id, *, tenant_id=None):\\n"
-            "    return owner_id\\n"
-            "def caller(req):\\n"
-            "    uid = req.user.id\\n"
-            "    sink(uid, tenant_id=req.tenant.id)\\n",
+            "def sink(owner_id, *, tenant_id=None):\n"
+            "    return owner_id\n"
+            "def caller(req):\n"
+            "    uid = req.user.id\n"
+            "    sink(uid, tenant_id=req.tenant.id)\n",
             encoding="utf-8",
         )
         rows = [analyze_file(self.root, source)]
@@ -104,10 +104,10 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
     def test_unresolved_or_star_arguments_do_not_emit_partial_mapping(self):
         source = self.root / "mapping.py"
         source.write_text(
-            "def sink(owner_id):\\n"
-            "    return owner_id\\n"
-            "def caller(args):\\n"
-            "    sink(*args)\\n",
+            "def sink(owner_id):\n"
+            "    return owner_id\n"
+            "def caller(args):\n"
+            "    sink(*args)\n",
             encoding="utf-8",
         )
         rows = [analyze_file(self.root, source)]
