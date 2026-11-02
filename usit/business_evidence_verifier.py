@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import math
 from collections import Counter
 from typing import Any
 
@@ -114,6 +115,17 @@ def verify_business_function_evidence(
                     "business_function_id": function_id,
                     "value": percent,
                 })
+            if percent is not None and (
+                not isinstance(percent, (int, float)) or isinstance(percent, bool)
+                or not math.isfinite(percent) or percent < 0 or percent > 100
+            ):
+                conflicts.append({
+                    "kind": "INVALID_COVERAGE_PERCENT",
+                    "business_function_id": function_id,
+                    "value": percent,
+                })
+            counts = {}
+            counts_valid = True
             for count_field in ("executable_line_count", "covered_line_count", "uncovered_line_count"):
                 count_value = cov.get(count_field)
                 if count_value is not None and (
@@ -124,10 +136,63 @@ def verify_business_function_evidence(
                         "business_function_id": function_id,
                         "field": count_field,
                     })
+                    counts_valid = False
+                else:
+                    counts[count_field] = count_value
+            executable = counts.get("executable_line_count")
+            covered = counts.get("covered_line_count")
+            uncovered = counts.get("uncovered_line_count")
+            if counts_valid and all(value is not None for value in (executable, covered, uncovered)):
+                if covered > executable or uncovered > executable or covered + uncovered != executable:
+                    conflicts.append({
+                        "kind": "INCONSISTENT_COVERAGE_COUNTS",
+                        "business_function_id": function_id,
+                        "executable_line_count": executable,
+                        "covered_line_count": covered,
+                        "uncovered_line_count": uncovered,
+                    })
+                if percent is not None and executable > 0:
+                    expected_percent = round(100 * covered / executable, 2)
+                    if not math.isclose(float(percent), expected_percent, rel_tol=0, abs_tol=0.01):
+                        conflicts.append({
+                            "kind": "COVERAGE_PERCENT_COUNT_MISMATCH",
+                            "business_function_id": function_id,
+                            "reported_percent": percent,
+                            "derived_percent": expected_percent,
+                        })
+                if percent is not None:
+                    expected_status = "COVERED" if covered == executable else ("PARTIAL" if covered > 0 else "NOT_COVERED")
+                    if cs != expected_status:
+                        conflicts.append({
+                            "kind": "COVERAGE_STATUS_COUNT_MISMATCH",
+                            "business_function_id": function_id,
+                            "reported_status": cs,
+                            "derived_status": expected_status,
+                        })
+            elif percent is not None:
+                conflicts.append({
+                    "kind": "INCOMPLETE_COVERAGE_MEASUREMENTS",
+                    "business_function_id": function_id,
+                })
+            missing_files = cov.get("coverage_source_files_missing", [])
+            if not isinstance(missing_files, list) or any(
+                not isinstance(path, str) or not path.strip() for path in missing_files
+            ):
+                conflicts.append({
+                    "kind": "INVALID_COVERAGE_MISSING_SOURCE_FILES",
+                    "business_function_id": function_id,
+                })
+            elif missing_files and cs != "UNKNOWN":
+                conflicts.append({
+                    "kind": "COVERAGE_STATUS_WITH_MISSING_SOURCE_FILES",
+                    "business_function_id": function_id,
+                    "reported_status": cs,
+                })
             ranges = cov.get("mapping_ranges", [])
             if not isinstance(ranges, list) or any(
                 not isinstance(item, dict)
                 or not isinstance(item.get("source_file"), str)
+                or not item["source_file"].strip()
                 or not isinstance(item.get("line_start"), int)
                 or isinstance(item.get("line_start"), bool)
                 or not isinstance(item.get("line_end"), int)
