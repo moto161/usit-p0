@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from usit.test_result_importer import ingest_junit_results
+from usit.test_result_importer import MAX_REPORT_BYTES, ingest_junit_results
 
 
 class TestResultImporterTests(unittest.TestCase):
@@ -124,6 +124,17 @@ class TestResultImporterTests(unittest.TestCase):
             report.write_text('<!DOCTYPE x [<!ENTITY a "x">]><testsuite><testcase name="x"/></testsuite>', encoding="utf-8")
             mapping.write_text(json.dumps({"schema_version": "usit-test-result-mapping-v1", "mappings": []}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "DTD/entity"):
+                ingest_junit_results(report, mapping, graph)
+
+    def test_oversized_report_is_rejected_before_unbounded_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase name="test_upload"/></testsuite>'
+            )
+            with report.open("wb") as stream:
+                stream.truncate(MAX_REPORT_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "size limit"):
                 ingest_junit_results(report, mapping, graph)
 
     def test_rejects_dtd_after_large_xml_prolog_comment(self):
