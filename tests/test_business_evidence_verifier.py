@@ -216,6 +216,58 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
             {item["kind"] for item in result["evidence_conflicts"]},
         )
 
+    def test_coverage_counts_percent_status_and_nonfinite_values_are_cross_checked(self):
+        import copy
+        base = {
+            "schema_version": "usit-code-coverage-results-v1",
+            "source_hashes": {
+                "coverage_report_sha256": "3"*64,
+                "mapping_json_sha256": "4"*64,
+                "business_graph_sha256": self.graph_hash,
+            },
+            "business_function_coverage": [{
+                "business_function_id": "bf-upload",
+                "code_coverage_status": "PARTIAL",
+                "line_coverage_percent": 80.0,
+                "executable_line_count": 10,
+                "covered_line_count": 8,
+                "uncovered_line_count": 2,
+                "mapping_ranges": [{"source_file": "src/upload.py", "line_start": 1, "line_end": 10}],
+                "coverage_source_files_missing": [],
+            }],
+        }
+
+        valid = verify_business_function_evidence(
+            self.graph, coverage_results=base, business_graph_sha256=self.graph_hash
+        )
+        self.assertEqual(valid["evidence_conflict_count"], 0)
+
+        cases = [
+            ("INCONSISTENT_COVERAGE_COUNTS", {"uncovered_line_count": 1}),
+            ("COVERAGE_PERCENT_COUNT_MISMATCH", {"line_coverage_percent": 75.0}),
+            ("COVERAGE_STATUS_COUNT_MISMATCH", {"code_coverage_status": "COVERED"}),
+            ("INVALID_COVERAGE_PERCENT", {"line_coverage_percent": float("nan")}),
+            ("COVERAGE_STATUS_WITH_MISSING_SOURCE_FILES", {
+                "coverage_source_files_missing": ["src/missing.py"],
+            }),
+        ]
+        for expected_kind, changes in cases:
+            with self.subTest(expected_kind=expected_kind):
+                coverage = copy.deepcopy(base)
+                coverage["business_function_coverage"][0].update(changes)
+                result = verify_business_function_evidence(
+                    self.graph, coverage_results=coverage, business_graph_sha256=self.graph_hash
+                )
+                self.assertIn(
+                    expected_kind,
+                    {item["kind"] for item in result["evidence_conflicts"]},
+                )
+                upload = next(
+                    item for item in result["business_function_evidence"]
+                    if item["business_function_id"] == "bf-upload"
+                )
+                self.assertTrue(upload["evidence_conflict"])
+
     def test_source_hashes_must_be_complete_sha256_digests(self):
         malformed = {
             "schema_version": "usit-test-execution-results-v1",
