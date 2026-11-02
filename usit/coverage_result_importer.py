@@ -1,26 +1,70 @@
 """Import coverage.py JSON or JaCoCo XML using reviewed line-range mappings."""
 from __future__ import annotations
+
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any
+
+from .safeio import is_reparse, open_no_follow
 from .test_report_adapters import parse_coverage_py_json, parse_jacoco_xml, map_line_coverage_to_functions
 
 MAX_COVERAGE_BYTES = 50 * 1024 * 1024
 MAX_MAPPING_BYTES = 2 * 1024 * 1024
 MAX_GRAPH_BYTES = 50 * 1024 * 1024
 
+
 def _read(path: str | Path, limit: int) -> bytes:
+    """Read one bounded regular file through a no-follow descriptor."""
     source = Path(path).expanduser()
-    if source.is_symlink():
-        raise ValueError("input must not be a symbolic link")
-    resolved = source.resolve(strict=True)
-    if not resolved.is_file():
-        raise ValueError("input must be a regular file")
-    data = resolved.read_bytes()
-    if len(data) > limit:
-        raise ValueError(f"input exceeds size limit ({limit} bytes)")
-    return data
+    absolute = source if source.is_absolute() else Path.cwd() / source
+
+    # Reject links/reparse points in every named component before resolving.
+    # The final open is still descriptor-bound and independently checked.
+    cursor = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        cursor = cursor / part
+        info = cursor.lstat()
+        if cursor.is_symlink() or is_reparse(info):
+            raise ValueError("input path must not contain symbolic links or reparse points")
+
+    resolved = absolute.resolve(strict=True)
+    fd = open_no_follow(resolved)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or is_reparse(before):
+            raise ValueError("input must be a regular file")
+        if before.st_size > limit:
+            raise ValueError(f"input exceeds size limit ({limit} bytes)")
+
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(fd, min(1024 * 1024, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > limit:
+            raise ValueError(f"input exceeds size limit ({limit} bytes)")
+
+        after = os.fstat(fd)
+        identity_before = (
+            int(before.st_dev), int(before.st_ino), int(before.st_size),
+            int(before.st_mtime_ns), int(before.st_ctime_ns),
+        )
+        identity_after = (
+            int(after.st_dev), int(after.st_ino), int(after.st_size),
+            int(after.st_mtime_ns), int(after.st_ctime_ns),
+        )
+        if identity_before != identity_after:
+            raise ValueError("input changed while being read")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
 
 def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
                             graph_path: str | Path, report_format: str) -> dict[str, Any]:
