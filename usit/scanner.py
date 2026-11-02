@@ -1165,6 +1165,14 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             if c.get('candidate_targets'): extras['candidate_targets']=c['candidate_targets']
             if c.get('evidence_chain'): extras['evidence_chain']=c['evidence_chain']
             if c.get('diagnostic'): extras['diagnostic']=c['diagnostic']
+            # Preserve parameter mapping only for a uniquely resolved call.
+            # Unsupported shapes remain explicit but never publish partial mappings.
+            if state == 'RESOLVED' and c.get('argument_binding_status'):
+                extras['argument_binding_status'] = c['argument_binding_status']
+                extras['argument_bindings'] = (
+                    c.get('argument_bindings', [])
+                    if c.get('argument_binding_status') == 'EXACT_STATIC_MAPPING' else []
+                )
             if target:
                 extras['target_location']={'path':target['file'],'line':target['line'],'qualified_name':target.get('qualified_name')}
             caller_id=c.get('caller_symbol_id')
