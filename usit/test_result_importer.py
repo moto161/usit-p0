@@ -43,7 +43,9 @@ def _case_id(classname: str, name: str) -> str:
 def _parse_junit(data: bytes) -> list[dict[str, Any]]:
     # ElementTree does not resolve external entities, and explicitly rejecting
     # declarations keeps the accepted report format deliberately conservative.
-    upper = data[: min(len(data), 1_000_000)].upper()
+    # The report is already bounded to MAX_REPORT_BYTES; scan the entire
+    # document so a declaration cannot be hidden behind a long XML prolog.
+    upper = data.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise ValueError("JUnit XML with DTD/entity declarations is not accepted")
     try:
