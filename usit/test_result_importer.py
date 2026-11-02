@@ -122,8 +122,9 @@ def ingest_junit_results(
 ) -> dict[str, Any]:
     """Parse JUnit and compute function status using explicit testcase mappings.
 
-    Mapping JSON:
+    Mapping JSON is bound to the exact graph bytes:
       {"schema_version":"usit-test-result-mapping-v1",
+       "source_graph_sha256":"<sha256 of business graph file>",
        "mappings":[{"test_case_id":"pkg.Test::test_upload",
                     "business_function_id":"bf-..."}]}
     """
@@ -135,17 +136,16 @@ def ingest_junit_results(
         graph_doc = json.loads(graph_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid JSON input: {exc}") from exc
+    if not isinstance(graph_doc, dict) or graph_doc.get("schema_version") != "usit-graph-v1":
+        raise ValueError("business graph schema_version must be usit-graph-v1")
+    graph_sha256 = hashlib.sha256(graph_bytes).hexdigest()
     if not isinstance(mapping_doc, dict) or mapping_doc.get("schema_version") != "usit-test-result-mapping-v1":
         raise ValueError("mapping schema_version must be usit-test-result-mapping-v1")
+    if mapping_doc.get("source_graph_sha256") != graph_sha256:
+        raise ValueError("mapping source_graph_sha256 must match business graph bytes")
     mappings = mapping_doc.get("mappings")
     if not isinstance(mappings, list):
         raise ValueError("mapping.mappings must be a list")
-    if not isinstance(graph_doc, dict) or graph_doc.get("schema_version") != "usit-business-knowledge-graph-v1":
-        # Current graph envelope keeps the original graph schema; validate the
-        # required business-understanding projection instead of assuming a new
-        # top-level schema version.
-        if not isinstance(graph_doc, dict) or not isinstance(graph_doc.get("business_understanding"), dict):
-            raise ValueError("business graph must contain business_understanding")
     understanding = graph_doc.get("business_understanding")
     if not isinstance(understanding, dict):
         raise ValueError("business graph must contain business_understanding")
