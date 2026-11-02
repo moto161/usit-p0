@@ -807,10 +807,9 @@ def project_business_graph(graph: Mapping[str, Any],
             item["path"], item["line"], item["kind"], item["identity_evidence_id"]
         ))
 
-        # S2.30-B: carry identity evidence across exactly one statically resolved
-        # call edge, but only when the source function owner and argument mapping
-        # are both explicit. This records caller argument -> callee parameter;
-        # it does not yet claim that the callee parameter reaches a sink.
+        # S2.30-C: propagate identity expressions across exact, uniquely resolved
+        # caller→callee parameter mappings. Each hop is recorded independently;
+        # no return/field/collection flow or runtime execution is inferred.
         identity_parameter_evidence: list[dict[str, Any]] = []
         reachable_symbols = {association.get("target_symbol_id")}
         for chain in association.get("call_chain_evidence", []):
@@ -819,10 +818,22 @@ def project_business_graph(graph: Mapping[str, Any],
                     reachable_symbols.add(step["caller_symbol_id"])
                 if isinstance(step.get("target_id"), str):
                     reachable_symbols.add(step["target_id"])
+
+        call_edges_by_caller: dict[str, list[dict[str, Any]]] = {}
+        for candidate_edge in edges:
+            caller_id = candidate_edge.get("caller_symbol_id")
+            if (candidate_edge.get("type") == "calls"
+                    and candidate_edge.get("resolution_status") == "RESOLVED"
+                    and candidate_edge.get("argument_binding_status") == "EXACT_STATIC_MAPPING"
+                    and caller_id in reachable_symbols
+                    and candidate_edge.get("target") in reachable_symbols):
+                call_edges_by_caller.setdefault(caller_id, []).append(candidate_edge)
+
         for identity_node in identity_nodes:
             identity_details = identity_node.get("business_details") or {}
             identity_owner = identity_details.get("owner_symbol_id")
-            if identity_owner not in reachable_symbols:
+            if (identity_owner not in reachable_symbols
+                    or identity_details.get("owner_resolution_status") != "RESOLVED"):
                 continue
             source_details = identity_details.get("details") or {}
             source_variable = source_details.get("source_variable")
@@ -831,45 +842,96 @@ def project_business_graph(graph: Mapping[str, Any],
                 or source_details.get("request_expressions") or []
             )
             accepted_expressions = {
-                item for item in [source_variable, *source_expressions]
-                if isinstance(item, str) and item
+                item.strip() for item in [source_variable, *source_expressions]
+                if isinstance(item, str) and item.strip()
             }
             if not accepted_expressions:
                 continue
-            for call_edge in edges:
-                if (call_edge.get("type") != "calls"
-                        or call_edge.get("resolution_status") != "RESOLVED"
-                        or call_edge.get("caller_symbol_id") != identity_owner
-                        or call_edge.get("target") not in reachable_symbols
-                        or call_edge.get("argument_binding_status") != "EXACT_STATIC_MAPPING"):
+
+            queue: list[tuple[str, str, frozenset[str], list[dict[str, Any]]]] = [
+                (identity_owner, expression, frozenset({identity_owner}), [])
+                for expression in sorted(accepted_expressions)
+            ]
+            seen_states: set[tuple[str, str, tuple[str, ...]]] = set()
+            while queue:
+                current_symbol, current_expression, visited, prior_chain = queue.pop(0)
+                state_key = (current_symbol, current_expression, tuple(sorted(visited)))
+                if state_key in seen_states:
                     continue
-                for binding in call_edge.get("argument_bindings", []):
-                    if not isinstance(binding, Mapping):
+                seen_states.add(state_key)
+
+                matching: list[tuple[dict[str, Any], Mapping[str, Any]]] = []
+                for call_edge in call_edges_by_caller.get(current_symbol, []):
+                    for binding in call_edge.get("argument_bindings", []):
+                        if not isinstance(binding, Mapping):
+                            continue
+                        argument_expression = binding.get("argument_expression")
+                        if (isinstance(argument_expression, str)
+                                and argument_expression.strip() == current_expression):
+                            matching.append((call_edge, binding))
+
+                by_callsite: dict[tuple[str, int], list[tuple[dict[str, Any], Mapping[str, Any]]]] = {}
+                for call_edge, binding in matching:
+                    call_evidence = call_edge.get("evidence") or {}
+                    key = (str(call_evidence.get("path") or ""),
+                           int(call_evidence.get("line") or 0))
+                    by_callsite.setdefault(key, []).append((call_edge, binding))
+
+                for callsite_key in sorted(by_callsite):
+                    candidates = by_callsite[callsite_key]
+                    target_ids = {edge.get("target") for edge, _ in candidates}
+                    if len(target_ids) != 1 or len(candidates) != 1:
                         continue
-                    argument_expression = binding.get("argument_expression")
-                    if not isinstance(argument_expression, str) or argument_expression.strip() not in accepted_expressions:
+                    call_edge, binding = candidates[0]
+                    callee_symbol = call_edge.get("target")
+                    parameter_name = binding.get("parameter_name")
+                    if (not isinstance(callee_symbol, str)
+                            or callee_symbol in visited
+                            or not isinstance(parameter_name, str)
+                            or not parameter_name.strip()):
                         continue
                     call_evidence = call_edge.get("evidence") or {}
-                    identity_parameter_evidence.append({
-                        "identity_evidence_id": identity_node.get("id"),
-                        "identity_kind": identity_details.get("kind") or "UNKNOWN",
-                        "caller_symbol_id": identity_owner,
-                        "callee_symbol_id": call_edge.get("target"),
+                    hop_chain = prior_chain + [{
+                        "caller_symbol_id": current_symbol,
+                        "callee_symbol_id": callee_symbol,
                         "call_site": {
                             "path": call_evidence.get("path"),
                             "line": call_evidence.get("line"),
                         },
-                        "argument_expression": argument_expression.strip(),
+                        "argument_expression": current_expression,
+                        "parameter_name": parameter_name.strip(),
+                    }]
+                    identity_parameter_evidence.append({
+                        "identity_evidence_id": identity_node.get("id"),
+                        "identity_kind": identity_details.get("kind") or "UNKNOWN",
+                        "caller_symbol_id": current_symbol,
+                        "callee_symbol_id": callee_symbol,
+                        "call_site": {
+                            "path": call_evidence.get("path"),
+                            "line": call_evidence.get("line"),
+                        },
+                        "argument_expression": current_expression,
                         "argument_index": binding.get("argument_index"),
                         "argument_kind": binding.get("argument_kind"),
-                        "parameter_name": binding.get("parameter_name"),
+                        "parameter_name": parameter_name.strip(),
                         "parameter_index": binding.get("parameter_index"),
                         "parameter_declaration": binding.get("parameter_declaration"),
-                        "propagation_status": "CALL_ARGUMENT_TO_PARAMETER_STATIC_MAPPING",
+                        "propagation_depth": len(hop_chain),
+                        "propagation_chain": hop_chain,
+                        "propagation_status": (
+                            "CALL_ARGUMENT_TO_PARAMETER_STATIC_MAPPING"
+                            if len(hop_chain) == 1 else "MULTI_HOP_STATIC_PARAMETER_MAPPING"
+                        ),
                         "confidence": "STATIC_INFERENCE",
                         "verification_status": "NOT_VERIFIED",
                     })
+                    queue.append((
+                        callee_symbol, parameter_name.strip(),
+                        visited | {callee_symbol}, hop_chain,
+                    ))
+
         identity_parameter_evidence.sort(key=lambda item: (
+            int(item.get("propagation_depth") or 0),
             str(item.get("call_site", {}).get("path") or ""),
             int(item.get("call_site", {}).get("line") or 0),
             str(item.get("parameter_name") or ""),
