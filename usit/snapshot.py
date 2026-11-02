@@ -433,8 +433,8 @@ class LineCountSnapshot:
               * ``UNAVAILABLE`` -- the check could not be completed reliably
                 (path not in this capture, captured digest missing/malformed,
                 open/read failure, path escape, symlink/reparse bypass, path
-                replacement, or identity change during the read).  ``UNAVAILABLE``
-                is **never** ``MATCH``.
+                replacement, or identity change during the read (including
+                POSIX ctime_ns changes).  ``UNAVAILABLE`` is **never** ``MATCH``.
 
         Raises:
             ValueError: ``rel`` is not a usable normalised relative path, or the
