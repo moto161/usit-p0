@@ -331,10 +331,7 @@ class ZXRXF7FrozenCompatibility(_Base):
         # R2: use the explicit, documented guard scope (ZXRXF7_WATCH) and the
         # shared helper so the comparison logic is also unit-tested in
         # tests.test_p0710zxrxf_guard_r2.
-        baseline = OUT / "PRE_SHA256.json"
-        if not baseline.is_file():
-            self.skipTest("historical PRE_SHA256 evidence is not included in this source checkout")
-        unchanged = _frozen_guard_unchanged(ZXRXF7_WATCH, baseline)
+        unchanged = _frozen_guard_unchanged(ZXRXF7_WATCH, OUT / "PRE_SHA256.json")
         self.assertTrue(all(unchanged.values()), f"unexpectedly changed: {unchanged}")
         self.rec("ZXRXF7", expected="frozen + related tests + graph/scanner/safeio unchanged",
                  actual=unchanged)
