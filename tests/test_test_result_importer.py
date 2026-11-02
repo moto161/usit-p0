@@ -126,6 +126,22 @@ class TestResultImporterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "DTD/entity"):
                 ingest_junit_results(report, mapping, graph)
 
+    def test_rejects_dtd_after_large_xml_prolog_comment(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase name="test_upload"/></testsuite>'
+            )
+            padded = (
+                b'<?xml version="1.0"?>\\n<!--'
+                + (b'x' * 1_000_001)
+                + b'-->\\n<!DOCTYPE x [<!ENTITY a "x">]>'
+                + b'<testsuite><testcase name="test_upload"/></testsuite>'
+            )
+            report.write_bytes(padded)
+            with self.assertRaisesRegex(ValueError, "DTD/entity"):
+                ingest_junit_results(report, mapping, graph)
+
     def test_missing_mapped_case_is_reported_as_not_seen(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
