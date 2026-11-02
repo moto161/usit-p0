@@ -69,6 +69,20 @@ class CoverageImporterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "DTD/entity"):
             parse_jacoco_xml(data)
 
+    def test_extremely_large_mapping_range_does_not_expand_memory(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {"src/a.py": {
+                "executed_lines": [7], "missing_lines": [8]
+            }}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [
+                {"business_function_id": "bf-a", "source_file": "src/a.py",
+                 "line_start": 1, "line_end": 10**12}
+            ])
+            result = ingest_coverage_results(report, mapping, graph, "coverage-py-json")
+            self.assertEqual(result["business_function_coverage"][0]["code_coverage_status"], "PARTIAL")
+
     def test_coverage_report_size_limit_is_enforced_before_read(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
