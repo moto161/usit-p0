@@ -77,6 +77,46 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
                 self.assertIn("path", call["import_evidence"])
                 self.assertIn("line", call["import_evidence"])
 
+    def test_resolved_call_records_exact_positional_and_keyword_argument_mapping(self):
+        source = self.root / "mapping.py"
+        source.write_text(
+            "def sink(owner_id, *, tenant_id=None):\\n"
+            "    return owner_id\\n"
+            "def caller(req):\\n"
+            "    uid = req.user.id\\n"
+            "    sink(uid, tenant_id=req.tenant.id)\\n",
+            encoding="utf-8",
+        )
+        rows = [analyze_file(self.root, source)]
+        resolve_python_calls(str(self.root), rows)
+        call = next(item for item in rows[0]["calls"] if item["callee"] == "sink")
+        self.assertEqual(call["resolution_status"], "RESOLVED")
+        self.assertEqual(call["argument_binding_status"], "EXACT_STATIC_MAPPING")
+        self.assertEqual(
+            [(item["argument_kind"], item["argument_expression"], item["parameter_name"])
+             for item in call["argument_bindings"]],
+            [("POSITIONAL", "uid", "owner_id"),
+             ("KEYWORD", "req.tenant.id", "tenant_id")],
+        )
+        self.assertEqual(call["argument_bindings"][0]["parameter_declaration"]["path"], "mapping.py")
+        self.assertEqual(call["argument_bindings"][0]["argument_location"]["line"], 5)
+
+    def test_unresolved_or_star_arguments_do_not_emit_partial_mapping(self):
+        source = self.root / "mapping.py"
+        source.write_text(
+            "def sink(owner_id):\\n"
+            "    return owner_id\\n"
+            "def caller(args):\\n"
+            "    sink(*args)\\n",
+            encoding="utf-8",
+        )
+        rows = [analyze_file(self.root, source)]
+        resolve_python_calls(str(self.root), rows)
+        call = next(item for item in rows[0]["calls"] if item["callee"] == "sink")
+        self.assertEqual(call["resolution_status"], "RESOLVED")
+        self.assertEqual(call["argument_binding_status"], "UNSUPPORTED_ARGUMENT_SHAPE")
+        self.assertEqual(call["argument_bindings"], [])
+
     def test_no_project_code_is_imported_or_executed(self):
         # The resolver's only interface accepts paths and analyzer rows; fixture modules are never imported.
         rows, _ = self.analyze()
