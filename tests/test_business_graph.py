@@ -601,6 +601,18 @@ class BusinessGraphProjectionTests(unittest.TestCase):
                 "verification_status": "NOT_VERIFIED",
                 "owner_symbol_id": symbols["handler"],
                 "owner_resolution_status": "RESOLVED",
+            }, {
+                "evidence_id": "sql-owner-binding-multihop",
+                "kind": "sql_owner_parameter_binding",
+                "source": repository_path, "line": 11,
+                "details": {"binding_parameters": ["user_id"],
+                            "resource_fields": ["owner_id"],
+                            "binding_status": "EXACT_BARE_IDENTIFIER_ARGUMENT"},
+                "scope": "SAME_LINE_PATTERN",
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "owner_symbol_id": symbols["repository"],
+                "owner_resolution_status": "RESOLVED",
             }],
         })
         endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
@@ -616,6 +628,13 @@ class BusinessGraphProjectionTests(unittest.TestCase):
                          "MULTI_HOP_STATIC_PARAMETER_MAPPING")
         self.assertEqual(len(by_depth[2]["propagation_chain"]), 2)
         self.assertEqual(by_depth[2]["verification_status"], "NOT_VERIFIED")
+        sql_links = endpoint["handler_association"]["identity_sql_sink_evidence"]
+        self.assertEqual(len(sql_links), 1)
+        self.assertEqual(sql_links[0]["binding_parameter"], "user_id")
+        self.assertEqual(sql_links[0]["resource_fields"], ["owner_id"])
+        self.assertEqual(sql_links[0]["binding_status"],
+                         "PROPAGATED_PARAMETER_TO_SQL_OWNER_BINDING")
+        self.assertEqual(sql_links[0]["verification_status"], "NOT_VERIFIED")
 
 
 if __name__ == "__main__":
