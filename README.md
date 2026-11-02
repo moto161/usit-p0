@@ -1,17 +1,57 @@
-# USIT P0 — 通用软件理解与智能测试基础引擎
+# USIT — 通用软件理解与智能测试系统
 
-当前版本：0.1.0（Python 标准库，无第三方依赖）。P0目标是安全地扫描项目、识别语言/构建标记、用启发式提取符号和导入、建立带证据路径/行号的轻量知识图谱，并生成测试计划与 JSON/Markdown 报告。
+**USIT（Universal Software Intelligence Toolkit）不是单纯的代码扫描器或代码生成助手。** 项目目标是让 AI 基于可追溯证据理解一个既有软件：识别其模块、业务功能、接口、数据模型、权限与身份边界，梳理前后端及数据库关联，发现文档/设计/实现之间的差异，形成可审阅的测试候选；在取得明确授权后，再把测试执行结果、覆盖率和回归证据回流到业务功能与需求追溯链，辅助判断问题并支持后续修复验证。
+
+当前仓库处于持续演进阶段，包含 P0 只读扫描基础、静态业务理解、图谱与证据校验、测试候选规划、测试结果/覆盖率导入、证据交叉验证、需求缺口分析和质量评估等能力。**各能力的成熟度并不相同**：静态推断不等于运行时事实，候选不等于已执行测试，测试通过或代码覆盖率也不等于业务正确。
+
+## 能力地图
+
+| 层次 | 当前能力 | 关键边界 |
+|---|---|---|
+| 项目发现 | 文件清单、语言/构建标记、符号/导入/调用证据 | 解析深度依语言与解析器而异；不支持的语义保持 UNKNOWN |
+| 软件理解 | PRD/接口/数据文档、业务功能视图、前后端调用候选、数据库/权限/身份证据 | 只在明确证据和唯一关联下建立关系；静态链路不是运行时证明 |
+| 知识与追溯 | `usit-graph-v1`、图校验、来源证据、哈希绑定、需求追溯 | 图谱有效不代表业务实现正确；冲突必须保留并报告 |
+| 测试设计 | 业务测试候选、前后端流程候选、预期结果确认点 | 未确认的预期结果不得伪装成验收标准；候选状态不是 PASS |
+| 运行证据 | JUnit / pytest JSON 结果导入；coverage.py JSON / JaCoCo XML 覆盖率导入 | 只导入已有报告，不代替测试执行；映射必须显式审阅并绑定图谱哈希 |
+| 验证与质量 | 业务证据交叉验证、验证缺口清单、质量维度评估 | UNKNOWN / NOT_MEASURED / CONFLICT 不得折算为通过或零缺陷 |
+| AI 辅助 | 可选本地 Agent2API 网关模型调用基础 | 仅显式调用；不会自动上传项目源码或自主修改目标项目 |
+
+## 环境与安装
+
+- Python 3.10 或更新版本；Python 运行依赖由 `pyproject.toml` 声明（当前固定 `cryptography==50.0.2`），不应再描述为“无第三方依赖”。
+- Node.js/npm 仅用于启用 JavaScript/TypeScript Compiler API 解析适配器；版本与 TypeScript 依赖见 `package.json` / `package-lock.json`。纯 Python 基础命令不应因未安装 Node 而被误认为 TS 语义已验证。
+- 在仓库根目录执行：
+
+```powershell
+python -m pip install -e .
+python -m usit selftest
+# 启用 JavaScript/TypeScript Compiler API 解析时：
+npm ci --ignore-scripts --no-audit --no-fund
+```
 
 ## Windows 快速开始
 1. 安装 Python 3.10 或更新版本（安装时勾选 Add Python to PATH）。
-2. 解压本工程，例如 `C:\Tools\usit_p0`。
-3. 打开 PowerShell，在工程目录执行：
-   - `python -m usit selftest`
-   - `python -m usit scan "C:\path\to\your-project" --out "C:\USIT-Reports\project-001" --authorization-file "C:\USIT-Reports\auth-001.json"`
-   - `python -m usit validate-graph "C:\USIT-Reports\project-001\knowledge_graph.json" --project-root "C:\path\to\your-project"`
-4. 查看输出目录中的 `report.md`、`report.json`、`scan_manifest.json`、`knowledge_graph.json`、`test_plan.json`、`parser_contract.json`、`graph_validation.json`、`graph_validation.md` 和 `scan_status.json`。
+2. 将仓库放到本地目录，例如 `C:\Tools\usit_p0`。
+3. 在仓库根目录安装 Python 包并运行自检（见上方“环境与安装”）。
+4. 对目标项目执行只读扫描，输出目录和授权记录必须位于目标项目之外：
 
-> `scan` 需要 `--authorization-file`：一份存放在被扫描项目之外的 JSON 授权记录，必须包含项目根路径、输出目录、允许动作、禁止动作与授权起止时间。缺少授权即返回 `BLOCKED`，不会降级为继续扫描。
+```powershell
+python -m usit scan "C:\path\to\your-project" --out "C:\USIT-Reports\project-001" --authorization-file "C:\USIT-Reports\auth-001.json"
+python -m usit validate-graph "C:\USIT-Reports\project-001\knowledge_graph.json" --project-root "C:\path\to\your-project"
+```
+
+查看输出目录中的 `report.md`、`report.json`、`scan_manifest.json`、`knowledge_graph.json`、`test_plan.json`、`parser_contract.json`、`graph_validation.json`、`graph_validation.md` 和 `scan_status.json`。
+
+> `scan` 必须提供 `--authorization-file`：授权 JSON 存放在被扫描项目之外，记录项目根路径、输出目录、允许动作、禁止动作和授权起止时间。缺少授权或无法确认边界时返回 `BLOCKED`，不会降级为继续扫描。
+
+## 当前不承诺的能力
+
+- 不会仅凭文件名、模块相似度或 AI 猜测建立业务关系；证据不足时保留 UNKNOWN / UNLINKED / CONFLICT。
+- 不会把静态分析、测试候选、测试通过率、行覆盖率或零冲突报告解释为业务正确性证明。
+- 结果导入命令只读取已经完成的报告，不执行目标项目测试、不构建、不安装、不调用 Gradle/ADB，也不访问项目数据库或服务。
+- 不会在未授权时修改目标项目、自动修复代码或自动部署。任何后续执行/修复能力必须有独立授权、隔离工作副本和回归验证。
+- 当前解析器只覆盖明确列出的语言和调用形态；未支持框架、动态路由、运行时反射和复杂依赖注入可能无法完整解析。
+
 
 ## P0.7.2 只读试点门禁与资源限制
 
