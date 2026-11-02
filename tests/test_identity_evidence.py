@@ -15,6 +15,25 @@ class IdentityEvidenceTests(unittest.TestCase):
         self.assertEqual(rows[0]["details"]["identity_expressions"], ["req.user.id"])
         self.assertEqual(rows[0]["scope"], "SAME_LINE_PATTERN")
 
+    def test_python_identity_source_has_ast_proven_function_owner_and_variable(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def load(request):\\n"
+                "    uid = request.user.id\\n"
+                "    return uid\\n"
+            )
+        })
+        source = next(row for row in rows if row["kind"] == "authenticated_identity_source")
+        self.assertEqual(source["owner_symbol_id"], "symbol:repo/photos.py#load:1")
+        self.assertEqual(source["owner_resolution_status"], "RESOLVED")
+        self.assertEqual(source["details"]["source_variable"], "uid")
+
+    def test_non_python_identity_source_owner_remains_unknown(self):
+        rows = extract_identity_evidence({"repo/photos.ts": "function load(req) {\\n  const uid = req.user.id;\\n}\\n"})
+        source = next(row for row in rows if row["kind"] == "authenticated_identity_source")
+        self.assertIsNone(source["owner_symbol_id"])
+        self.assertEqual(source["owner_resolution_status"], "UNKNOWN")
+
     def test_detects_request_controlled_identity_input(self):
         rows = extract_identity_evidence({
             "routes/photos.ts": "const uid = req.body.user_id;\n"
