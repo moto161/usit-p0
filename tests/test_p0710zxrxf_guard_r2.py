@@ -70,10 +70,7 @@ class FrozenHashGuardR2Tests(unittest.TestCase):
         # dependency is resolved, while production source + frozen fixtures stay
         # protected.
         self.assertNotIn("tests/test_p0710zrfx_trust_boundary.py", ZXRXF7_WATCH)
-        baseline = OUT / "PRE_SHA256.json"
-        if not baseline.is_file():
-            self.skipTest("historical PRE_SHA256 evidence is not included in this source checkout")
-        unchanged = _frozen_guard_unchanged(ZXRXF7_WATCH, baseline)
+        unchanged = _frozen_guard_unchanged(ZXRXF7_WATCH, OUT / "PRE_SHA256.json")
         self.assertTrue(all(unchanged.values()),
                         f"protected files must be unchanged: {unchanged}")
         # Sanity: if the harness were still guarded, the guard would (correctly)
