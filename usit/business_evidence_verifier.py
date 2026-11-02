@@ -115,15 +115,6 @@ def verify_business_function_evidence(
                     "business_function_id": function_id,
                     "value": percent,
                 })
-            if percent is not None and (
-                not isinstance(percent, (int, float)) or isinstance(percent, bool)
-                or not math.isfinite(percent) or percent < 0 or percent > 100
-            ):
-                conflicts.append({
-                    "kind": "INVALID_COVERAGE_PERCENT",
-                    "business_function_id": function_id,
-                    "value": percent,
-                })
             counts = {}
             counts_valid = True
             for count_field in ("executable_line_count", "covered_line_count", "uncovered_line_count"):
