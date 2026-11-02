@@ -13,6 +13,7 @@ from typing import Any
 from .ai_claim_review import load_claim_ledger
 from .test_result_importer import _parse_junit
 from .scan_attestation import verify_scan_attestation
+from .safeio import is_reparse
 
 BINDING_SCHEMA = "usit-ai-evidence-binding-v1"
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
@@ -30,11 +31,11 @@ def _artifact_path(root: Path, relative: Any) -> Path:
     for part in pure.parts:
         candidate = candidate / part
         try:
-            candidate.lstat()
+            candidate_info = candidate.lstat()
         except FileNotFoundError:
             raise
-        if candidate.is_symlink():
-            raise ValueError("evidence artifact path must not contain symbolic links")
+        if candidate.is_symlink() or is_reparse(candidate_info):
+            raise ValueError("evidence artifact path must not contain symbolic links or reparse points")
     resolved = candidate.resolve(strict=True)
     if not resolved.is_relative_to(root):
         raise ValueError("evidence artifact path escapes evidence root")
@@ -166,8 +167,9 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
 
     validate_claim_ledger(ledger)
     root_input = Path(evidence_root).expanduser()
-    if root_input.is_symlink():
-        raise ValueError("evidence root must not be a symbolic link")
+    root_info = root_input.lstat()
+    if root_input.is_symlink() or is_reparse(root_info):
+        raise ValueError("evidence root must not be a symbolic link or reparse point")
     root = root_input.resolve(strict=True)
     if not root.is_dir():
         raise ValueError("evidence root must be a directory")
