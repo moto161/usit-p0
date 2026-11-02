@@ -31,8 +31,8 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "flow.ts").write_text(
-                "function sink(ownerId: string) { return ownerId; }\\n"
-                "function caller(req: any) { const uid = req.user.id; sink(uid); }\\n",
+                "function sink(ownerId: string) { return ownerId; }\n"
+                "function caller(req: any) { const uid = req.user.id; sink(uid); }\n",
                 encoding="utf-8",
             )
             parsed = analyze_js_ts_project(root, discover_files(root))
@@ -52,8 +52,8 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "flow.ts").write_text(
-                "function sink(ownerId: string) { return ownerId; }\\n"
-                "function caller(args: any[]) { sink(...args); }\\n",
+                "function sink(ownerId: string) { return ownerId; }\n"
+                "function caller(args: any[]) { sink(...args); }\n",
                 encoding="utf-8",
             )
             parsed = analyze_js_ts_project(root, discover_files(root))
