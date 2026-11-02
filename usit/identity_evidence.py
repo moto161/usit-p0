@@ -38,6 +38,84 @@ def _id(record: Mapping[str, Any]) -> str:
     return "identity-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
+
+def _call_parameter_code(line: str, call_start: int) -> str:
+    """Return code-only text from positional arguments after the SQL string argument.
+
+    String literals (including SQL text and template literals) and comments are
+    excluded. Nested arrays/objects/calls are kept as part of their argument.
+    Unsupported or unbalanced calls return an empty string.
+    """
+    stack = ["("]
+    args: list[str] = []
+    start = call_start + 1
+    quote: str | None = None
+    escaped = False
+    index = start
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"', "\`"}:
+            quote = char
+            index += 1
+            continue
+        if line.startswith("//", index) or char == "#":
+            break
+        if char in "([{":
+            stack.append(char)
+        elif char in ")]}":
+            if not stack:
+                return ""
+            expected = {")": "(", "]": "[", "}": "{"}[char]
+            if stack[-1] != expected:
+                return ""
+            stack.pop()
+            if not stack:
+                args.append(line[start:index])
+                break
+        elif char == "," and len(stack) == 1 and stack[0] == "(":
+            args.append(line[start:index])
+            start = index + 1
+        index += 1
+    if stack or len(args) < 2:
+        return ""
+
+    code_parts: list[str] = []
+    for argument in args[1:]:
+        quote = None
+        escaped = False
+        index = 0
+        while index < len(argument):
+            char = argument[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                code_parts.append(" ")
+                index += 1
+                continue
+            if char in {"'", '"', "\`"}:
+                quote = char
+                code_parts.append(" ")
+                index += 1
+                continue
+            if argument.startswith("//", index) or char == "#":
+                break
+            code_parts.append(char)
+            index += 1
+    return " ".join(code_parts)
+
 def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, Any]]:
     """Extract identity evidence plus bounded, same-scope local-variable propagation.
 
@@ -97,21 +175,27 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
 
             sink = bool(_DB_CALL.search(line) and _OWNER_PREDICATE.search(line))
             if sink:
-                if trusted:
+                call_match = _DB_CALL.search(line)
+                parameter_code = _call_parameter_code(line, call_match.end() - 1)
+                parameter_trusted = sorted(set(
+                    match.group(0) for match in _TRUSTED.finditer(parameter_code)
+                ))
+                parameter_request = sorted(set(
+                    match.group(0) for match in _REQUEST.finditer(parameter_code)
+                ))
+                if parameter_trusted:
                     kinds.append(("direct_authenticated_identity_to_sql_owner_binding", {
-                        "identity_expressions": trusted, "resource_fields": owner_fields,
-                        "binding_status": "SAME_LINE_PATTERN_ONLY",
+                        "identity_expressions": parameter_trusted, "resource_fields": owner_fields,
+                        "binding_status": "SAME_LINE_PARAMETER_EXPRESSION",
                     }))
-                if request_values:
+                if parameter_request:
                     kinds.append(("direct_request_identity_to_sql_owner_binding", {
-                        "request_expressions": request_values, "resource_fields": owner_fields,
-                        "binding_status": "SAME_LINE_PATTERN_ONLY",
+                        "request_expressions": parameter_request, "resource_fields": owner_fields,
+                        "binding_status": "SAME_LINE_PARAMETER_EXPRESSION",
                     }))
-                # Resolve only identifiers in the SQL call's parameter expression.
-                # We intentionally do not infer aliases from arbitrary expressions.
-                call_start = _DB_CALL.search(line).start()
-                parameter_text = line[call_start:]
-                used_names = set(identifier.findall(parameter_text))
+                # Resolve aliases only in non-literal positional arguments after
+                # the SQL argument; names in SQL text or trailing expressions do not count.
+                used_names = set(identifier.findall(parameter_code))
                 for name in sorted(used_names):
                     origin = aliases.get(name)
                     if not origin:
