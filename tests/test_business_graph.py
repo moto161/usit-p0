@@ -501,6 +501,8 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         route_path = "server/routes/photos.py"
         service_path = "server/services/photo_service.py"
         source["nodes"].extend([
+            {"id": "file:" + route_path, "type": "file", "label": route_path,
+             "evidence": {"path": route_path}},
             {"id": "file:" + service_path, "type": "file", "label": service_path,
              "evidence": {"path": service_path}},
             {"id": "symbol:" + route_path + "#listPhotos:10", "type": "function",
