@@ -58,7 +58,7 @@ class GraphArgumentBindingTests(unittest.TestCase):
         edge["argument_bindings"] = [{
             "argument_index": 0, "argument_kind": "POSITIONAL",
             "argument_expression": "user_id",
-            "argument_location": {"path": "app.py", "line": 5, "column": 17},
+            "argument_location": {"path": "app.py", "line": 5, "column": 18},
             "parameter_name": "owner_id", "parameter_index": 0,
             "parameter_declaration": {"path": "app.py", "line": 1, "column": 11},
         }]
