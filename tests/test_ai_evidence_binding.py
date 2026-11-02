@@ -391,7 +391,7 @@ class AIEvidenceBindingTests(unittest.TestCase):
             self.skipTest("Windows junctions are only available on Windows")
         outside = self.root / "outside-evidence"
         outside.mkdir()
-        (outside / "photo.py").write_text("outside\\n", encoding="utf-8")
+        (outside / "photo.py").write_text("outside\n", encoding="utf-8")
         junction = self.root / "linked-evidence"
         created = subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
