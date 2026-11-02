@@ -238,6 +238,7 @@ def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[st
             },
             "identity_resource_flow": identity_refs,
             "identity_parameter_propagation": association.get("identity_parameter_propagation_evidence", []),
+            "identity_sql_sink_bindings": association.get("identity_sql_sink_evidence", []),
             "stage_status": {
                 "entrypoint": "SOURCE_IDENTIFIED",
                 "handler": handler_status,
@@ -245,6 +246,11 @@ def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[st
                 "database": "LINKED" if db_refs else "NOT_LINKED_OR_UNKNOWN",
                 "authorization": authorization.get("status") or "UNKNOWN",
                 "identity_resource": "DETECTED" if identity_refs else "NOT_DETECTED_STATIC_SCAN",
+                "identity_sql_sink_binding": (
+                    "STATIC_PARAMETER_LINKED_TO_SQL_OWNER_BINDING"
+                    if association.get("identity_sql_sink_evidence")
+                    else "NOT_LINKED_OR_UNKNOWN"
+                ),
                 "identity_parameter_propagation": (
                     "STATIC_MAPPING_DETECTED"
                     if association.get("identity_parameter_propagation_evidence")
@@ -939,6 +945,48 @@ def project_business_graph(graph: Mapping[str, Any],
         ))
         association["identity_dataflow_evidence"] = related_identity
         association["identity_parameter_propagation_evidence"] = identity_parameter_evidence
+        # Link a propagated callee parameter to a SQL owner-predicate binding
+        # only when both pieces of evidence resolve to the same exact function
+        # symbol and the binding argument is a bare identifier matching the
+        # propagated parameter name.
+        identity_sql_sink_evidence: list[dict[str, Any]] = []
+        for sink_node in identity_nodes:
+            sink_details = sink_node.get("business_details") or {}
+            sink_owner = sink_details.get("owner_symbol_id")
+            if (sink_details.get("kind") != "sql_owner_parameter_binding"
+                    or sink_details.get("owner_resolution_status") != "RESOLVED"
+                    or sink_owner not in reachable_symbols):
+                continue
+            sink_payload = sink_details.get("details") or {}
+            binding_parameters = sink_payload.get("binding_parameters")
+            if not isinstance(binding_parameters, list):
+                continue
+            sink_location = sink_node.get("evidence") or {}
+            for propagation in identity_parameter_evidence:
+                if (propagation.get("callee_symbol_id") != sink_owner
+                        or propagation.get("parameter_name") not in binding_parameters):
+                    continue
+                identity_sql_sink_evidence.append({
+                    "identity_evidence_id": propagation.get("identity_evidence_id"),
+                    "sql_sink_evidence_id": sink_node.get("id"),
+                    "sink_owner_symbol_id": sink_owner,
+                    "path": sink_location.get("path"),
+                    "line": sink_location.get("line"),
+                    "resource_fields": sink_payload.get("resource_fields", []),
+                    "binding_parameter": propagation.get("parameter_name"),
+                    "binding_status": "PROPAGATED_PARAMETER_TO_SQL_OWNER_BINDING",
+                    "propagation_depth": propagation.get("propagation_depth"),
+                    "propagation_chain": propagation.get("propagation_chain", []),
+                    "confidence": "STATIC_INFERENCE",
+                    "verification_status": "NOT_VERIFIED",
+                })
+        identity_sql_sink_evidence.sort(key=lambda item: (
+            str(item.get("path") or ""), int(item.get("line") or 0),
+            str(item.get("binding_parameter") or ""),
+            str(item.get("identity_evidence_id") or ""),
+        ))
+        association["identity_sql_sink_evidence"] = identity_sql_sink_evidence
+
 
     # Route middleware evidence is file/line anchored; function-level guard
     # calls are attached only when their exact caller symbol is reachable.
