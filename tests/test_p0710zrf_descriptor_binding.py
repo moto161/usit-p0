@@ -6,8 +6,8 @@ file is written, no real business project path is used, and where timing must be
 forced the experiment injects a condition into the real code path (fault
 injection), never edits one.
 
-ZRF-8 additionally pins the SHA-256 of the two existing test files whose
-behaviour this ticket must not disturb.
+ZRF-8 keeps the budget-race fixture byte-pinned and checks the graph fixture
+against an explicit successor baseline while retaining its historical PRE digest.
 """
 from __future__ import annotations
 
