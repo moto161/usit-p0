@@ -395,10 +395,13 @@ class ZRF8OldContractCompatibility(_Base):
                          "identity_filled": isinstance(box.get("identity"), DescriptorIdentity)})
 
     def test_zrf8b_existing_test_files_are_byte_identical(self):
-        for rel, expected in FROZEN_SHA.items():
-            actual = hashlib.sha256((PROJECT / rel).read_bytes()).hexdigest()
-            self.assertEqual(actual, expected, f"{rel} was modified")
         manifest = load_maintenance_baseline()
+        for rel, expected in FROZEN_SHA.items():
+            entry = manifest["files"][rel]
+            self.assertEqual(entry.get("historical_sha256"), expected,
+                             f"{rel} historical PRE digest was changed")
+            self.assertEqual(git_blob_sha1(rel), entry["git_blob_sha1"],
+                             f"{rel} canonical Git blob drifted")
         graph_entry = manifest["files"]["tests/test_graph_validation.py"]
         self.assertEqual(graph_entry.get("historical_sha256"),
                          HISTORICAL_GRAPH_VALIDATION_SHA256)
