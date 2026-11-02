@@ -81,6 +81,21 @@ class IdentityEvidenceTests(unittest.TestCase):
                       and row["scope"] == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT"]
         self.assertEqual(propagated, [])
 
+    def test_extracts_exact_bare_parameter_used_in_sql_owner_binding(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def query_photos(owner_id):\\n"
+                '    cursor.execute("SELECT id FROM photos WHERE owner_id = ?", [owner_id])\\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "sql_owner_parameter_binding")
+        self.assertEqual(binding["details"]["binding_parameters"], ["owner_id"])
+        self.assertEqual(binding["details"]["resource_fields"], ["owner_id"])
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:repo/photos.py#query_photos:1")
+        self.assertEqual(binding["verification_status"], "NOT_VERIFIED")
+
     def test_tracks_trusted_identity_through_local_variable_to_sql_sink(self):
         rows = extract_identity_evidence({
             "repo/photos.ts": (
