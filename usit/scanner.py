@@ -814,8 +814,31 @@ def scan_project(project: str, out_dir: str, force: bool = False, *, authorizati
             # a swapped or linked path (including an intermediate junction) is
             # detected at open time instead of being silently followed.
             rel=p.relative_to(root).as_posix()
+            expected_identity = identities.get(rel)
+            if expected_identity is None:
+                raise ScanBlocked('FILE_IDENTITY_UNAVAILABLE',
+                                  'Discovery did not provide a verifiable identity for an input file.')
+            # Recheck the path metadata immediately before opening, then let
+            # open_input_file compare the opened descriptor as well. This
+            # closes the POSIX unlink/recreate window even on filesystems that
+            # rapidly recycle inode numbers.
+            try:
+                pre_open_info = os.stat(p, follow_symlinks=False)
+            except OSError as exc:
+                raise ScanBlocked('FILE_STAT_FAILED',
+                                  'Input changed or became inaccessible before opening.') from exc
+            if safeio.identity_of(pre_open_info) != tuple(expected_identity[:2]):
+                raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                  'The input path no longer identifies the file recorded at discovery.')
+            if os.name != 'nt' and len(expected_identity) >= 5:
+                observed_metadata = (int(pre_open_info.st_ctime_ns),
+                                     int(pre_open_info.st_size),
+                                     int(pre_open_info.st_mtime_ns))
+                if observed_metadata != tuple(expected_identity[2:5]):
+                    raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                      'The input metadata changed after discovery; refusing to open it.')
             box: dict[str, Any] = {}
-            raw=open_input_file(p, MAX_FILE_BYTES, expected_identity=identities.get(rel),
+            raw=open_input_file(p, MAX_FILE_BYTES, expected_identity=expected_identity,
                                 identity_out=box)
             descriptor_ids[rel]=box.get('identity')
             if len(raw)>MAX_FILE_BYTES: raise ScanBlocked('MAX_FILE_SIZE_EXCEEDED','Input exceeded the per-file read limit.')
