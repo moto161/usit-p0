@@ -1,0 +1,33 @@
+{
+  "schema_version": "usit-frozen-maintenance-baseline-v1",
+  "historical_manifest": "outputs/p0710zxrxf/PRE_SHA256.json",
+  "historical_manifest_git_blob_sha1": "6fd84b9e3c69bdbc0fc4a56c355261904e640e60",
+  "policy": "The historical PRE manifest is immutable. Files listed here have an explicit successor baseline because they have been maintained since that snapshot. All other watched files remain checked against PRE. Each entry retains its original PRE SHA-256 and pins the current canonical Git blob.",
+  "files": {
+    "usit/graph.py": {
+      "git_blob_sha1": "31aeced110fb7ba6c9390c29764f84d9a838d597",
+      "historical_sha256": "eeda9ae8e22a60b0dcd9e15b6bd261cef296afb312749c53bcac8feeb9b23fb4",
+      "reason": "Maintained graph-v1 validation to enforce structured argument-to-parameter evidence and preserve business-relationship metadata without promoting static evidence to runtime verification."
+    },
+    "usit/scanner.py": {
+      "git_blob_sha1": "a621c8dc537f4a2c28f81a5a07fe4746256c9a8a",
+      "historical_sha256": "c70a1a4baf3a6a17cb7ec0ed4748db7194d70e3008ab32f0ac05e3e55f797912",
+      "reason": "Maintained scanner pipeline for route-handler, UI-event and API-client relationships, plus stronger discovery-to-open identity checks and explicit evidence propagation."
+    },
+    "tests/test_graph_validation.py": {
+      "git_blob_sha1": "19d992c72b2edaad6221d0d3b74c9dc056dded4d",
+      "historical_sha256": "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0",
+      "reason": "The current main-branch graph validation fixture differs from the historical PRE bytes. The historical digest is retained; new argument-binding cases are isolated in tests/test_graph_argument_bindings.py."
+    },
+    "tests/test_p0710z_snapshot_trust.py": {
+      "git_blob_sha1": "24e8f2755e02ab40a5df10f443689674ceef35a4",
+      "historical_sha256": "7f8ad74737ad4e8d6928cf84a153d298534e1259a081ac70df094888b03b0e8f",
+      "reason": "Updated the frozen-fixture assertion to verify both the retained historical digest and the explicit successor Git baseline, rather than falsely claiming the old bytes remain in the current tree."
+    },
+    "tests/test_p0710zrf_descriptor_binding.py": {
+      "git_blob_sha1": "e797c34f39fdb7dc379b8bf9ae5e09e8240cbcc7",
+      "historical_sha256": "ef452a224d5c0b0efbdfc22017fa2e7410eb2d73329b05e851597eceebe00322",
+      "reason": "Corrected the LF fixture fallback for the same-size rewrite test and migrated graph-fixture integrity checks to the reviewed successor baseline; historical PRE hashes remain recorded."
+    }
+  }
+}
