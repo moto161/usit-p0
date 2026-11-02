@@ -2,7 +2,7 @@
   "schema_version": "usit-frozen-maintenance-baseline-v1",
   "historical_manifest": "outputs/p0710zxrxf/PRE_SHA256.json",
   "historical_manifest_git_blob_sha1": "6fd84b9e3c69bdbc0fc4a56c355261904e640e60",
-  "policy": "The historical PRE manifest is immutable. Files listed here have an explicit successor baseline because they have been maintained since that snapshot. All other watched files remain checked against PRE. Each entry retains its original PRE SHA-256 and pins the current canonical Git blob.",
+  "policy": "The original PRE_SHA256.json is immutable and every watched file retains its historical PRE SHA-256. All watched files are pinned by canonical Git blob IDs so checkout line-ending conversion cannot create false drift. Files unchanged since PRE retain their historical content; maintained files carry an explicit reason and successor blob ID. The test suite verifies each historical SHA against PRE before comparing the canonical current blob.",
   "files": {
     "usit/graph.py": {
       "git_blob_sha1": "31aeced110fb7ba6c9390c29764f84d9a838d597",
