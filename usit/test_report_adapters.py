@@ -160,10 +160,12 @@ def map_line_coverage_to_functions(coverage: dict[str, dict[str, Any]],
             if record is None:
                 absent.append(entry["source_file"])
                 continue
-            selected = set(range(entry["line_start"], entry["line_end"] + 1))
-            executable.update(selected & set(record["executable_lines"]))
-            executed.update(selected & set(record["executed_lines"]))
-            missing.update(selected & set(record["missing_lines"]))
+            start, end = entry["line_start"], entry["line_end"]
+            # Filter the bounded report line sets instead of materializing the
+            # caller-supplied range; a huge line_end must not allocate huge RAM.
+            executable.update(line for line in record["executable_lines"] if start <= line <= end)
+            executed.update(line for line in record["executed_lines"] if start <= line <= end)
+            missing.update(line for line in record["missing_lines"] if start <= line <= end)
         if not ranges or absent or not executable:
             status, percent = "UNKNOWN", None
         else:
