@@ -193,6 +193,14 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
     root = project_root.resolve(strict=True)
     supervisor = supervisor if supervisor is not None else ParserTaskSupervisor()
     availability = parser_availability(root)
+    # Public parser output is a strict allow-list. Never forward verifier or
+    # adapter internals such as absolute TypeScript install paths.
+    public_availability = {
+        key: availability[key]
+        for key in ("available", "reason", "version", "parser_name",
+                    "typescript_install", "typescript_install_path_status")
+        if key in availability
+    }
     if js_ts_source is not None:
         # Memory mode (P0.7.5): the relative path set is derived from the
         # already-verified source map (project-relative strings).  We never
@@ -212,7 +220,7 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
             "parser_name": PARSER_NAME,
             "parser_version": "UNAVAILABLE",
             "available": False,
-            "availability": availability,
+            "availability": public_availability,
             "project_diagnostics": [{"code": availability["reason"], "severity": "UNKNOWN"}],
             "files": {}, "records": [],
         }
@@ -271,5 +279,5 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
             "project_diagnostics": [{"code": "ADAPTER_INVALID_JSON", "severity": "ERROR"}],
             "files": {}, "records": [],
         }
-    result["availability"] = availability
+    result["availability"] = public_availability
     return result
