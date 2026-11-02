@@ -624,6 +624,29 @@ function main(input) {
       }
       base.resolution_status = "RESOLVED"; base.resolved = true;
       base.target = { file: target.entry, name: target.name, line: target.line, id: "symbol:" + target.entry + "#" + target.name + ":" + target.line, qualified_name: target.entry.replace(/\//g, ".") + "." + target.name };
+      const callable = (ts.isVariableDeclaration(target.target) || ts.isPropertyDeclaration(target.target))
+        ? target.target.initializer : target.target;
+      const parameters = callable && callable.parameters ? callable.parameters : [];
+      const argumentsList = call.arguments || [];
+      const unsupportedArguments = argumentsList.some((argument) => ts.isSpreadElement(argument))
+        || argumentsList.length > parameters.length
+        || parameters.some((parameter) => !!parameter.dotDotDotToken || !ts.isIdentifier(parameter.name));
+      base.argument_binding_status = unsupportedArguments ? "UNSUPPORTED_ARGUMENT_SHAPE" : "EXACT_STATIC_MAPPING";
+      base.argument_bindings = unsupportedArguments ? [] : argumentsList.map((argument, index) => {
+        const parameter = parameters[index];
+        const argumentPosition = loc(sourceFile, argument);
+        const parameterPosition = loc(parameter.getSourceFile(), parameter.name);
+        return {
+          argument_index: index,
+          argument_kind: "POSITIONAL",
+          argument_expression: argument.getText(sourceFile).slice(0, 240),
+          argument_location: { path: entry.rel, line: argumentPosition.line, column: argumentPosition.column },
+          parameter_name: parameter.name.text,
+          parameter_index: index,
+          parameter_kind: "POSITIONAL",
+          parameter_declaration: { path: target.entry, line: parameterPosition.line, column: parameterPosition.column }
+        };
+      });
       const chain = [{ kind: "call", file: entry.rel, line: pos.line, column: pos.column }];
       if (importEvidence) chain.push({ kind: "import", file: entry.rel, line: importEvidence.line, module: importEvidence.module, imported_as: localName });
       chain.push(...reexportEvidence([target]));
