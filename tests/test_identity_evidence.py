@@ -55,6 +55,51 @@ class IdentityEvidenceTests(unittest.TestCase):
         self.assertNotIn("direct_authenticated_identity_to_sql_owner_binding",
                          {row["kind"] for row in rows})
 
+    def test_tracks_trusted_identity_through_local_variable_to_sql_sink(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": (
+                "function load(req) {\\n"
+                "  const uid = req.user.id;\\n"
+                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [uid]);\\n'
+                "}\\n"
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["scope"], "INTRAPROCEDURAL_LINEAR_ASSIGNMENT")
+        self.assertEqual(binding["details"]["binding_status"], "INTRAPROCEDURAL_LINEAR_ASSIGNMENT")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [2, 3])
+        self.assertEqual(binding["verification_status"], "NOT_VERIFIED")
+
+    def test_tracks_request_identity_through_local_alias_to_sql_sink(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": (
+                "function load(req) {\\n"
+                "  const requestedOwner = req.body.user_id;\\n"
+                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [requestedOwner]);\\n'
+                "}\\n"
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["binding_status"], "INTRAPROCEDURAL_LINEAR_ASSIGNMENT")
+
+    def test_reassignment_to_unknown_value_invalidates_identity_alias(self):
+        rows = extract_identity_evidence({
+            "repo/photos.ts": (
+                "function load(req) {\\n"
+                "  let uid = req.user.id;\\n"
+                "  uid = getFallbackId();\\n"
+                '  db.query("SELECT id FROM photos WHERE owner_id = ?", [uid]);\\n'
+                "}\\n"
+            )
+        })
+        propagated = [row for row in rows
+                      if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                      and row["scope"] == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT"]
+        self.assertEqual(propagated, [])
+
     def test_deterministic_and_unrelated_lines_ignored(self):
         source = {"repo/photos.ts": "const count = 1;\n"}
         self.assertEqual(extract_identity_evidence(source), [])
