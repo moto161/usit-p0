@@ -301,8 +301,8 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                 binding_parameters = sorted({
                     candidate
                     for expression in parameter_expressions
-                    for candidate in [expression.strip().strip("[](), \\t\\r\\n")]
-                    if re.fullmatch(r"[A-Za-z_$][\\w$]*", candidate)
+                    for candidate in [expression.strip().strip("[](), \t\r\n")]
+                    if re.fullmatch(r"[A-Za-z_$][\w$]*", candidate)
                 })
                 if binding_parameters:
                     kinds.append(("sql_owner_parameter_binding", {
