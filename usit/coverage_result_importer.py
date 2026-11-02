@@ -31,6 +31,13 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
         mapping, graph = json.loads(mapping_bytes), json.loads(graph_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid JSON input: {exc}") from exc
+    if not isinstance(graph, dict) or graph.get("schema_version") != "usit-graph-v1":
+        raise ValueError("business graph schema_version must be usit-graph-v1")
+    graph_sha256 = hashlib.sha256(graph_bytes).hexdigest()
+    if not isinstance(mapping, dict) or mapping.get("schema_version") != "usit-coverage-mapping-v1":
+        raise ValueError("coverage mapping schema_version must be usit-coverage-mapping-v1")
+    if mapping.get("source_graph_sha256") != graph_sha256:
+        raise ValueError("coverage mapping source_graph_sha256 must match business graph bytes")
     if report_format == "coverage-py-json":
         coverage = parse_coverage_py_json(report)
     elif report_format == "jacoco-xml":
@@ -44,7 +51,7 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
         "source_hashes": {
             "coverage_report_sha256": hashlib.sha256(report).hexdigest(),
             "mapping_json_sha256": hashlib.sha256(mapping_bytes).hexdigest(),
-            "business_graph_sha256": hashlib.sha256(graph_bytes).hexdigest(),
+            "business_graph_sha256": graph_sha256,
         },
         "business_function_count": len(functions),
         "coverage_status_counts": {
