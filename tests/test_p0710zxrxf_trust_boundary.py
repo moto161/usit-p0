@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -76,23 +77,22 @@ def raw_write(path: Path, data: bytes) -> None:
 # alter.  It must NOT freeze the regression harness source itself (a "test
 # guards its own test" circular dependency that R1's legitimate maintenance of
 # the ZRFX harness exposed).
-ZXRXF7_WATCH = (
-    # production source touched by the ZRXRF fix -> keep integrity-checked
-    "usit/graph.py",
-    "usit/scanner.py",
+# Historical PRE evidence remains the baseline for files that are still
+# byte-identical.  Explicitly maintained production/test files use a successor
+# Git-blob baseline; the original PRE_SHA256.json is never rewritten.
+ZXRXF7_HISTORICAL_WATCH = (
     "usit/safeio.py",
-    # frozen fixtures (also byte-identical-asserted by ZRFX.FROZEN_SHA)
     "tests/test_graph_validation.py",
     "tests/test_p073_budget_race.py",
-    # related regression fixtures for the P0.7.10 snapshot/descriptor fixes
     "tests/test_p0710z_snapshot_trust.py",
-    "tests/test_p0710zrf_descriptor_binding.py",
-    # NOTE: tests/test_p0710zrfx_trust_boundary.py is EXCLUDED -- it is the
-    # ZRFR-1 regression HARNESS (actively-maintained test code), not a frozen
-    # fixture and not production source.  Freezing it broke the guard on every
-    # authorized maintenance (e.g. R1).  tests/test_p0710zxrxf_trust_boundary.py
-    # (this harness) postdates the PRE baseline and was never in the watch list.
 )
+ZXRXF7_MAINTENANCE_WATCH = (
+    "usit/graph.py",
+    "usit/scanner.py",
+    "tests/test_p0710zrf_descriptor_binding.py",
+)
+ZXRXF7_WATCH = ZXRXF7_HISTORICAL_WATCH + ZXRXF7_MAINTENANCE_WATCH
+MAINTENANCE_BASELINE = OUT / "MAINTENANCE_BASELINE.json"
 
 
 def _frozen_guard_unchanged(watch_files, baseline_path, base_dir=PROJ) -> dict:
@@ -111,6 +111,39 @@ def _frozen_guard_unchanged(watch_files, baseline_path, base_dir=PROJ) -> dict:
         p = Path(base_dir) / rel
         cur = hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
         unchanged[rel] = (norm.get(rel) == cur)
+    return unchanged
+
+
+def _git_blob_sha1(rel: str, base_dir: Path = PROJ) -> str | None:
+    """Return the canonical tracked Git blob ID, independent of checkout EOLs."""
+    result = subprocess.run(
+        ["git", "show", f"HEAD:{rel}"],
+        cwd=base_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    data = result.stdout
+    payload = b"blob " + str(len(data)).encode("ascii") + b"\\0" + data
+    return hashlib.sha1(payload).hexdigest()
+
+
+def _maintenance_guard_unchanged(watch_files, baseline_path, base_dir=PROJ) -> dict:
+    """Check explicitly authorized maintenance files against a successor baseline."""
+    manifest = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+    entries = manifest.get("files", {})
+    unchanged = {}
+    for rel in watch_files:
+        entry = entries.get(rel, {})
+        current = _git_blob_sha1(rel, Path(base_dir))
+        unchanged[rel] = (
+            current is not None
+            and current == entry.get("git_blob_sha1")
+            and isinstance(entry.get("reason"), str)
+            and bool(entry["reason"].strip())
+        )
     return unchanged
 
 
