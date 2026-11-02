@@ -189,11 +189,24 @@ def resolve_python_calls(root: str, rows: list[dict[str, Any]], *,
             module_paths[module].append(rel)
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                parameter_nodes = []
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    ordered = (
+                        [("positional_only", item) for item in node.args.posonlyargs]
+                        + [("positional_or_keyword", item) for item in node.args.args]
+                        + [("keyword_only", item) for item in node.args.kwonlyargs]
+                    )
+                    parameter_nodes = [
+                        {"name": item.arg, "index": index, "kind": kind,
+                         "line": item.lineno, "column": item.col_offset + 1}
+                        for index, (kind, item) in enumerate(ordered)
+                    ]
                 entry = {"file": rel, "name": node.name, "line": node.lineno,
                          "type": "class" if isinstance(node, ast.ClassDef) else "function",
                          "decorated": bool(getattr(node, "decorator_list", [])),
                          "id": _definition_id(rel, node.name, node.lineno),
-                         "qualified_name": f"{module}.{node.name}" if module else node.name}
+                         "qualified_name": f"{module}.{node.name}" if module else node.name,
+                         "parameters": parameter_nodes}
                 top_symbols[(module, node.name)].append(entry)
                 source_row["module_symbols"].append({"name": node.name, "line": node.lineno,
                                                      "type": entry["type"], "qualified_name": entry["qualified_name"]})
@@ -415,6 +428,52 @@ def resolve_python_calls(root: str, rows: list[dict[str, Any]], *,
             }
             if target:
                 record["target"] = target
+                if state == "RESOLVED" and target.get("type") == "function":
+                    parameter_rows = target.get("parameters", [])
+                    positional_rows = [item for item in parameter_rows
+                                       if item.get("kind") in {"positional_only", "positional_or_keyword"}]
+                    parameter_by_name = {item["name"]: item for item in parameter_rows}
+                    argument_rows = []
+                    unsupported = any(isinstance(item, ast.Starred) for item in call.args)
+                    unsupported = unsupported or any(item.arg is None for item in call.keywords)
+                    if len(call.args) > len(positional_rows):
+                        unsupported = True
+                    used_parameters: set[str] = set()
+                    for index, argument in enumerate(call.args):
+                        if index >= len(positional_rows):
+                            continue
+                        parameter = positional_rows[index]
+                        used_parameters.add(parameter["name"])
+                        argument_rows.append({
+                            "argument_index": index,
+                            "argument_kind": "POSITIONAL",
+                            "argument_expression": ast.unparse(argument) if hasattr(ast, "unparse") else type(argument).__name__,
+                            "argument_location": {"path": rel, "line": argument.lineno, "column": argument.col_offset + 1},
+                            "parameter_name": parameter["name"],
+                            "parameter_index": parameter["index"],
+                            "parameter_kind": parameter["kind"],
+                            "parameter_declaration": {"path": target["file"], "line": parameter["line"], "column": parameter["column"]},
+                        })
+                    for keyword in call.keywords:
+                        if keyword.arg is None:
+                            continue
+                        parameter = parameter_by_name.get(keyword.arg)
+                        if parameter is None or parameter["kind"] == "positional_only" or keyword.arg in used_parameters:
+                            unsupported = True
+                            continue
+                        used_parameters.add(keyword.arg)
+                        argument_rows.append({
+                            "argument_index": None,
+                            "argument_kind": "KEYWORD",
+                            "argument_expression": ast.unparse(keyword.value) if hasattr(ast, "unparse") else type(keyword.value).__name__,
+                            "argument_location": {"path": rel, "line": keyword.value.lineno, "column": keyword.value.col_offset + 1},
+                            "parameter_name": parameter["name"],
+                            "parameter_index": parameter["index"],
+                            "parameter_kind": parameter["kind"],
+                            "parameter_declaration": {"path": target["file"], "line": parameter["line"], "column": parameter["column"]},
+                        })
+                    record["argument_binding_status"] = "UNSUPPORTED_ARGUMENT_SHAPE" if unsupported else "EXACT_STATIC_MAPPING"
+                    record["argument_bindings"] = [] if unsupported else argument_rows
             if import_evidence:
                 record["import_evidence"] = import_evidence
             if candidates:
