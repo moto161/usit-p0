@@ -373,7 +373,7 @@ class ZXRXF7FrozenCompatibility(_Base):
             ZXRXF7_WATCH, MAINTENANCE_BASELINE)
         self.assertTrue(all(unchanged.values()), f"historical or maintenance baseline mismatch: {unchanged}")
         manifest = json.loads(MAINTENANCE_BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(set(manifest.get("files", {})), set(ZXRXF7_MAINTENANCE_WATCH))
+        self.assertEqual(set(manifest.get("files", {})), set(ZXRXF7_WATCH))
         self.assertEqual(
             _git_blob_sha1("outputs/p0710zxrxf/PRE_SHA256.json"),
             manifest.get("historical_manifest_git_blob_sha1"),
