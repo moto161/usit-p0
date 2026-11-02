@@ -207,7 +207,7 @@ TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调
 
 新增 endpoint-centred `business_function_views`，将可证据关联的前端入口、后端 Handler/调用链、数据库访问、已文档化实体关联、授权及身份/资源线索汇总为可审计功能切片。PRD feature 与 endpoint 没有显式关系证据时，标记 `NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION`，不按名称或模块猜测。
 
-测试规划器将已生成的 `frontend_backend_flow` 候选关联到对应功能视图，分别报告测试设计关联与执行覆盖：`TEST_DESIGN_CANDIDATE_LINKED` 不代表测试执行，`test_execution_coverage` 固定为 `NOT_MEASURED`。尚未接入真实测试运行结果、覆盖率报告或需求追踪矩阵。
+测试规划器将已生成的 `frontend_backend_flow` 候选关联到对应功能视图，分别报告测试设计关联与执行覆盖：`TEST_DESIGN_CANDIDATE_LINKED` 不代表测试执行，`test_execution_coverage` 固定为 `NOT_MEASURED`。该阶段首次实现时尚未接入真实测试运行结果和覆盖率报告；后续 S2.15–S2.18 已增加结果回流、覆盖率导入、证据交叉验证与需求追溯。
 
 
 ## S2.15 — JUnit 测试结果回流（显式映射）
@@ -219,6 +219,7 @@ TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调
 ```json
 {
   "schema_version": "usit-test-result-mapping-v1",
+  "source_graph_sha256": "<64位业务图原始字节SHA-256>",
   "mappings": [
     {"test_case_id": "tests.PhotoTests::test_upload", "business_function_id": "bf-<graph中的真实ID>"}
   ]
@@ -231,21 +232,22 @@ TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调
 python -m usit ingest-test-results --junit junit.xml --mapping reviewed-test-map.json --graph business_knowledge_graph.json --out test_execution_results.json
 ```
 
-功能状态规则：任一已报告映射用例失败/错误为 `FAILED`；只有所有已映射预期 testcase 都出现在报告且全部通过，才标记 `PASSED`；存在跳过或报告不完整（部分映射 testcase 缺失）且没有已观察失败时标记 `UNKNOWN`；没有任何匹配执行记录时标记 `NOT_EXECUTED`。部分报告会输出 `expected_mapped_test_case_count`、`reported_mapped_test_case_count`、`mapped_case_completeness`、`mapped_cases_missing_from_report` 和 `execution_status_reason`，不再因已出现用例全通过就误判整个功能通过。未映射用例、输入 SHA-256 均保留。JUnit 通过不等于需求完整实现；代码覆盖率仍为 `NOT_MEASURED`。
+功能状态规则：任一已报告映射用例失败/错误为 `FAILED`；只有所有已映射预期 testcase 都出现在报告且全部通过，才标记 `PASSED`；存在跳过或报告不完整（部分映射 testcase 缺失）且没有已观察失败时标记 `UNKNOWN`；没有任何匹配执行记录时标记 `NOT_EXECUTED`。部分报告会输出 `expected_mapped_test_case_count`、`reported_mapped_test_case_count`、`mapped_case_completeness`、`mapped_cases_missing_from_report` 和 `execution_status_reason`，不再因已出现用例全通过就误判整个功能通过。未映射用例、输入 SHA-256 均保留。该导入器只报告测试执行结果，不计算代码覆盖率；代码覆盖率由 S2.16 的独立导入器处理。JUnit 通过不等于需求完整实现。
 
 
 ## S2.16 — 多测试框架结果与代码覆盖率回流（部分适配）
 
-- `ingest-test-results` accepts completed JUnit XML (including compatible Android instrumentation reports) and pytest-json-report JSON. Testcase IDs must match the reviewed exact mapping; no fuzzy matching or inferred function linkage.
-- `ingest-coverage` accepts coverage.py JSON and JaCoCo XML. Function-level coverage is linked only by a reviewed `source_file + line_start + line_end → business_function_id` mapping.
+- `ingest-test-results` accepts completed JUnit XML (including compatible Android instrumentation reports) and pytest-json-report JSON. Testcase IDs must match the reviewed exact mapping; no fuzzy matching or inferred function linkage. Mapping JSON must include `source_graph_sha256`, the SHA-256 of the exact raw business-graph file bytes.
+- `ingest-coverage` accepts coverage.py JSON and JaCoCo XML. Function-level coverage is linked only by a reviewed `source_file + line_start + line_end → business_function_id` mapping. Coverage mapping JSON must also bind to the exact graph bytes through `source_graph_sha256`.
 - Missing report files/ranges remain `UNKNOWN`; no coverage is not treated as 0%. Coverage is separate from test pass/fail and does not establish requirement completeness or correctness.
-- These commands import existing reports only. They do not install plugins, run tests, invoke Gradle/ADB, or execute project code.
+- These commands import existing reports only. They do not install plugins, run tests, invoke Gradle/ADB, or execute project code. Report files are size-bounded and read through no-follow file descriptors; JaCoCo DTD/entity declarations are rejected.
 
 Example mapping:
 
 ```json
 {
   "schema_version": "usit-coverage-mapping-v1",
+  "source_graph_sha256": "<64位业务图原始字节SHA-256>",
   "mappings": [
     {
       "business_function_id": "bf-example",
@@ -256,6 +258,8 @@ Example mapping:
   ]
 }
 ```
+
+Before writing either mapping file, calculate the hash of the exact graph file (not a re-serialized JSON object). PowerShell: `(Get-FileHash .\\business_knowledge_graph.json -Algorithm SHA256).Hash.ToLower()`; Linux/macOS: `sha256sum business_knowledge_graph.json`. The resulting 64-character digest must be copied into `source_graph_sha256`; changing graph bytes requires regenerating the mapping hash.
 
 Import commands:
 
