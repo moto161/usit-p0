@@ -495,7 +495,7 @@ class ZRF12MetadataLimitation(_Base):
         original = target.read_bytes()
         forged = original.replace(b"line 1\r\n", b"line X\r\n")
         if forged == original:                  # fixture may use LF, not CRLF
-            forged = original.replace(b"line 1\\n", b"line X\\n")
+            forged = original.replace(b"line 1\n", b"line X\n")
         self.assertEqual(len(forged), len(original))
         self.assertNotEqual(forged, original)
         target.write_bytes(forged)
