@@ -70,13 +70,11 @@ def raw_write(path: Path, data: bytes) -> None:
         os.close(fd)
 
 
-# --- R2 (F1-R2): explicit, documented ZXRXF7 frozen-hash guard scope --------
-# Original design intent (test_zrxf7 docstring): "frozen + related tests +
-# graph/scanner/safeio unchanged" -- i.e. protect PRODUCTION SOURCE touched by
-# the ZRXRF fix and the FROZEN/RELATED regression fixtures it promised not to
-# alter.  It must NOT freeze the regression harness source itself (a "test
-# guards its own test" circular dependency that R1's legitimate maintenance of
-# the ZRFX harness exposed).
+# --- R2 (F1-R2): historical and successor integrity baselines ----------------
+# Keep PRE_SHA256.json immutable for files that remain byte-identical. Files
+# intentionally maintained since PRE are enumerated in MAINTENANCE_BASELINE.json
+# with their old PRE digest, current canonical Git blob ID, and a reason. The
+# actively maintained ZRFX harness remains outside both scopes.
 # Historical PRE evidence remains the baseline for files that are still
 # byte-identical.  Explicitly maintained production/test files use a successor
 # Git-blob baseline; the original PRE_SHA256.json is never rewritten.
