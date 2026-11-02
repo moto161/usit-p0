@@ -6,11 +6,9 @@ isolation (temp dirs, never the real project or historical artifacts) to prove:
   1. NEGATIVE: an unauthorized change to a protected production source is
      detected (the guard returns False for that file).
   2. POSITIVE: when nothing is changed, the guard passes for every watched file.
-  3. AUTHORIZED MAINTENANCE: on the real repo, the regression harness that R1
-     legitimately edited is excluded from ZXRXF7_WATCH, so the guard passes for
-     the remaining protected set -- while the old "test guards its own test"
-     circular dependency is demonstrably resolved (the harness still drifts from
-     PRE, but is no longer in scope).
+  3. AUTHORIZED MAINTENANCE: historical PRE remains immutable; explicitly
+     maintained files must match a successor Git-blob baseline with a non-empty
+     reason, and the actively maintained harness stays outside both scopes.
 
 Nothing here writes to outputs/ or touches any historical evidence file.
 """
