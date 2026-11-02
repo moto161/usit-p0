@@ -350,6 +350,12 @@ Both output paths must be distinct, non-symlink paths that do not already exist.
 
 The manifest is bound to the exact graph bytes using SHA-256. When the graph changes, the manifest must be reviewed again; stale mapping manifests and mismatched runtime-evidence graph hashes are rejected. The reviewer fields are audit metadata, not cryptographic identity authentication.
 
+### 身份到资源归属的数据流证据边界
+
+身份证据提取器除同一行直接模式外，还支持有限的局部变量传播：在同一文件、同一简单语句块内识别直接赋值（例如 `uid = req.user.id`）及简单变量别名，并在 SQL 调用的 owner 条件与参数列表同一行时建立 source→assignment→sink 证据链。此类记录使用 `INTRAPROCEDURAL_LINEAR_ASSIGNMENT`，包含赋值行和 SQL sink 行；原始直接匹配仍标记为 `SAME_LINE_PATTERN`。
+
+该能力不是通用污点分析：不跨函数、文件、模块或异步边界传播；进入/离开显式代码块会清空别名；不解析条件分支汇合、循环、闭包、对象属性、解构、参数传递、ORM 绑定、多行 SQL 或动态 SQL。重新赋值为无法证明来源的表达式会使别名失效。所有结果仍为 `STATIC_INFERENCE` / `NOT_VERIFIED`，只用于生成待审查测试候选，不能证明运行时身份可信、SQL 实际执行、授权正确或存在漏洞。
+
 ### Mapping manifest example
 
 ```json
