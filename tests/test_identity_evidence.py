@@ -85,6 +85,19 @@ class IdentityEvidenceTests(unittest.TestCase):
         self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
         self.assertEqual(binding["details"]["binding_status"], "INTRAPROCEDURAL_LINEAR_ASSIGNMENT")
 
+    def test_tracks_python_local_identity_assignment_to_sql_sink(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def load(request):\\n"
+                "    uid = request.user.id\\n"
+                '    cursor.execute("SELECT id FROM photos WHERE owner_id = ?", [uid])\\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["scope"], "INTRAPROCEDURAL_LINEAR_ASSIGNMENT")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [2, 3])
+
     def test_reassignment_to_unknown_value_invalidates_identity_alias(self):
         rows = extract_identity_evidence({
             "repo/photos.ts": (
