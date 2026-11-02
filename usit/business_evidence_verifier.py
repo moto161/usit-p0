@@ -252,6 +252,7 @@ def verify_business_function_evidence(
             "failed_test_count":test.get("failed",0) if test else 0,
             "skipped_test_count":test.get("skipped",0) if test else 0,
             "test_execution_detail": {
+                "source_hashes": dict(test.get("source_hashes", {})) if test else {},
                 "execution_status_reason": test.get("execution_status_reason"),
                 "expected_mapped_test_case_count": test.get("expected_mapped_test_case_count"),
                 "reported_mapped_test_case_count": test.get("reported_mapped_test_case_count"),
