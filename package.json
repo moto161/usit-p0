@@ -2,7 +2,7 @@
     "name": "usit-p0-local-parser",
     "version": "0.0.0",
     "private": true,
-    "description": "Local parser runtime for USIT analysis",
+    "description": "Pinned local TypeScript Compiler API runtime used by USIT JavaScript/TypeScript analysis",
     "devDependencies": {
         "typescript": "6.0.3"
     }
