@@ -697,3 +697,11 @@ Use `usit verify-scan-attestation --manifest scan_manifest.json --attestation sc
 - 对同一调用位置多目标、重复/歧义参数绑定、动态/不支持参数形态、缺失形参名、循环回访均不继续传播；不按函数名猜测。
 - 所有结果仍为 `STATIC_INFERENCE` / `NOT_VERIFIED`；不证明运行时执行、变量值、SQL sink 到达或资源归属正确。
 - 新增两跳合成回归用例，验证 `uid → owner_id → user_id` 及完整链条。当前提交待 CI 验证。
+
+## S2.30-D — 身份形参到 SQL owner binding 关联（实现中，等待 CI）
+
+- SQL owner predicate 检测到后，额外提取 SQL 字符串之后的绑定实参；仅接受单个裸标识符或被单元素 list/tuple 包裹的裸标识符，复合表达式不参与跨函数匹配。
+- 将该绑定标识符与多跳传播记录的最终 callee symbol、形参名进行精确匹配；同时要求 SQL sink 证据的函数 owner 已解析且属于 endpoint 的有界可达符号集合。
+- 输出 `identity_sql_sink_evidence` / execution path 的 `identity_sql_sink_bindings`，保留身份来源 ID、SQL sink ID、资源字段、形参和完整传播链。
+- 这只证明静态参数映射到 SQL owner predicate 的绑定实参，不证明 SQL 驱动实际绑定语义、查询执行、过滤结果或运行时授权有效；状态仍为 `STATIC_INFERENCE` / `NOT_VERIFIED`。
+- 新增 extractor 与两跳图关联回归测试；当前提交等待 CI。
