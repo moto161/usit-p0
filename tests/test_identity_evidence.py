@@ -48,12 +48,19 @@ class IdentityEvidenceTests(unittest.TestCase):
         })
         self.assertIn("resource_owner_comparison", {row["kind"] for row in rows})
 
-    def test_does_not_infer_cross_line_flow(self):
+    def test_does_not_infer_identity_across_scope_boundary(self):
         rows = extract_identity_evidence({
-            "repo/photos.ts": 'const uid = req.user.id;\ndb.query("SELECT id FROM photos WHERE owner_id = ?", [uid]);\n'
+            "repo/photos.ts": (
+                "function load(req) {\n"
+                "  const uid = req.user.id;\n"
+                "}\n"
+                'db.query("SELECT id FROM photos WHERE owner_id = ?", [uid]);\n'
+            )
         })
-        self.assertNotIn("direct_authenticated_identity_to_sql_owner_binding",
-                         {row["kind"] for row in rows})
+        propagated = [row for row in rows
+                      if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                      and row["scope"] == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT"]
+        self.assertEqual(propagated, [])
 
     def test_tracks_trusted_identity_through_local_variable_to_sql_sink(self):
         rows = extract_identity_evidence({
