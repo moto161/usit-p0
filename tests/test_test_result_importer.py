@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -14,20 +15,23 @@ class TestResultImporterTests(unittest.TestCase):
         mapping = base / "mapping.json"
         graph = base / "business_graph.json"
         report.write_text(xml, encoding="utf-8")
-        mapping.write_text(json.dumps({
-            "schema_version": "usit-test-result-mapping-v1",
-            "mappings": mappings if mappings is not None else [
-                {"test_case_id": "tests.PhotoTests::test_upload", "business_function_id": "bf-upload"},
-                {"test_case_id": "tests.PhotoTests::test_delete", "business_function_id": "bf-delete"},
-            ],
-        }), encoding="utf-8")
-        graph.write_text(json.dumps({
+        graph_doc = {
             "schema_version": "usit-graph-v1",
             "business_understanding": {"business_function_views": [
                 {"business_function_id": "bf-upload", "endpoint_id": "ep-upload"},
                 {"business_function_id": "bf-delete", "endpoint_id": "ep-delete"},
                 {"business_function_id": "bf-share", "endpoint_id": "ep-share"},
             ]},
+        }
+        graph_bytes = json.dumps(graph_doc).encode("utf-8")
+        graph.write_bytes(graph_bytes)
+        mapping.write_text(json.dumps({
+            "schema_version": "usit-test-result-mapping-v1",
+            "source_graph_sha256": hashlib.sha256(graph_bytes).hexdigest(),
+            "mappings": mappings if mappings is not None else [
+                {"test_case_id": "tests.PhotoTests::test_upload", "business_function_id": "bf-upload"},
+                {"test_case_id": "tests.PhotoTests::test_delete", "business_function_id": "bf-delete"},
+            ],
         }), encoding="utf-8")
         return report, mapping, graph
 
@@ -122,8 +126,34 @@ class TestResultImporterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unknown business_function_id"):
                 ingest_junit_results(report, mapping, graph)
             report.write_text('<!DOCTYPE x [<!ENTITY a "x">]><testsuite><testcase name="x"/></testsuite>', encoding="utf-8")
-            mapping.write_text(json.dumps({"schema_version": "usit-test-result-mapping-v1", "mappings": []}), encoding="utf-8")
+            mapping.write_text(json.dumps({
+                "schema_version": "usit-test-result-mapping-v1",
+                "source_graph_sha256": hashlib.sha256(graph.read_bytes()).hexdigest(),
+                "mappings": [],
+            }), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "DTD/entity"):
+                ingest_junit_results(report, mapping, graph)
+
+    def test_unknown_graph_schema_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            report, mapping, graph = self._inputs(
+                Path(td), '<testsuite><testcase name="test_upload"/></testsuite>'
+            )
+            graph_doc = json.loads(graph.read_text(encoding="utf-8"))
+            graph_doc["schema_version"] = "usit-business-knowledge-graph-v1"
+            graph.write_text(json.dumps(graph_doc), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "schema_version must be usit-graph-v1"):
+                ingest_junit_results(report, mapping, graph)
+
+    def test_mapping_bound_to_old_graph_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            report, mapping, graph = self._inputs(
+                Path(td), '<testsuite><testcase name="test_upload"/></testsuite>'
+            )
+            graph_doc = json.loads(graph.read_text(encoding="utf-8"))
+            graph_doc["revision_marker"] = "changed-after-mapping"
+            graph.write_text(json.dumps(graph_doc), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source_graph_sha256"):
                 ingest_junit_results(report, mapping, graph)
 
     def test_oversized_report_is_rejected_before_unbounded_read(self):
