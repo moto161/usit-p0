@@ -135,7 +135,7 @@ def _maintenance_guard_unchanged(watch_files, baseline_path, base_dir=PROJ) -> d
     entries = manifest.get("files", {})
     pre = json.loads((base / "outputs" / "p0710zxrxf" / "PRE_SHA256.json").read_text(encoding="utf-8"))
     pre_hashes = {
-        key.replace("\\\\", "/").split("/usit_p0/", 1)[-1]: value
+        key.replace(chr(92), "/").split("/usit_p0/", 1)[-1]: value
         for key, value in pre.items()
     }
     unchanged = {}
