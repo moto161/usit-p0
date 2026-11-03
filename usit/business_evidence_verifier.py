@@ -258,7 +258,8 @@ def verify_business_function_evidence(
                 conflicts.append({
                     "kind": "INVALID_COVERAGE_MAPPING_EVIDENCE",
                     "business_function_id": function_id,
-                })            elif source_binding_valid:
+                })
+            elif source_binding_valid:
                 mapped_ranges = sorted(
                     (item["source_file"], item["line_start"], item["line_end"])
                     for item in ranges
