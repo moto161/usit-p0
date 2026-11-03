@@ -414,12 +414,27 @@ def ingest_junit_results(
         source_entries = source_doc.get("files") if isinstance(source_doc, dict) else None
         if not isinstance(source_entries, list):
             raise ValueError("source manifest files must be a list")
+        expected_snapshot_artifacts = set()
         for entry in source_entries:
             if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
                 raise ValueError("source manifest contains an invalid file entry")
-            artifact = artifact_index.get("source_snapshot/" + entry["path"])
+            snapshot_name = "source_snapshot/" + entry["path"]
+            expected_snapshot_artifacts.add(snapshot_name)
+            artifact = artifact_index.get(snapshot_name)
             if artifact is None or artifact.get("sha256") != entry.get("sha256"):
                 raise ValueError("source manifest entry is not bound to a matching preserved snapshot artifact")
+        actual_snapshot_artifacts = {
+            name for name in artifact_index if name.startswith("source_snapshot/")
+        }
+        if actual_snapshot_artifacts != expected_snapshot_artifacts:
+            raise ValueError("evidence bundle source_snapshot artifact set differs from source manifest")
+        provenance_doc_for_bundle = json.loads(Path(provenance_record_path).read_text(encoding="utf-8"))
+        plugin_digest = provenance_doc_for_bundle.get("runner", {}).get("plugin_sha256")
+        plugin_artifact = artifact_index.get("runner-plugin.py")
+        if plugin_digest is not None and (
+            plugin_artifact is None or plugin_artifact.get("sha256") != plugin_digest
+        ):
+            raise ValueError("runner plugin artifact does not match provenance plugin_sha256")
         evidence_bundle_validation = {
             "status": "EVIDENCE_BUNDLE_AND_SOURCE_SNAPSHOT_HASHES_VALIDATED",
             "artifacts_checked": bundle_check.get("artifacts_checked"),
