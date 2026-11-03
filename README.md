@@ -813,13 +813,13 @@ usit ingest-test-results --junit .\artifacts\junit.xml --mapping .\test-result-m
 
 The run-pytest command is the first controlled execution path. Unlike ingest-test-results, it actually invokes pytest, but only after a separate execution authorization file is supplied.
 
-\`\`\`powershell
+```powershell
 python -m usit run-pytest "C:\path\to\clean-git-project" --evidence-parent "C:\USIT-Evidence" --authorization-file "C:\USIT-Evidence\test-execution-authorization.json" --pytest-arg "tests/"
-\`\`\`
+```
 
 Authorization file schema (usit-test-execution-authorization-v1):
 
-\`\`\`json
+```json
 {
   "schema_version": "usit-test-execution-authorization-v1",
   "project_root": "C:/path/to/clean-git-project",
@@ -830,15 +830,15 @@ Authorization file schema (usit-test-execution-authorization-v1):
   "authorized_at": "2026-11-03T00:00:00Z",
   "expires_at": "2026-11-03T01:00:00Z"
 }
-\`\`\`
+```
 
 The authorization must be created and reviewed by the operator; USIT does not auto-authorize execution. The project must be a clean Git worktree: tracked modifications and untracked files are refused. Git submodules, symlinks and special files in the archived source are refused. USIT stages the committed HEAD with git archive, executes pytest in that separate staging tree, and preserves the exact archived source under the run's source_snapshot/ directory. The evidence bundle includes the JUnit report, source manifest, provenance record, runner plugin, pytest-declared source file/line/qualified symbol/nodeid properties, preserved source files, pre/post snapshots, logs, final gate report, and a hash-verified evidence manifest. The importer can verify the complete bundle with --evidence-dir and compare the report-declared locator to the reviewed mapping; this comparison remains UNAUTHENTICATED.
 
 Import the generated report against the preserved snapshot (not the current checkout):
 
-\`\`\`powershell
+```powershell
 python -m usit ingest-test-results --junit "C:\USIT-Evidence\RUN\junit.xml" --mapping "C:\USIT-Evidence\reviewed-test-mapping.json" --graph "C:\USIT-Evidence\business_knowledge_graph.json" --project-root "C:\USIT-Evidence\RUN\source_snapshot" --provenance-record "C:\USIT-Evidence\RUN\execution-provenance.json" --source-manifest "C:\USIT-Evidence\RUN\source-manifest.json" --evidence-dir "C:\USIT-Evidence\RUN" --out "C:\USIT-Evidence\RUN\test-results.json"
-\`\`\`
+```
 
 Important limits:
 - This is not an OS sandbox. It does not block project test code from accessing the network, host resources, or any credentials the OS makes available through other channels. The child process receives a reduced environment and no inherited API-key variables, but this is not a security boundary.
