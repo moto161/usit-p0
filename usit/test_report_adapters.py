@@ -15,7 +15,7 @@ def _safe_relative_path(value: Any) -> str:
         raise ValueError("source_file must be a non-empty relative path")
     path = value.replace("\\", "/")
     pure = PurePosixPath(path)
-    if (pure.is_absolute() or (len(path) >= 2 and path[1] == ":")
+    if (pure.is_absolute() or ":" in path
             or (pure.parts and pure.parts[0].endswith(":"))
             or any(part in {"", ".", ".."} for part in pure.parts)):
         raise ValueError("source_file must be a normalized relative path")
