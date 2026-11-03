@@ -353,7 +353,7 @@ def run_controlled_pytest(
         capture = capture_run(
             command, project_root=staging, evidence_parent=parent,
             files=[item["path"] for item in source_files],
-            approval_ref=authorization["approval_ref"], cwd=staging, timeout=timeout,
+            approval_ref=authorization["approval_ref"], cwd=staging, env=env, timeout=timeout,
         )
         evidence = Path(capture.evidence_dir)
         inventory_errors = _staging_inventory_errors(staging, source_files)
