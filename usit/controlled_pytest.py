@@ -310,10 +310,20 @@ def run_controlled_pytest(
             "-p", "no:cacheprovider", *selected_args,
         ]
         env = _minimal_environment(staging)
-        command_fingerprint = sha256_hex(canonical_json_bytes(command))
+        normalized_command = [
+            sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin",
+            "--junitxml", "<STAGING>/.usit-junit.xml",
+            "-p", "no:cacheprovider", *selected_args,
+        ]
+        command_fingerprint = sha256_hex(canonical_json_bytes(normalized_command))
+        normalized_env = {
+            key: value.replace(str(staging), "<STAGING>")
+            for key, value in env.items()
+        }
         environment_fingerprint = sha256_hex(canonical_json_bytes({
             "python": sys.version, "platform": platform.platform(),
-            "environment_keys": sorted(env), "pythonpath": str(staging),
+            "environment_sha256": sha256_hex(canonical_json_bytes(normalized_env)),
+            "environment_keys": sorted(env),
         }))
         runner_version = "pytest"
         try:
