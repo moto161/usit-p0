@@ -376,6 +376,52 @@ def verify_business_function_evidence(
                                     "test_case_id": item["test_case_id"],
                                 })
                                 binding_status = "TEST_SOURCE_BINDING_INVALID"
+                        raw_symbol = item.get("test_source_symbol_evidence")
+                        symbol_status = item.get("test_source_symbol_status", "TEST_SOURCE_SYMBOL_NOT_PROVIDED")
+                        allowed_symbol_statuses = {
+                            "TEST_SOURCE_SYMBOL_NOT_PROVIDED", "TEST_SOURCE_SYMBOL_INVALID",
+                            "TEST_SOURCE_SYMBOL_NOT_SUPPORTED", "TEST_SOURCE_SYMBOL_NOT_CHECKED",
+                            "TEST_SOURCE_SYMBOL_MISMATCH", "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED",
+                        }
+                        if symbol_status not in allowed_symbol_statuses:
+                            conflicts.append({
+                                "kind": "INVALID_TEST_SOURCE_SYMBOL_STATUS",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            symbol_status = "TEST_SOURCE_SYMBOL_INVALID"
+                        if raw_symbol is not None and (
+                            not isinstance(raw_symbol, dict)
+                            or raw_symbol.get("status") != symbol_status
+                        ):
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_SYMBOL_EVIDENCE_STATUS_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            symbol_status = "TEST_SOURCE_SYMBOL_INVALID"
+                        if symbol_status == "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED":
+                            symbol_name = raw_symbol.get("qualified_symbol") if isinstance(raw_symbol, dict) else None
+                            declared_symbol = raw_symbol.get("declared_test_source_symbol") if isinstance(raw_symbol, dict) else None
+                            symbol_start = raw_symbol.get("symbol_start_line") if isinstance(raw_symbol, dict) else None
+                            symbol_end = raw_symbol.get("symbol_end_line") if isinstance(raw_symbol, dict) else None
+                            symbol_line = raw_symbol.get("test_source_line") if isinstance(raw_symbol, dict) else None
+                            bound_line = raw_binding.get("test_source_line") if isinstance(raw_binding, dict) else None
+                            if (not isinstance(symbol_name, str) or not symbol_name
+                                    or symbol_name != declared_symbol
+                                    or binding_status != "TEST_SOURCE_BYTES_MATCHED"
+                                    or not isinstance(symbol_start, int) or isinstance(symbol_start, bool)
+                                    or not isinstance(symbol_end, int) or isinstance(symbol_end, bool)
+                                    or not isinstance(symbol_line, int) or isinstance(symbol_line, bool)
+                                    or symbol_start < 1 or symbol_end < symbol_start
+                                    or symbol_line != bound_line
+                                    or not symbol_start <= symbol_line <= symbol_end):
+                                conflicts.append({
+                                    "kind": "INVALID_MATCHED_TEST_SOURCE_SYMBOL_EVIDENCE",
+                                    "business_function_id": function_id,
+                                    "test_case_id": item["test_case_id"],
+                                })
+                                symbol_status = "TEST_SOURCE_SYMBOL_INVALID"
                         test_source_binding_evidence.append({
                             "test_case_id": item["test_case_id"],
                             "status": binding_status,
@@ -387,6 +433,8 @@ def verify_business_function_evidence(
                             "classname": item.get("classname"),
                             "name": item.get("name"),
                             "test_source_binding_status": binding_status,
+                            "test_source_symbol_status": symbol_status,
+                            "test_source_symbol_evidence": raw_symbol if isinstance(raw_symbol, dict) else None,
                         })
             expected_count = test.get("expected_mapped_test_case_count")
             reported_count = test.get("reported_mapped_test_case_count")
