@@ -32,7 +32,7 @@ jobs:
       - name: Install the pinned local TypeScript parser
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run required business-understanding and security trust-boundary tests
-        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_test_result_importer tests.test_pytest_result_importer tests.test_test_report_adapters tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_verification_gap_analyzer tests.test_project_quality_assessment tests.test_business_traceability tests.test_traceability_template tests.test_business_graph tests.test_graph_validation tests.test_graph_argument_bindings tests.test_database_access tests.test_permission_evidence tests.test_python_resolver tests.test_security_test_planner tests.test_identity_evidence tests.test_identity_graph tests.test_runtime_evidence tests.test_android_event_adapter tests.test_ai_gateway tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_ai_evidence_binding tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_p074_identity_ctime tests.test_p0710zrf12_content_verification tests.test_p079_public_paths tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_js_ts_adapter_regressions -v
+        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_test_result_importer tests.test_pytest_result_importer tests.test_test_report_adapters tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_verification_gap_analyzer tests.test_project_quality_assessment tests.test_business_traceability tests.test_traceability_template tests.test_business_graph tests.test_graph_validation tests.test_graph_argument_bindings tests.test_database_access tests.test_permission_evidence tests.test_python_resolver tests.test_security_test_planner tests.test_identity_evidence tests.test_identity_graph tests.test_runtime_evidence tests.test_android_event_adapter tests.test_ai_gateway tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_ai_evidence_binding tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_execution_provenance tests.test_p074_identity_ctime tests.test_p0710zrf12_content_verification tests.test_p079_public_paths tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_js_ts_adapter_regressions -v
       - name: Run USIT self-test
         run: python -m usit selftest
       - name: Diagnostic full repository regression suite (non-gating; see step summary)
@@ -66,7 +66,7 @@ jobs:
       - name: Run USIT self-test on Windows
         run: python -m usit selftest
       - name: Run Windows security trust-boundary tests
-        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_test_result_importer tests.test_p0710zrf12_content_verification -v
+        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_execution_provenance tests.test_test_result_importer tests.test_p0710zrf12_content_verification -v
       - name: Diagnostic full repository regression suite on Windows (non-gating; see step summary)
         id: full_repository_regression
         continue-on-error: true
