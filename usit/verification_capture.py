@@ -257,6 +257,7 @@ def capture_run(
     files: Sequence[str],
     approval_ref: str,
     cwd: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
     timeout: float | None = None,
     interrupt_event: threading.Event | None = None,
     poll_interval: float = 0.05,
@@ -318,7 +319,7 @@ def capture_run(
                     process = subprocess.Popen(
                         list(command), cwd=work, stdin=subprocess.DEVNULL,
                         stdout=out_stream, stderr=err_stream, shell=False,
-                        close_fds=True,
+                        close_fds=True, env=None if env is None else dict(env),
                     )
                     process_started = True
                 except OSError as exc:
