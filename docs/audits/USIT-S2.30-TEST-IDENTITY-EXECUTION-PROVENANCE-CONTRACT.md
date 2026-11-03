@@ -220,3 +220,28 @@ Implemented on feature/understanding-to-test-v1 after the initial contract revie
 
 - Workflow run 41661047151 was pending when this section was written. Do not mark this implementation slice CI PASS until the latest HEAD's Linux and Windows required checks finish.
 - PR #2 remains OPEN and unmerged. Do not merge main.
+
+
+## 12. Pytest source locator and complete evidence-bundle import (2026-11-03)
+
+The controlled runner injects a pytest plugin into the staged execution tree. For each executed test call, it adds these JUnit testcase properties:
+
+- usit_source_file
+- usit_source_line
+- usit_source_symbol
+- usit_nodeid
+
+The plugin source is retained as runner-plugin.py, and its SHA-256 is recorded in provenance runner metadata and checked against the evidence manifest during import. The importer parses these fields without treating them as authenticated facts. It compares them with the reviewed mapping and emits REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED or REPORT_SOURCE_LOCATOR_MISMATCH. The mapping must explicitly carry the source path, line, qualified symbol and exact pytest nodeid for this comparison.
+
+The importer now accepts an optional evidence_dir. When supplied together with the provenance record and source manifest, it:
+- requires the report, provenance record and source manifest to be the exact files inside the selected evidence bundle;
+- verifies the entire evidence_manifest.json and every artifact hash;
+- requires project_root to be the bundle's source_snapshot directory;
+- verifies that the source manifest and the complete source_snapshot artifact set match exactly;
+- checks each source-manifest file digest against the preserved source_snapshot artifact;
+- verifies runner-plugin.py against runner.plugin_sha256 when declared.
+
+This establishes integrity consistency across the bundle and enables AST checks against the preserved source snapshot. It does not authenticate the runner or prove that a hostile test process could not manipulate runtime state. Report locator equality is explicitly UNAUTHENTICATED and cannot promote a business function to VERIFIED.
+
+End-to-end regression coverage now exercises: staged pytest execution → JUnit source locator properties → preserved snapshot → full evidence-bundle verification → explicit mapping → Python AST declaration check → business-function execution result. The execution outcome and the separate source/mapping/authenticity statuses remain independent.
+
