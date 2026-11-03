@@ -1,0 +1,360 @@
+"""Controlled pytest execution against an immutable Git-archive staging copy.
+
+The runner refuses dirty/untracked Git worktrees, executes only the committed HEAD
+snapshot in a separate staging tree, records pre/post hashes, and keeps runner
+authenticity explicitly UNAUTHENTICATED. It is not an OS sandbox: project tests
+execute code and must be explicitly authorized by an external authorization file.
+"""
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+from typing import Any, Sequence
+from xml.etree import ElementTree as ET
+
+from .test_execution_provenance import (
+    SCHEMA_VERSION, canonical_json_bytes, sha256_hex, validate_execution_provenance,
+)
+from .verification_capture import capture_run, verify_manifest
+
+AUTH_SCHEMA = "usit-test-execution-authorization-v1"
+MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_FILES = 50_000
+MAX_FILE_BYTES = 100 * 1024 * 1024
+MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+_ALLOWED_PYTEST_OPTIONS = {"-q", "-v", "-vv", "-x", "--maxfail=1", "--maxfail=2",
+                           "--maxfail=3", "--tb=short", "--tb=long", "--tb=line",
+                           "--tb=native", "--tb=no", "--disable-warnings"}
+_BLOCKED_PREFIXES = ("--junitxml", "--rootdir", "--confcutdir", "--override-ini",
+                     "--import-mode", "--basetemp", "--pyargs", "-c", "--config-file")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _canonical_dir(value: str | os.PathLike[str], label: str) -> Path:
+    raw = Path(value).expanduser()
+    if not raw.is_absolute():
+        raise ValueError(f"{label} must be an absolute path")
+    current = Path(raw.anchor)
+    for part in raw.parts[1:]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        if current.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError(f"{label} contains a symlink/reparse component")
+    resolved = raw.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError(f"{label} is not a directory")
+    return resolved
+
+
+def _load_authorization(path: str | os.PathLike[str], project: Path, evidence_parent: Path) -> dict[str, Any]:
+    auth_path = Path(path).expanduser()
+    if not auth_path.is_absolute() or auth_path.is_symlink():
+        raise ValueError("authorization file must be an absolute regular file outside the project")
+    resolved = auth_path.resolve(strict=True)
+    if not resolved.is_file() or resolved.stat().st_size > 16 * 1024:
+        raise ValueError("authorization file is not a bounded regular file")
+    if resolved.is_relative_to(project):
+        raise ValueError("authorization file must be outside the project")
+    value = json.loads(resolved.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("schema_version") != AUTH_SCHEMA:
+        raise ValueError("unsupported test execution authorization schema")
+    if Path(value.get("project_root", "")).resolve(strict=True) != project:
+        raise ValueError("authorization project_root does not match requested project")
+    if Path(value.get("evidence_parent", "")).resolve(strict=True) != evidence_parent:
+        raise ValueError("authorization evidence_parent does not match requested evidence directory")
+    if "run_pytest_on_git_snapshot" not in value.get("allowed_actions", []):
+        raise ValueError("authorization does not allow run_pytest_on_git_snapshot")
+    if value.get("acknowledges_project_code_execution") is not True:
+        raise ValueError("authorization must explicitly acknowledge execution of project code")
+    approval_ref = value.get("approval_ref")
+    if not isinstance(approval_ref, str) or not approval_ref.strip() or len(approval_ref) > 256:
+        raise ValueError("authorization approval_ref is required")
+    def parse_time(field: str) -> datetime:
+        raw = value.get(field)
+        if not isinstance(raw, str) or not raw.endswith("Z"):
+            raise ValueError(f"authorization {field} must be UTC ISO-8601 ending in Z")
+        return datetime.fromisoformat(raw[:-1] + "+00:00")
+    now = datetime.now(timezone.utc)
+    if parse_time("authorized_at") > now or parse_time("expires_at") <= now:
+        raise ValueError("test execution authorization is not currently valid")
+    return value
+
+
+def _git(project: Path, *args: str, limit: int = MAX_ARCHIVE_BYTES) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(project), *args], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, check=False,
+    )
+    if result.returncode:
+        message = result.stderr.decode("utf-8", "replace")[-1000:]
+        raise ValueError(f"git {' '.join(args[:2])} failed ({result.returncode}): {message}")
+    if len(result.stdout) > limit:
+        raise ValueError("Git output exceeds configured size limit")
+    return result.stdout
+
+
+def _safe_archive_path(name: str) -> str:
+    if not isinstance(name, str) or not name or "\\" in name:
+        raise ValueError("Git archive contains an invalid path")
+    pure = PurePosixPath(name)
+    if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts) or pure.as_posix() != name:
+        raise ValueError(f"Git archive contains unsafe path: {name!r}")
+    return name
+
+
+def _extract_archive(archive_bytes: bytes, destination: Path) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    total = 0
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
+        members = archive.getmembers()
+        if len(members) > MAX_FILES * 2:
+            raise ValueError("Git archive contains too many entries")
+        seen: set[str] = set()
+        for member in members:
+            name = _safe_archive_path(member.name.rstrip("/"))
+            if name in seen:
+                raise ValueError(f"Git archive contains duplicate path: {name}")
+            seen.add(name)
+            target = destination.joinpath(*PurePosixPath(name).parts)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise ValueError(f"Git archive contains a link or special file: {name}")
+            if member.size < 0 or member.size > MAX_FILE_BYTES:
+                raise ValueError(f"Git archive file exceeds size limit: {name}")
+            total += member.size
+            if total > MAX_TOTAL_BYTES:
+                raise ValueError("Git archive exceeds total extracted size limit")
+            if len(files) >= MAX_FILES:
+                raise ValueError("Git archive contains too many regular files")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"Git archive file cannot be read: {name}")
+            digest = hashlib.sha256()
+            size = 0
+            with target.open("xb") as output:
+                while True:
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    output.write(block)
+                    digest.update(block)
+                    size += len(block)
+            if size != member.size:
+                raise ValueError(f"Git archive file size changed during extraction: {name}")
+            files.append({"path": name, "size": size, "sha256": digest.hexdigest()})
+    if not files:
+        raise ValueError("Git archive contains no regular files")
+    return sorted(files, key=lambda item: item["path"])
+
+
+def _validate_pytest_args(args: Sequence[str]) -> list[str]:
+    if isinstance(args, (str, bytes)) or not all(isinstance(x, str) and x for x in args):
+        raise ValueError("pytest arguments must be non-empty strings")
+    for arg in args:
+        if arg in _ALLOWED_PYTEST_OPTIONS:
+            continue
+        if arg.startswith(_BLOCKED_PREFIXES):
+            raise ValueError(f"pytest option is reserved by USIT: {arg}")
+        if arg.startswith("-k=") or arg.startswith("-m="):
+            if len(arg) > 3:
+                continue
+        if arg.startswith("-"):
+            raise ValueError(f"pytest option is not in the controlled allow-list: {arg}")
+        _safe_archive_path(arg.split("::", 1)[0])
+    return list(args)
+
+
+def _artifact_record(directory: Path, name: str) -> dict[str, Any]:
+    path = directory / name
+    raw = path.read_bytes()
+    return {"path": name, "size": len(raw), "sha256": sha256_hex(raw)}
+
+
+def _minimal_environment(staging: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for key in ("PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "LANG", "LC_ALL", "TZ"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    home = staging / ".usit-home"
+    temp = staging / ".usit-tmp"
+    home.mkdir(exist_ok=True)
+    temp.mkdir(exist_ok=True)
+    env.update({
+        "HOME": str(home), "USERPROFILE": str(home), "TMP": str(temp), "TEMP": str(temp),
+        "TMPDIR": str(temp), "PYTHONPATH": str(staging), "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    })
+    return env
+
+
+def run_controlled_pytest(
+    project_root: str | os.PathLike[str],
+    *,
+    evidence_parent: str | os.PathLike[str],
+    authorization_file: str | os.PathLike[str],
+    pytest_args: Sequence[str] = (),
+    timeout: float = 1800,
+) -> dict[str, Any]:
+    """Execute pytest against a clean, staged Git HEAD and produce bound evidence.
+
+    This is an execution boundary, not an OS sandbox. The authorization must
+    explicitly acknowledge arbitrary project-code execution. Runner authenticity
+    remains UNAUTHENTICATED until a platform-backed attestation is implemented.
+    """
+    project = _canonical_dir(project_root, "project root")
+    parent = _canonical_dir(evidence_parent, "evidence parent")
+    if parent == project or project.is_relative_to(parent) or parent.is_relative_to(project):
+        raise ValueError("evidence_parent and project_root must not overlap")
+    authorization = _load_authorization(authorization_file, project, parent)
+    selected_args = _validate_pytest_args(pytest_args)
+    status = _git(project, "status", "--porcelain=v1", "--untracked-files=all", limit=4 * 1024 * 1024)
+    if status.strip():
+        raise ValueError("project Git worktree is not clean; commit or separately review all tracked/untracked changes first")
+    head = _git(project, "rev-parse", "HEAD", limit=4096).decode("ascii").strip()
+    archive = _git(project, "archive", "--format=tar", "HEAD")
+    staging = Path(tempfile.mkdtemp(prefix=".usit-stage-", dir=parent)).resolve()
+    try:
+        source_files = _extract_archive(archive, staging)
+        source_manifest = {"schema_version": "usit-manifest-v1", "git_commit": head, "files": source_files}
+        source_manifest_bytes = canonical_json_bytes(source_manifest)
+        manifest_hash = sha256_hex(source_manifest_bytes)
+        pytest_report = staging / ".usit-junit.xml"
+        command = [
+            sys.executable, "-m", "pytest", "--junitxml", str(pytest_report),
+            "-p", "no:cacheprovider", *selected_args,
+        ]
+        env = _minimal_environment(staging)
+        command_fingerprint = sha256_hex(canonical_json_bytes(command))
+        environment_fingerprint = sha256_hex(canonical_json_bytes({
+            "python": sys.version, "platform": platform.platform(),
+            "environment_keys": sorted(env), "pythonpath": str(staging),
+        }))
+        runner_version = "pytest"
+        try:
+            import importlib.metadata
+            runner_version = importlib.metadata.version("pytest")
+        except importlib.metadata.PackageNotFoundError:
+            runner_version = "NOT_INSTALLED"
+        capture = capture_run(
+            command, project_root=staging, evidence_parent=parent,
+            files=[item["path"] for item in source_files],
+            approval_ref=authorization["approval_ref"], cwd=staging, timeout=timeout,
+        )
+        evidence = Path(capture.evidence_dir)
+        report_source = pytest_report
+        if not report_source.is_file():
+            return {
+                "status": "NOT_VERIFIED", "capture": capture.to_dict(),
+                "evidence_dir": str(evidence), "reason": "pytest did not produce a JUnit report",
+                "provenance_authenticity_status": "UNAUTHENTICATED",
+            }
+        report_bytes = report_source.read_bytes()
+        try:
+            root = ET.fromstring(report_bytes)
+            if root.tag not in {"testsuite", "testsuites"}:
+                raise ValueError("unexpected JUnit root element")
+        except (ET.ParseError, ValueError) as exc:
+            return {
+                "status": "NOT_VERIFIED", "capture": capture.to_dict(),
+                "evidence_dir": str(evidence), "reason": f"JUnit report is invalid: {exc}",
+                "provenance_authenticity_status": "UNAUTHENTICATED",
+            }
+        (evidence / "junit.xml").write_bytes(report_bytes)
+        (evidence / "source-manifest.json").write_bytes(
+            (json.dumps(source_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        )
+        gate_path = evidence / "final_gate_report.json"
+        gate = json.loads(gate_path.read_text(encoding="utf-8"))
+        provenance = {
+            "schema_version": SCHEMA_VERSION,
+            "execution_id": capture.run_id,
+            "started_at": gate["started_at"],
+            "completed_at": gate["ended_at"],
+            "runner": {"name": "pytest", "version": runner_version},
+            "report_format": "JUNIT_XML",
+            "report_relative_path": "junit.xml",
+            "report_sha256": sha256_hex(report_bytes),
+            "source_snapshot": {
+                "manifest_schema_version": source_manifest["schema_version"],
+                "manifest_sha256": manifest_hash,
+                "file_count": len(source_files),
+                "capture_method": "GIT_ARCHIVE_HEAD_STAGED_COPY",
+            },
+            "working_tree_state": {"state": "CLEAN", "untracked_files": "INCLUDED"},
+            "command_fingerprint": command_fingerprint,
+            "environment_fingerprint": environment_fingerprint,
+        }
+        validation = validate_execution_provenance(
+            json.dumps(provenance).encode("utf-8"), report_bytes, source_manifest_bytes,
+        )
+        provenance_path = evidence / "execution-provenance.json"
+        provenance_path.write_text(json.dumps(provenance, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        gate["git_commit"] = head
+        gate["source_snapshot_method"] = "GIT_ARCHIVE_HEAD_STAGED_COPY"
+        gate["provenance_authenticity_status"] = "UNAUTHENTICATED"
+        gate["execution_source_binding_status"] = "STAGED_SNAPSHOT_USED_UNAUTHENTICATED"
+        gate["provenance_record_validation"] = "STRUCTURE_AND_DIGESTS_VALIDATED"
+        gate["pytest_report"] = "junit.xml"
+        gate["pytest_report_sha256"] = validation["report_sha256"]
+        gate["source_manifest"] = "source-manifest.json"
+        gate["source_manifest_sha256"] = validation["source_manifest_sha256"]
+        gate["pytest_exit_status"] = capture.status
+        gate_path.write_text(json.dumps(gate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        manifest_path = evidence / "evidence_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        names = {item["path"] for item in manifest["artifacts"]}
+        for name in ("junit.xml", "source-manifest.json", "execution-provenance.json"):
+            if name not in names:
+                manifest["artifacts"].append(_artifact_record(evidence, name))
+        for item in manifest["artifacts"]:
+            if item["path"] == "final_gate_report.json":
+                item.update(_artifact_record(evidence, "final_gate_report.json"))
+        manifest["artifacts"].sort(key=lambda item: item["path"])
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        verified = verify_manifest(evidence)
+        final_status = capture.status if verified["valid"] else "NOT_VERIFIED"
+        return {
+            "status": final_status,
+            "capture": capture.to_dict(),
+            "evidence_dir": str(evidence),
+            "git_commit": head,
+            "source_file_count": len(source_files),
+            "pytest_report": str(evidence / "junit.xml"),
+            "provenance_record": str(provenance_path),
+            "source_manifest": str(evidence / "source-manifest.json"),
+            "evidence_manifest_valid": verified["valid"],
+            "evidence_manifest_errors": verified["errors"],
+            "provenance_authenticity_status": "UNAUTHENTICATED",
+            "execution_source_binding_status": "STAGED_SNAPSHOT_USED_UNAUTHENTICATED",
+            "execution_provenance_validation": "STRUCTURE_AND_DIGESTS_VALIDATED",
+            "limitations": [
+                "Project code executes; this runner is not an OS sandbox and does not block network or host-resource access.",
+                "Git worktree must be clean; untracked/modified files are refused rather than silently omitted.",
+                "The test process runs from a staged Git archive, not the original project directory.",
+                "Hashes and staging do not authenticate the runner binary or prove the runtime import graph; authenticity remains UNAUTHENTICATED.",
+                "A passing pytest report does not establish business-function correctness without reviewed mappings and independent evidence verification.",
+            ],
+        }
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
