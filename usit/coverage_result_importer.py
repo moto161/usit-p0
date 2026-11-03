@@ -71,7 +71,6 @@ def _verify_source_bindings(mapping: dict[str, Any], project_root: str | Path) -
     root = Path(project_root).expanduser()
     if not root.is_absolute():
         raise ValueError("project_root must be an absolute path")
-    root_bytes = _read(root / ".usit-root-probe-never-created", 1) if False else None
     # Inspect the root and all its ancestors without following links.
     absolute_root = Path(os.path.abspath(root))
     cursor = Path(absolute_root.anchor)
