@@ -356,6 +356,9 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                 "mapped_test_case_count": 1,
                 "failed": 0,
                 "skipped": 0,
+                "expected_mapped_test_case_count": 1,
+                "reported_mapped_test_case_count": 1,
+                "mapped_case_completeness": "COMPLETE",
                 "mapped_test_cases": [{
                     "test_case_id": "tests.PhotoTests::test_upload",
                     "status": "PASSED",
