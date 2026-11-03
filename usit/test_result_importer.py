@@ -114,11 +114,73 @@ def _parse_junit(data: bytes) -> list[dict[str, Any]]:
     return sorted(cases, key=lambda item: item["test_case_id"])
 
 
+def _verify_test_source_binding(item: dict[str, Any], project_root: str | Path | None) -> dict[str, Any]:
+    """Verify an explicit testcase-to-test-source locator against exact project bytes."""
+    fields = ("test_source_file", "test_source_line", "test_source_file_sha256")
+    present = [field in item and item.get(field) is not None for field in fields]
+    if not any(present):
+        return {"status": "TEST_SOURCE_BINDING_NOT_PROVIDED"}
+    if not all(present):
+        return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "INCOMPLETE_TEST_SOURCE_LOCATOR"}
+    if project_root is None:
+        return {"status": "TEST_SOURCE_BINDING_NOT_CHECKED", "reason": "PROJECT_ROOT_NOT_PROVIDED"}
+    relative, line, digest = (item.get("test_source_file"), item.get("test_source_line"),
+                              item.get("test_source_file_sha256"))
+    if not isinstance(relative, str) or not relative.strip():
+        return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "INVALID_TEST_SOURCE_FILE"}
+    normalized = relative.replace(chr(92), "/")
+    parts = normalized.split("/")
+    if (normalized.startswith("/") or (len(normalized) >= 2 and normalized[1] == ":")
+            or any(part in {"", ".", ".."} for part in parts)):
+        return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "UNSAFE_TEST_SOURCE_PATH"}
+    if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+        return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "INVALID_TEST_SOURCE_LINE"}
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "INVALID_TEST_SOURCE_SHA256"}
+    try:
+        root = Path(project_root).expanduser()
+        if not root.is_absolute():
+            return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "PROJECT_ROOT_MUST_BE_ABSOLUTE"}
+        root = root.resolve(strict=True)
+        if not root.is_dir():
+            return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "PROJECT_ROOT_NOT_DIRECTORY"}
+        candidate = root.joinpath(*parts)
+        current = root
+        for part in parts:
+            current = current / part
+            info = current.lstat()
+            if current.is_symlink() or is_reparse(info):
+                return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "TEST_SOURCE_PATH_CONTAINS_LINK"}
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            return {"status": "TEST_SOURCE_FILE_MISSING"}
+        raw = _read_regular(resolved, 50 * 1024 * 1024)
+    except FileNotFoundError:
+        return {"status": "TEST_SOURCE_FILE_MISSING"}
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": type(exc).__name__}
+    actual = _sha256(raw)
+    if actual != digest:
+        return {"status": "TEST_SOURCE_HASH_MISMATCH", "actual_sha256": actual}
+    try:
+        source_text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return {"status": "TEST_SOURCE_ENCODING_UNSUPPORTED", "actual_sha256": actual}
+    line_count = len(source_text.splitlines())
+    if line > line_count:
+        return {"status": "TEST_SOURCE_LINE_OUT_OF_BOUNDS",
+                "actual_sha256": actual, "source_line_count": line_count}
+    return {"status": "TEST_SOURCE_BYTES_MATCHED", "actual_sha256": actual,
+            "source_line_count": line_count, "test_source_file": normalized,
+            "test_source_line": line}
+
+
 def ingest_junit_results(
     report_path: str | Path,
     mapping_path: str | Path,
     business_graph_path: str | Path,
     report_format: str = "junit-xml",
+    project_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Parse JUnit and compute function status using explicit testcase mappings.
 
@@ -126,7 +188,10 @@ def ingest_junit_results(
       {"schema_version":"usit-test-result-mapping-v1",
        "source_graph_sha256":"<sha256 of business graph file>",
        "mappings":[{"test_case_id":"pkg.Test::test_upload",
-                    "business_function_id":"bf-..."}]}
+                    "business_function_id":"bf-...",
+                    "test_source_file":"tests/test_upload.py",
+                    "test_source_line":42,
+                    "test_source_file_sha256":"<sha256 of exact test source bytes>"}]}
     """
     report_bytes = _read_regular(report_path, MAX_REPORT_BYTES)
     mapping_bytes = _read_regular(mapping_path, 2 * 1024 * 1024)
@@ -164,7 +229,7 @@ def ingest_junit_results(
     if not known_functions:
         raise ValueError("business graph contains no business function views")
 
-    explicit_map: dict[str, str] = {}
+    explicit_map: dict[str, dict[str, Any]] = {}
     for index, item in enumerate(mappings):
         if not isinstance(item, dict):
             raise ValueError(f"mapping entry {index} must be an object")
@@ -177,7 +242,7 @@ def ingest_junit_results(
         case_id = case_id.strip()
         if case_id in explicit_map:
             raise ValueError(f"duplicate mapping for test_case_id: {case_id}")
-        explicit_map[case_id] = function_id
+        explicit_map[case_id] = {**item, "business_function_id": function_id}
 
     if report_format == "junit-xml":
         cases = _parse_junit(report_bytes)
@@ -189,19 +254,23 @@ def ingest_junit_results(
     mapped_cases: dict[str, list[dict[str, Any]]] = defaultdict(list)
     unmapped = []
     for case in cases:
-        function_id = explicit_map.get(case["test_case_id"])
-        if function_id is None:
+        mapping_item = explicit_map.get(case["test_case_id"])
+        if mapping_item is None:
             unmapped.append({**case, "linkage_status": "UNMAPPED"})
         else:
-            mapped_cases[function_id].append(case)
+            source_binding = _verify_test_source_binding(mapping_item, project_root)
+            mapped_cases[mapping_item["business_function_id"]].append({
+                **case, "test_source_binding_evidence": source_binding,
+                "test_source_binding_status": source_binding["status"],
+            })
 
     function_results = []
     for function_id, view in sorted(known_functions.items()):
         linked = mapped_cases.get(function_id, [])
         counts = Counter(item["status"] for item in linked)
         expected_not_seen = sorted(case_id for case_id, target in explicit_map.items()
-                                   if target == function_id and case_id not in actual_ids)
-        expected_mapped_count = sum(1 for target in explicit_map.values() if target == function_id)
+                                   if target["business_function_id"] == function_id and case_id not in actual_ids)
+        expected_mapped_count = sum(1 for target in explicit_map.values() if target["business_function_id"] == function_id)
         if counts["FAILED"]:
             # An observed failure remains a failure even when other expected
             # cases are absent; missing cases are still retained separately.
@@ -267,5 +336,7 @@ def ingest_junit_results(
             "映射中任一预期 testcase 未出现在报告中时，即使已报告用例全部通过，功能状态也只能是 UNKNOWN；观察到的失败仍优先报告 FAILED。",
             "JUnit XML 可接收 Android instrumentation 等兼容报告；pytest 支持 pytest-json-report JSON。",
             "代码覆盖率由独立 coverage importer 读取，并要求显式源码文件/行范围映射。",
+            "测试源码绑定仅在 mapping 提供 test_source_file、test_source_line、test_source_file_sha256 且调用方提供 project_root 时核对；哈希匹配仅证明字节一致，不证明测试充分性或报告执行了该源码。",
+            "未提供或未核验测试源码绑定时，JUnit 执行状态仍仅表示报告中的 testcase 结果，不代表测试源码位置已验证。",
         ],
     }
