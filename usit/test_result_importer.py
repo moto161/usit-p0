@@ -17,6 +17,9 @@ from typing import Any
 
 from .test_report_adapters import parse_pytest_json
 from .safeio import is_reparse, open_no_follow
+from .test_execution_provenance import (
+    MAX_MANIFEST_BYTES, MAX_RECORD_BYTES, validate_execution_provenance,
+)
 
 SCHEMA_VERSION = "usit-test-execution-results-v1"
 MAX_REPORT_BYTES = 20 * 1024 * 1024
@@ -256,6 +259,8 @@ def ingest_junit_results(
     business_graph_path: str | Path,
     report_format: str = "junit-xml",
     project_root: str | Path | None = None,
+    provenance_record_path: str | Path | None = None,
+    source_manifest_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Parse JUnit and compute function status using explicit testcase mappings.
 
@@ -271,6 +276,25 @@ def ingest_junit_results(
     report_bytes = _read_regular(report_path, MAX_REPORT_BYTES)
     mapping_bytes = _read_regular(mapping_path, 2 * 1024 * 1024)
     graph_bytes = _read_regular(business_graph_path, 50 * 1024 * 1024)
+    execution_provenance = None
+    if (provenance_record_path is None) != (source_manifest_path is None):
+        raise ValueError("provenance_record_path and source_manifest_path must be provided together")
+    if provenance_record_path is not None and source_manifest_path is not None:
+        provenance_bytes = _read_regular(provenance_record_path, MAX_RECORD_BYTES)
+        source_manifest_bytes = _read_regular(source_manifest_path, MAX_MANIFEST_BYTES)
+        execution_provenance = validate_execution_provenance(
+            provenance_bytes, report_bytes, source_manifest_bytes
+        )
+        expected_format = {"junit-xml": "JUNIT_XML", "pytest-json": "PYTEST_JSON"}.get(report_format)
+        try:
+            provenance_doc = json.loads(provenance_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid execution provenance record: {exc}") from exc
+        if expected_format is None or provenance_doc.get("report_format") != expected_format:
+            raise ValueError("execution provenance report_format does not match importer report_format")
+        execution_provenance["record_validation_status"] = "STRUCTURE_AND_DIGESTS_VALIDATED"
+        execution_provenance["provenance_authenticity_status"] = "UNAUTHENTICATED"
+        execution_provenance["execution_source_binding_status"] = "NOT_ESTABLISHED"
     try:
         mapping_doc = json.loads(mapping_bytes)
         graph_doc = json.loads(graph_bytes)
@@ -412,6 +436,7 @@ def ingest_junit_results(
         "business_function_count": len(function_results),
         "business_function_status_counts": dict(sorted(status_counts.items())),
         "business_function_results": function_results,
+        "execution_provenance": execution_provenance,
         "coverage_limitations": [
             "功能关联完全依赖显式 mapping；不使用名称相似度或 endpoint 猜测。",
             "JUnit 测试通过不等于业务需求完整正确，也不等于代码覆盖率。",
@@ -421,5 +446,6 @@ def ingest_junit_results(
             "代码覆盖率由独立 coverage importer 读取，并要求显式源码文件/行范围映射。",
             "测试源码绑定仅在 mapping 提供 test_source_file、test_source_line、test_source_file_sha256 且调用方提供 project_root 时核对；哈希匹配仅证明字节一致，不证明测试充分性或报告执行了该源码。",
             "未提供或未核验测试源码绑定时，JUnit 执行状态仍仅表示报告中的 testcase 结果，不代表测试源码位置已验证。",
+            "执行来源记录与源码清单为可选导入输入；提供时仅验证记录结构及报告/清单摘要一致性，记录来源仍为 UNAUTHENTICATED，不能证明 runner 身份或测试进程实际加载的源码。",
         ],
     }
