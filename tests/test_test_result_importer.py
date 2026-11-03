@@ -228,6 +228,7 @@ class TestResultImporterTests(unittest.TestCase):
                 "test_source_file": "tests/test_photo.py",
                 "test_source_line": 1,
                 "test_source_file_sha256": digest,
+                "test_source_symbol": "test_upload",
             }]
             report, mapping, graph = self._inputs(
                 base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>',
@@ -240,6 +241,10 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
                              "TEST_SOURCE_BYTES_MATCHED")
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_evidence"]["source_line_count"], 2)
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_symbol_status"],
+                             "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED")
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_symbol_evidence"]["qualified_symbol"],
+                             "test_upload")
             from usit.business_evidence_verifier import verify_business_function_evidence
             graph_doc = json.loads(graph.read_text(encoding="utf-8"))
             matrix = verify_business_function_evidence(
@@ -249,6 +254,10 @@ class TestResultImporterTests(unittest.TestCase):
                             if x["business_function_id"] == "bf-upload")
             self.assertEqual(verified["test_source_binding_status"], "ALL_SOURCE_BYTES_MATCHED_AT_IMPORT")
             self.assertEqual(verified["test_execution_status"], "PASSED")
+            self.assertEqual(
+                verified["mapped_test_cases"][0]["test_source_symbol_status"],
+                "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED",
+            )
 
     def test_test_source_binding_fails_closed_for_changed_file_and_unsafe_path(self):
         with tempfile.TemporaryDirectory() as td:
