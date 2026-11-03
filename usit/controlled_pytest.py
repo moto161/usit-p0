@@ -33,6 +33,38 @@ MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_FILES = 50_000
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+
+_RUNNER_PLUGIN = """\
+from pathlib import Path
+import pytest
+
+@pytest.hookimpl(hookwrapper=True, trylast=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if call.when != "call":
+        return
+    function = getattr(item, "function", None)
+    code = getattr(function, "__code__", None)
+    if code is None:
+        return
+    try:
+        root = Path(str(item.config.rootpath)).resolve()
+        source = Path(code.co_filename).resolve()
+        relative = source.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return
+    if relative.startswith("../") or relative == "..":
+        return
+    properties = [
+        ("usit_source_file", relative),
+        ("usit_source_line", str(code.co_firstlineno)),
+        ("usit_source_symbol", getattr(function, "__qualname__", getattr(function, "__name__", ""))),
+        ("usit_nodeid", str(item.nodeid)),
+    ]
+    report.user_properties = list(getattr(report, "user_properties", [])) + properties
+"""
+
 _ALLOWED_PYTEST_OPTIONS = {"-q", "-v", "-vv", "-x", "--maxfail=1", "--maxfail=2",
                            "--maxfail=3", "--tb=short", "--tb=long", "--tb=line",
                            "--tb=native", "--tb=no", "--disable-warnings"}
@@ -203,7 +235,7 @@ def _staging_inventory_errors(staging: Path, source_files: Sequence[dict[str, An
             if candidate.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400 or not candidate.is_file():
                 errors.append(f"unsafe non-regular file created during test: {relative}")
                 continue
-            if relative in expected or relative == ".usit-junit.xml":
+            if relative in expected or relative in {".usit-junit.xml", ".usit_runner_plugin.py"}:
                 continue
             if relative.startswith(".usit-home/") or relative.startswith(".usit-tmp/"):
                 continue
@@ -270,8 +302,11 @@ def run_controlled_pytest(
         source_manifest_bytes = canonical_json_bytes(source_manifest)
         manifest_hash = sha256_hex(source_manifest_bytes)
         pytest_report = staging / ".usit-junit.xml"
+        plugin_path = staging / ".usit_runner_plugin.py"
+        plugin_path.write_text(_RUNNER_PLUGIN, encoding="utf-8")
+        plugin_digest = sha256_hex(_RUNNER_PLUGIN.encode("utf-8"))
         command = [
-            sys.executable, "-m", "pytest", "--junitxml", str(pytest_report),
+            sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin", "--junitxml", str(pytest_report),
             "-p", "no:cacheprovider", *selected_args,
         ]
         env = _minimal_environment(staging)
@@ -317,6 +352,7 @@ def run_controlled_pytest(
         if archived_files != source_files:
             raise ValueError("preserved source snapshot differs from the executed Git archive")
         (evidence / "junit.xml").write_bytes(report_bytes)
+        (evidence / "runner-plugin.py").write_text(_RUNNER_PLUGIN, encoding="utf-8")
         (evidence / "source-manifest.json").write_bytes(
             (json.dumps(source_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
         )
@@ -327,7 +363,7 @@ def run_controlled_pytest(
             "execution_id": capture.run_id,
             "started_at": gate["started_at"],
             "completed_at": gate["ended_at"],
-            "runner": {"name": "pytest", "version": runner_version},
+            "runner": {"name": "pytest", "version": runner_version, "plugin_sha256": plugin_digest},
             "report_format": "JUNIT_XML",
             "report_relative_path": "junit.xml",
             "report_sha256": sha256_hex(report_bytes),
@@ -366,7 +402,7 @@ def run_controlled_pytest(
         manifest_path = evidence / "evidence_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         names = {item["path"] for item in manifest["artifacts"]}
-        for name in ("junit.xml", "source-manifest.json", "execution-provenance.json"):
+        for name in ("junit.xml", "source-manifest.json", "execution-provenance.json", "runner-plugin.py"):
             if name not in names:
                 manifest["artifacts"].append(_artifact_record(evidence, name))
         for item in source_files:
@@ -389,6 +425,7 @@ def run_controlled_pytest(
             "source_file_count": len(source_files),
             "pytest_report": str(evidence / "junit.xml"),
             "provenance_record": str(provenance_path),
+            "runner_plugin": str(evidence / "runner-plugin.py"),
             "source_manifest": str(evidence / "source-manifest.json"),
             "source_snapshot_root": str(snapshot_root),
             "evidence_manifest_valid": verified["valid"],
