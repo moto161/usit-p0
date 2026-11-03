@@ -255,7 +255,7 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(verified["test_source_binding_status"], "ALL_SOURCE_BYTES_MATCHED_AT_IMPORT")
             self.assertEqual(verified["test_execution_status"], "PASSED")
             self.assertEqual(
-                verified["mapped_test_cases"][0]["test_source_symbol_status"],
+                verified["test_execution_detail"]["mapped_test_cases"][0]["test_source_symbol_status"],
                 "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED",
             )
 
