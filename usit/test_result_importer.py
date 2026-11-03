@@ -24,10 +24,18 @@ MAX_TESTCASES = 200_000
 
 def _read_regular(path: str | Path, limit: int) -> bytes:
     source = Path(path).expanduser()
-    source_info = source.lstat()
-    if source.is_symlink() or is_reparse(source_info):
-        raise ValueError("input must not be a symbolic link or reparse point")
-    resolved = source.resolve(strict=True)
+    absolute = source if source.is_absolute() else Path.cwd() / source
+
+    # Match the coverage reader: reject links/reparse points in every named
+    # component, not only the final file, before opening the descriptor.
+    cursor = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        cursor = cursor / part
+        info = cursor.lstat()
+        if cursor.is_symlink() or is_reparse(info):
+            raise ValueError("input path must not contain symbolic links or reparse points")
+
+    resolved = absolute.resolve(strict=True)
     fd = open_no_follow(resolved)
     try:
         before = os.fstat(fd)
@@ -141,7 +149,14 @@ def _verify_test_source_binding(item: dict[str, Any], project_root: str | Path |
         root = Path(project_root).expanduser()
         if not root.is_absolute():
             return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "PROJECT_ROOT_MUST_BE_ABSOLUTE"}
-        root = root.resolve(strict=True)
+        absolute_root = Path(os.path.abspath(root))
+        cursor = Path(absolute_root.anchor)
+        for part in absolute_root.parts[1:]:
+            cursor = cursor / part
+            info = cursor.lstat()
+            if cursor.is_symlink() or is_reparse(info):
+                return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "PROJECT_ROOT_CONTAINS_LINK"}
+        root = absolute_root.resolve(strict=True)
         if not root.is_dir():
             return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "PROJECT_ROOT_NOT_DIRECTORY"}
         candidate = root.joinpath(*parts)
