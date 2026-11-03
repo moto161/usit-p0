@@ -245,3 +245,20 @@ This establishes integrity consistency across the bundle and enables AST checks 
 
 End-to-end regression coverage now exercises: staged pytest execution → JUnit source locator properties → preserved snapshot → full evidence-bundle verification → explicit mapping → Python AST declaration check → business-function execution result. The execution outcome and the separate source/mapping/authenticity statuses remain independent.
 
+
+
+## 13. Importer integration and hardening follow-up (2026-11-03)
+
+Additional implementation after section 12:
+
+- The generated runner plugin is loaded from the staged project root and contributes source file, first executable line, qualified Python function/method name, and exact pytest nodeid to each JUnit testcase.
+- The source locator is compared to all four explicit mapping fields. A match is labelled REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED; a mismatch remains explicit and is not silently reconciled.
+- The importer accepts evidence_dir. It verifies the full evidence manifest, requires report/provenance/source-manifest artifacts to be present in that bundle, requires project_root to be its source_snapshot directory, checks exact equality between the source-manifest file set and source_snapshot artifact set, and checks every snapshot artifact digest against its source-manifest entry.
+- The runner plugin artifact is also bound to runner.plugin_sha256. These are integrity checks only; no authenticity claim is made.
+- The runner now checks the pre-execution capture hashes against the Git-archive source manifest and detects new files/directories created during pytest, in addition to tracked-source modifications. Any such change fails the execution gate.
+- Authorization validation now requires an explicit string-list action set, acknowledgement of project-code execution, a live UTC interval with valid ordering, a nonblank approval reference, and a finite bounded timeout.
+- Added end-to-end regression coverage for runner → JUnit source locator → preserved source snapshot → evidence bundle verification → AST symbol declaration check → business-function result, plus post-run snapshot tampering rejection.
+
+Latest implementation HEAD recorded at this update: 0b7113ce079f52a67a68e55202295cad3da0faee.
+The earlier PR workflow run 41661047151 was cancelled when subsequent commits superseded its SHA. The latest HEAD has not yet received a verifiable PR CI result through the available run/status records; do not report the new runner slice as CI PASS. PR #2 remains OPEN and unmerged.
+
