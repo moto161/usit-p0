@@ -250,6 +250,15 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertEqual(mapped["test_source_symbol_evidence"]["status"], "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED")
         self.assertEqual(mapped["test_source_report_locator_status"], "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED")
         self.assertEqual(imported["execution_provenance"]["provenance_authenticity_status"], "UNAUTHENTICATED")
+        (snapshot / "tests" / "test_smoke.py").write_text("tampered after execution\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "evidence bundle manifest validation failed"):
+            ingest_junit_results(
+                evidence / "junit.xml", mapping_path, graph_path,
+                project_root=snapshot,
+                provenance_record_path=evidence / "execution-provenance.json",
+                source_manifest_path=evidence / "source-manifest.json",
+                evidence_dir=evidence,
+            )
 
 
 if __name__ == "__main__":
