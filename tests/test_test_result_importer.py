@@ -345,7 +345,7 @@ class TestResultImporterTests(unittest.TestCase):
             real_root = base / "real-project"
             source = real_root / "tests" / "test_photo.py"
             source.parent.mkdir(parents=True)
-            source.write_text("def test_upload():\\n    assert True\\n", encoding="utf-8")
+            source.write_text("def test_upload():\n    assert True\n", encoding="utf-8")
             alias_root = base / "project-alias"
             try:
                 alias_root.symlink_to(real_root, target_is_directory=True)
