@@ -321,6 +321,59 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
                              "TEST_SOURCE_LINE_OUT_OF_BOUNDS")
 
+    def test_report_reader_rejects_parent_directory_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>'
+            )
+            real_dir = base / "real-reports"
+            real_dir.mkdir()
+            real_report = real_dir / "junit.xml"
+            report.rename(real_report)
+            alias_dir = base / "alias-reports"
+            try:
+                alias_dir.symlink_to(real_dir, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"platform does not permit directory symlinks: {exc}")
+            with self.assertRaisesRegex(ValueError, "input path must not contain symbolic links"):
+                ingest_junit_results(alias_dir / "junit.xml", mapping, graph)
+
+    def test_test_source_binding_rejects_symlink_project_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            real_root = base / "real-project"
+            source = real_root / "tests" / "test_photo.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def test_upload():\\n    assert True\\n", encoding="utf-8")
+            alias_root = base / "project-alias"
+            try:
+                alias_root.symlink_to(real_root, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"platform does not permit directory symlinks: {exc}")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            rows = [{
+                "test_case_id": "tests.PhotoTests::test_upload",
+                "business_function_id": "bf-upload",
+                "test_source_file": "tests/test_photo.py",
+                "test_source_line": 1,
+                "test_source_file_sha256": digest,
+            }]
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>', rows,
+            )
+            result = ingest_junit_results(report, mapping, graph, project_root=alias_root)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(
+                upload["mapped_test_cases"][0]["test_source_binding_status"],
+                "TEST_SOURCE_BINDING_INVALID",
+            )
+            self.assertEqual(
+                upload["mapped_test_cases"][0]["test_source_binding_evidence"]["reason"],
+                "PROJECT_ROOT_CONTAINS_LINK",
+            )
+
     def test_cli_writes_result_file_without_running_tests(self):
         from contextlib import redirect_stdout
         from io import StringIO
