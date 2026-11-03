@@ -410,6 +410,9 @@ def ingest_junit_results(
             item.get("path"): item for item in bundle_manifest.get("artifacts", [])
             if isinstance(item, dict) and isinstance(item.get("path"), str)
         }
+        required_bundle_artifacts = {"junit.xml", "execution-provenance.json", "source-manifest.json"}
+        if not required_bundle_artifacts.issubset(artifact_index):
+            raise ValueError("evidence manifest omits a required report/provenance/source-manifest artifact")
         source_doc = json.loads(Path(source_manifest_path).read_text(encoding="utf-8"))
         source_entries = source_doc.get("files") if isinstance(source_doc, dict) else None
         if not isinstance(source_entries, list):
@@ -429,7 +432,10 @@ def ingest_junit_results(
         if actual_snapshot_artifacts != expected_snapshot_artifacts:
             raise ValueError("evidence bundle source_snapshot artifact set differs from source manifest")
         provenance_doc_for_bundle = json.loads(Path(provenance_record_path).read_text(encoding="utf-8"))
-        plugin_digest = provenance_doc_for_bundle.get("runner", {}).get("plugin_sha256")
+        runner_doc_for_bundle = provenance_doc_for_bundle.get("runner")
+        if not isinstance(runner_doc_for_bundle, dict):
+            raise ValueError("provenance runner metadata must be an object")
+        plugin_digest = runner_doc_for_bundle.get("plugin_sha256")
         plugin_artifact = artifact_index.get("runner-plugin.py")
         if plugin_digest is not None and (
             plugin_artifact is None or plugin_artifact.get("sha256") != plugin_digest
