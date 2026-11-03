@@ -330,6 +330,63 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "test_report_sha256"):
             verify_business_function_evidence(self.graph, malformed, business_graph_sha256=self.graph_hash)
 
+    def test_test_source_binding_reconciles_declared_and_normalized_locator(self):
+        import copy
+        evidence = {
+            "status": "TEST_SOURCE_BYTES_MATCHED",
+            "expected_sha256": "a" * 64,
+            "actual_sha256": "a" * 64,
+            "source_line_count": 12,
+            "test_source_file": "tests/test_photo.py",
+            "test_source_line": 4,
+            "declared_test_source_file": r"tests\\test_photo.py",
+            "declared_test_source_line": 4,
+            "declared_test_source_file_sha256": "a" * 64,
+        }
+        tests = {
+            "schema_version": "usit-test-execution-results-v1",
+            "source_hashes": {
+                "test_report_sha256": "1" * 64,
+                "mapping_json_sha256": "2" * 64,
+                "business_graph_sha256": self.graph_hash,
+            },
+            "business_function_results": [{
+                "business_function_id": "bf-upload",
+                "execution_status": "PASSED",
+                "mapped_test_case_count": 1,
+                "failed": 0,
+                "skipped": 0,
+                "mapped_test_cases": [{
+                    "test_case_id": "tests.PhotoTests::test_upload",
+                    "status": "PASSED",
+                    "test_source_binding_status": "TEST_SOURCE_BYTES_MATCHED",
+                    "test_source_binding_evidence": evidence,
+                }],
+            }],
+        }
+        valid = verify_business_function_evidence(
+            self.graph, tests, business_graph_sha256=self.graph_hash
+        )
+        upload = next(x for x in valid["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["test_source_binding_status"], "ALL_SOURCE_BYTES_MATCHED_AT_IMPORT")
+        self.assertEqual(valid["evidence_conflict_count"], 0)
+
+        tampered = copy.deepcopy(tests)
+        tampered["business_function_results"][0]["mapped_test_cases"][0][
+            "test_source_binding_evidence"
+        ]["declared_test_source_line"] = 5
+        invalid = verify_business_function_evidence(
+            self.graph, tampered, business_graph_sha256=self.graph_hash
+        )
+        upload = next(x for x in invalid["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["test_source_binding_status"], "SOURCE_BINDING_NOT_VERIFIED")
+        self.assertIn(
+            "INVALID_MATCHED_TEST_SOURCE_BINDING_EVIDENCE",
+            {item["kind"] for item in invalid["evidence_conflicts"]},
+        )
+
     def test_missing_inputs_remain_not_measured(self):
         result=verify_business_function_evidence(self.graph)
         self.assertTrue(all(x["test_execution_status"]=="NOT_MEASURED" for x in result["business_function_evidence"]))
