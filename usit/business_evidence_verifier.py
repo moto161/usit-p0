@@ -350,14 +350,24 @@ def verify_business_function_evidence(
                             source_line = raw_binding.get("test_source_line") if isinstance(raw_binding, dict) else None
                             source_line_count = raw_binding.get("source_line_count") if isinstance(raw_binding, dict) else None
                             source_file = raw_binding.get("test_source_file") if isinstance(raw_binding, dict) else None
+                            declared_file = raw_binding.get("declared_test_source_file") if isinstance(raw_binding, dict) else None
+                            declared_line = raw_binding.get("declared_test_source_line") if isinstance(raw_binding, dict) else None
+                            declared_digest = raw_binding.get("declared_test_source_file_sha256") if isinstance(raw_binding, dict) else None
                             valid_digest = lambda value: (
                                 isinstance(value, str) and len(value) == 64
                                 and all(char in "0123456789abcdef" for char in value)
                             )
+                            normalized_declared_file = (
+                                declared_file.replace(chr(92), "/") if isinstance(declared_file, str) else None
+                            )
                             if (not valid_digest(expected_digest) or not valid_digest(actual_digest)
                                     or expected_digest != actual_digest
+                                    or not valid_digest(declared_digest) or declared_digest != expected_digest
                                     or not isinstance(source_file, str) or not source_file
+                                    or normalized_declared_file != source_file
                                     or not isinstance(source_line, int) or isinstance(source_line, bool) or source_line < 1
+                                    or not isinstance(declared_line, int) or isinstance(declared_line, bool)
+                                    or declared_line != source_line
                                     or not isinstance(source_line_count, int) or isinstance(source_line_count, bool)
                                     or source_line_count < source_line):
                                 conflicts.append({
