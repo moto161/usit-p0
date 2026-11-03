@@ -240,7 +240,10 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         )
         kinds = {item["kind"] for item in result["evidence_conflicts"]}
         self.assertNotIn("COVERAGE_STATUS_COUNT_MISMATCH", kinds)
-        self.assertIn("COVERAGE_STATUS_WITH_MISSING_SOURCE_FILES", kinds)
+        self.assertNotIn("COVERAGE_STATUS_WITH_MISSING_SOURCE_FILES", kinds)
+        upload = next(item for item in result["business_function_evidence"]
+                      if item["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["code_coverage_detail"]["verification_status"], "UNKNOWN")
 
     def test_coverage_counts_percent_status_and_nonfinite_values_are_cross_checked(self):
         import copy
