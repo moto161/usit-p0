@@ -182,6 +182,38 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertTrue(result["evidence_manifest_valid"])
 
 
+    def test_project_module_loaded_from_original_worktree_fails_runtime_binding(self):
+        package = self.project / "shadow_pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("VALUE = 'original-worktree'\\n", encoding="utf-8")
+        self.git("add", "shadow_pkg/__init__.py")
+        self.git("commit", "-q", "-m", "add shadow package fixture")
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "import sys\\n"
+            f"sys.path.insert(0, {str(self.project)!r})\\n"
+            "import shadow_pkg\\n"
+            "def test_imports_project_module_from_original_worktree():\\n"
+            "    assert shadow_pkg.VALUE == 'original-worktree'\\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture imports project module outside staged snapshot")
+        with patch.dict(os.environ, {"USIT_TEST_SECRET": "must-not-reach-child"}):
+            result = run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+            )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["runtime_import_binding_status"], "RUNTIME_IMPORTS_NOT_BOUND")
+        runtime_doc = json.loads(Path(result["runtime_imports_manifest"]).read_text(encoding="utf-8"))
+        self.assertEqual(runtime_doc["outside_snapshot_module_count"], 1)
+        self.assertTrue(any(
+            item["module"] == "shadow_pkg" and item["status"] == "OUTSIDE_SNAPSHOT"
+            for item in runtime_doc["modules"]
+        ))
+
     def test_untracked_file_created_during_test_fails_gate(self):
         source = self.project / "tests" / "test_smoke.py"
         source.write_text(
