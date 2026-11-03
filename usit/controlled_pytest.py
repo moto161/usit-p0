@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import platform
 import re
@@ -111,7 +112,10 @@ def _load_authorization(path: str | os.PathLike[str], project: Path, evidence_pa
         raise ValueError("authorization project_root does not match requested project")
     if Path(value.get("evidence_parent", "")).resolve(strict=True) != evidence_parent:
         raise ValueError("authorization evidence_parent does not match requested evidence directory")
-    if "run_pytest_on_git_snapshot" not in value.get("allowed_actions", []):
+    actions = value.get("allowed_actions")
+    if not isinstance(actions, list) or not all(isinstance(item, str) for item in actions):
+        raise ValueError("authorization allowed_actions must be an explicit string list")
+    if "run_pytest_on_git_snapshot" not in actions:
         raise ValueError("authorization does not allow run_pytest_on_git_snapshot")
     if value.get("acknowledges_project_code_execution") is not True:
         raise ValueError("authorization must explicitly acknowledge execution of project code")
@@ -124,7 +128,9 @@ def _load_authorization(path: str | os.PathLike[str], project: Path, evidence_pa
             raise ValueError(f"authorization {field} must be UTC ISO-8601 ending in Z")
         return datetime.fromisoformat(raw[:-1] + "+00:00")
     now = datetime.now(timezone.utc)
-    if parse_time("authorized_at") > now or parse_time("expires_at") <= now:
+    authorized_at = parse_time("authorized_at")
+    expires_at = parse_time("expires_at")
+    if authorized_at > now or expires_at <= now or expires_at <= authorized_at:
         raise ValueError("test execution authorization is not currently valid")
     return value
 
@@ -296,6 +302,8 @@ def run_controlled_pytest(
     parent = _canonical_dir(evidence_parent, "evidence parent")
     if parent == project or project.is_relative_to(parent) or parent.is_relative_to(project):
         raise ValueError("evidence_parent and project_root must not overlap")
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 24 * 60 * 60:
+        raise ValueError("timeout must be finite, greater than zero and no more than 24 hours")
     authorization = _load_authorization(authorization_file, project, parent)
     selected_args = _validate_pytest_args(pytest_args)
     status = _git(project, "status", "--porcelain=v1", "--untracked-files=all", limit=4 * 1024 * 1024)
@@ -349,6 +357,17 @@ def run_controlled_pytest(
         )
         evidence = Path(capture.evidence_dir)
         inventory_errors = _staging_inventory_errors(staging, source_files)
+        try:
+            pre_snapshot = json.loads((evidence / "pre_snapshot.json").read_text(encoding="utf-8"))
+            pre_entries = {item.get("path"): item for item in pre_snapshot.get("files", [])}
+            for item in source_files:
+                observed = pre_entries.get(item["path"])
+                if (not isinstance(observed, dict) or observed.get("state") != "PRESENT"
+                        or observed.get("sha256") != item["sha256"]
+                        or observed.get("size") != item["size"]):
+                    inventory_errors.append(f"pre-execution snapshot does not match Git archive: {item['path']}")
+        except (OSError, ValueError, TypeError) as exc:
+            inventory_errors.append(f"pre-execution snapshot cannot be verified: {type(exc).__name__}")
         report_source = pytest_report
         if not report_source.is_file():
             return {
