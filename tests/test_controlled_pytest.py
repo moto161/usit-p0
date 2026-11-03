@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
 import tempfile
 import unittest
 from xml.etree import ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from usit.controlled_pytest import AUTH_SCHEMA, run_controlled_pytest
 from usit.verification_capture import verify_manifest
@@ -24,7 +26,11 @@ class ControlledPytestTests(unittest.TestCase):
         self.evidence.mkdir()
         (self.project / "tests").mkdir()
         (self.project / "tests" / "test_smoke.py").write_text(
-            "def test_snapshot_execution():\n    assert 2 + 2 == 4\n",
+            "import os\n"
+            "def test_snapshot_execution():\n"
+            "    assert 2 + 2 == 4\n"
+            "    assert 'USIT_TEST_SECRET' not in os.environ\n"
+            "    assert os.environ.get('PYTHONDONTWRITEBYTECODE') == '1'\n",
             encoding="utf-8",
         )
         self.git("init", "-q")
@@ -55,11 +61,12 @@ class ControlledPytestTests(unittest.TestCase):
         )
 
     def test_runs_pytest_from_staged_git_snapshot_and_binds_evidence(self):
-        result = run_controlled_pytest(
-            self.project, evidence_parent=self.evidence,
-            authorization_file=self.authorization,
-            pytest_args=["tests/test_smoke.py"], timeout=60,
-        )
+        with patch.dict(os.environ, {"USIT_TEST_SECRET": "must-not-reach-child"}):
+            result = run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+            )
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
         self.assertEqual(result["execution_source_binding_status"], "STAGED_SNAPSHOT_USED_UNAUTHENTICATED")
@@ -72,7 +79,7 @@ class ControlledPytestTests(unittest.TestCase):
             for item in testcase.findall("./properties/property")
         }
         self.assertEqual(properties.get("usit_source_file"), "tests/test_smoke.py")
-        self.assertEqual(properties.get("usit_source_line"), "1")
+        self.assertEqual(properties.get("usit_source_line"), "2")
         self.assertEqual(properties.get("usit_source_symbol"), "test_snapshot_execution")
         self.assertEqual(properties.get("usit_nodeid"), "tests/test_smoke.py::test_snapshot_execution")
         self.assertTrue(Path(result["runner_plugin"]).is_file())
@@ -136,11 +143,12 @@ class ControlledPytestTests(unittest.TestCase):
         )
         self.git("add", "tests/test_smoke.py")
         self.git("commit", "-q", "-m", "make fixture test fail")
-        result = run_controlled_pytest(
-            self.project, evidence_parent=self.evidence,
-            authorization_file=self.authorization,
-            pytest_args=["tests/test_smoke.py"], timeout=60,
-        )
+        with patch.dict(os.environ, {"USIT_TEST_SECRET": "must-not-reach-child"}):
+            result = run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+            )
         self.assertEqual(result["status"], "FAIL")
         self.assertTrue(Path(result["pytest_report"]).is_file())
         self.assertTrue(result["evidence_manifest_valid"])
@@ -156,11 +164,12 @@ class ControlledPytestTests(unittest.TestCase):
         source.write_text(original, encoding="utf-8")
         self.git("add", "tests/test_smoke.py")
         self.git("commit", "-q", "-m", "fixture attempts source mutation")
-        result = run_controlled_pytest(
-            self.project, evidence_parent=self.evidence,
-            authorization_file=self.authorization,
-            pytest_args=["tests/test_smoke.py"], timeout=60,
-        )
+        with patch.dict(os.environ, {"USIT_TEST_SECRET": "must-not-reach-child"}):
+            result = run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+            )
         self.assertEqual(result["status"], "FAIL")
         snapshot = Path(result["source_snapshot_root"]) / "tests" / "test_smoke.py"
         self.assertEqual(snapshot.read_text(encoding="utf-8"), original)
@@ -177,11 +186,12 @@ class ControlledPytestTests(unittest.TestCase):
         )
         self.git("add", "tests/test_smoke.py")
         self.git("commit", "-q", "-m", "fixture creates an untracked file")
-        result = run_controlled_pytest(
-            self.project, evidence_parent=self.evidence,
-            authorization_file=self.authorization,
-            pytest_args=["tests/test_smoke.py"], timeout=60,
-        )
+        with patch.dict(os.environ, {"USIT_TEST_SECRET": "must-not-reach-child"}):
+            result = run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+            )
         self.assertEqual(result["status"], "FAIL")
         self.assertEqual(result["source_tree_inventory_status"], "CHANGED_OR_UNSAFE")
         self.assertTrue(any("generated-during-test.py" in item
@@ -190,11 +200,12 @@ class ControlledPytestTests(unittest.TestCase):
 
 
     def test_runner_bundle_imports_through_snapshot_and_business_mapping(self):
-        result = run_controlled_pytest(
-            self.project, evidence_parent=self.evidence,
-            authorization_file=self.authorization,
-            pytest_args=["tests/test_smoke.py"], timeout=60,
-        )
+        with patch.dict(os.environ, {"USIT_TEST_SECRET": "must-not-reach-child"}):
+            result = run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+            )
         self.assertEqual(result["status"], "PASS", result)
         evidence = Path(result["evidence_dir"])
         snapshot = Path(result["source_snapshot_root"])
@@ -223,7 +234,7 @@ class ControlledPytestTests(unittest.TestCase):
                 "test_case_id": case_id,
                 "business_function_id": "bf-smoke",
                 "test_source_file": "tests/test_smoke.py",
-                "test_source_line": 1,
+                "test_source_line": 2,
                 "test_source_file_sha256": source_entry["sha256"],
                 "test_source_symbol": "test_snapshot_execution",
                 "pytest_nodeid": "tests/test_smoke.py::test_snapshot_execution",
