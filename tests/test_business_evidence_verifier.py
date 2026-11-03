@@ -339,7 +339,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
             "source_line_count": 12,
             "test_source_file": "tests/test_photo.py",
             "test_source_line": 4,
-            "declared_test_source_file": r"tests\\test_photo.py",
+            "declared_test_source_file": r"tests\test_photo.py",
             "declared_test_source_line": 4,
             "declared_test_source_file_sha256": "a" * 64,
         }
