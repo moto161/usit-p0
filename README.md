@@ -749,3 +749,30 @@ Use `usit verify-scan-attestation --manifest scan_manifest.json --attestation sc
 - 输出 `identity_sql_sink_evidence` / execution path 的 `identity_sql_sink_bindings`，保留身份来源 ID、SQL sink ID、资源字段、形参和完整传播链。
 - 这只证明静态参数映射到 SQL owner predicate 的绑定实参，不证明 SQL 驱动实际绑定语义、查询执行、过滤结果或运行时授权有效；状态仍为 `STATIC_INFERENCE` / `NOT_VERIFIED`。
 - 新增 extractor 与两跳图关联回归测试；当前提交等待 CI。
+
+## S2.28 — Coverage mapping bound to real source bytes
+
+Coverage import now requires an explicit absolute `--project-root` and checks each reviewed mapping against the actual source file beneath that root. Each mapping entry should include `source_file_sha256`, the lowercase SHA-256 of the exact UTF-8 source-file bytes. USIT reads the source without following symlinks/reparse points, rejects unsafe path components, compares the digest, and verifies that `line_end` does not exceed the decoded source line count.
+
+Example mapping entry:
+
+```json
+{
+  "business_function_id": "bf-photo-upload",
+  "source_file": "app/photo_service.py",
+  "line_start": 40,
+  "line_end": 78,
+  "source_file_sha256": "<64 lowercase hex SHA-256 of the exact source file>"
+}
+```
+
+Import an already completed report (USIT does not run the test suite):
+
+```powershell
+python -m usit ingest-coverage --coverage .\\coverage.json --mapping .\\coverage-mapping.json --graph .\\business_knowledge_graph.json --project-root "C:\\path\\to\\the\\exact\\source\\tree" --format coverage-py-json --out .\\coverage-results.json
+```
+
+A business-function coverage result remains measured only when every mapped source file has matching bytes and every mapped range is within the actual file. Otherwise its coverage status is downgraded to `UNKNOWN` and the per-range reason is retained: `SOURCE_BINDING_NOT_CHECKED`, `SOURCE_FILE_MISSING`, `SOURCE_HASH_MISMATCH`, `SOURCE_ENCODING_UNSUPPORTED`, or `SOURCE_LINE_RANGE_OUT_OF_BOUNDS`. `SOURCE_BYTES_MATCHED` means the supplied mapping digest matches the bytes read from the supplied project root; it is not a digital signature, trusted provenance claim, proof of mapping correctness, or proof of business behavior. The coverage report, mapping, business graph and actual source-file digests remain separately visible in the result.
+
+The `--project-root` must be the exact source tree that produced the coverage report. Do not reuse a mapping after source edits without reviewing and updating its source digest. Test execution and test-source provenance remain separate evidence dimensions; a JUnit/pytest PASS is not proof that the test implementation itself is current or adequate.
+
