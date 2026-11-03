@@ -240,6 +240,15 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
                              "TEST_SOURCE_BYTES_MATCHED")
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_evidence"]["source_line_count"], 2)
+            from usit.business_evidence_verifier import verify_business_function_evidence
+            graph_doc = json.loads(graph.read_text(encoding="utf-8"))
+            matrix = verify_business_function_evidence(
+                graph_doc, result, business_graph_sha256=result["source_hashes"]["business_graph_sha256"]
+            )
+            verified = next(x for x in matrix["business_function_evidence"]
+                            if x["business_function_id"] == "bf-upload")
+            self.assertEqual(verified["test_source_binding_status"], "ALL_SOURCE_BYTES_MATCHED_AT_IMPORT")
+            self.assertEqual(verified["test_execution_status"], "PASSED")
 
     def test_test_source_binding_fails_closed_for_changed_file_and_unsafe_path(self):
         with tempfile.TemporaryDirectory() as td:
@@ -265,6 +274,14 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(upload["execution_status"], "PASSED")
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
                              "TEST_SOURCE_HASH_MISMATCH")
+            from usit.business_evidence_verifier import verify_business_function_evidence
+            graph_doc = json.loads(graph.read_text(encoding="utf-8"))
+            matrix = verify_business_function_evidence(
+                graph_doc, result, business_graph_sha256=result["source_hashes"]["business_graph_sha256"]
+            )
+            verified = next(x for x in matrix["business_function_evidence"]
+                            if x["business_function_id"] == "bf-upload")
+            self.assertEqual(verified["test_source_binding_status"], "SOURCE_BINDING_NOT_VERIFIED")
             rows[0]["test_source_file"] = "../outside.py"
             report, mapping, graph = self._inputs(
                 base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>', rows,
