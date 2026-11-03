@@ -219,15 +219,26 @@ def _validate_pytest_args(args: Sequence[str]) -> list[str]:
 def _staging_inventory_errors(staging: Path, source_files: Sequence[dict[str, Any]]) -> list[str]:
     """Reject files added outside the runner-owned report/temp locations."""
     expected = {item["path"] for item in source_files}
+    expected_directories: set[str] = set()
+    for relative in expected:
+        parent = PurePosixPath(relative).parent
+        while parent.as_posix() not in {".", ""}:
+            expected_directories.add(parent.as_posix())
+            parent = parent.parent
     errors: list[str] = []
     for current, directories, filenames in os.walk(staging, topdown=True, followlinks=False):
         base = Path(current)
         for name in list(directories):
             candidate = base / name
+            relative_dir = candidate.relative_to(staging).as_posix()
             info = candidate.lstat()
             if candidate.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:
-                errors.append(f"reparse directory created during test: {candidate.relative_to(staging).as_posix()}")
+                errors.append(f"reparse directory created during test: {relative_dir}")
                 directories.remove(name)
+            elif (relative_dir not in expected_directories
+                  and relative_dir not in {".usit-home", ".usit-tmp"}
+                  and not relative_dir.startswith((".usit-home/", ".usit-tmp/"))):
+                errors.append(f"unexpected directory created during test: {relative_dir}")
         for name in filenames:
             candidate = base / name
             relative = candidate.relative_to(staging).as_posix()
