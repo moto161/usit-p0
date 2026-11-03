@@ -104,6 +104,7 @@ def verify_business_function_evidence(
         ts=test.get("execution_status","NOT_MEASURED") if test else "NOT_MEASURED"
         reported_test_status = ts
         cs=cov.get("code_coverage_status","NOT_MEASURED") if cov else "NOT_MEASURED"
+        coverage_source_verified = False
         if cov is not None:
             percent = cov.get("line_coverage_percent")
             percent_valid = percent is None or (
@@ -213,7 +214,9 @@ def verify_business_function_evidence(
                         or isinstance(source_item.get("source_line_count"), bool)
                         or source_item["source_line_count"] < 1
                         or not isinstance(source_item.get("line_start"), int)
+                        or isinstance(source_item.get("line_start"), bool)
                         or not isinstance(source_item.get("line_end"), int)
+                        or isinstance(source_item.get("line_end"), bool)
                         or source_item["line_start"] < 1
                         or source_item["line_end"] < source_item["line_start"]
                         or source_item["line_end"] > source_item["source_line_count"]
@@ -221,21 +224,23 @@ def verify_business_function_evidence(
                         source_binding_valid = False
                         break
             if not source_binding_valid:
-                conflicts.append({
-                    "kind": "INVALID_OR_MISSING_COVERAGE_SOURCE_BINDING",
-                    "business_function_id": function_id,
-                })
-                if cs != "UNKNOWN":
-                    cs = "UNKNOWN"
-                    percent = None
-            elif any(item["source_binding_status"] != "SOURCE_BYTES_MATCHED" for item in source_evidence):
-                if cs != "UNKNOWN":
+                if cs != "UNKNOWN" or percent is not None:
+                    conflicts.append({
+                        "kind": "INVALID_OR_MISSING_COVERAGE_SOURCE_BINDING",
+                        "business_function_id": function_id,
+                    })
+                cs = "UNKNOWN"
+                percent = None
+            elif all(item["source_binding_status"] == "SOURCE_BYTES_MATCHED" for item in source_evidence):
+                coverage_source_verified = True
+            else:
+                if cs != "UNKNOWN" or percent is not None:
                     conflicts.append({
                         "kind": "COVERAGE_WITH_UNVERIFIED_SOURCE_BINDING",
                         "business_function_id": function_id,
                     })
-                    cs = "UNKNOWN"
-                    percent = None
+                cs = "UNKNOWN"
+                percent = None
             ranges = cov.get("mapping_ranges", [])
             if not isinstance(ranges, list) or any(
                 not isinstance(item, dict)
@@ -431,7 +436,7 @@ def verify_business_function_evidence(
             "code_coverage_detail": {
                 "source_hashes": dict(coverage_results.get("source_hashes", {})) if cov else {},
                 "coverage_basis": cov.get("coverage_basis"),
-                "verification_status": cov.get("verification_status", cs),
+                "verification_status": (cov.get("verification_status", cs) if coverage_source_verified else "SOURCE_BINDING_NOT_VERIFIED"),
                 "executable_line_count": cov.get("executable_line_count"),
                 "covered_line_count": cov.get("covered_line_count"),
                 "uncovered_line_count": cov.get("uncovered_line_count"),
