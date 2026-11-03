@@ -159,3 +159,26 @@ Implementation commits:
 - Test-fixture correction: `b36db234030be1a94297787f2c803313d476cfb3`
 
 This is **schema/integrity validation only**. The controlled pytest runner, execution-time source snapshot capture, report-to-run binding, authenticated runner origin, and importer integration remain **NOT IMPLEMENTED**. Do not promote any execution/source provenance status on the basis of this validator alone.
+
+
+## 10. Importer integration follow-up — 2026-11-03
+
+A second implementation slice now adds optional provenance-aware import to `usit/test_result_importer.py`:
+
+- Callers may supply both `provenance_record_path` and `source_manifest_path`; supplying only one is rejected.
+- Both inputs are read through the existing bounded regular-file/no-reparse reader.
+- Before testcase parsing, the importer validates the provenance record against the exact report bytes and source-manifest bytes using `validate_execution_provenance`.
+- The declared report format must match the importer mode (`JUNIT_XML` vs `PYTEST_JSON`).
+- The result preserves an independent `execution_provenance` section with `record_validation_status=STRUCTURE_AND_DIGESTS_VALIDATED`, `provenance_authenticity_status=UNAUTHENTICATED`, and `execution_source_binding_status=NOT_ESTABLISHED`.
+- Existing testcase execution status and business-function mapping remain unchanged; provenance digest consistency does not upgrade test source identity or business-function verification.
+- New importer regressions cover valid integrity-only ingestion, report tampering rejection before import, and the paired-input requirement.
+
+Commits:
+- Importer integration: `67846d825d43b17b175a88ecad97dd14bb32b06c`
+- Importer regressions: `697f7586518c69ca1d5228b3c4645838fd6cf8eb`
+- Earlier test-fixture correction: `518ff407476f3ee75c4f15fb3ec0e9d685c682d8`
+
+Validation:
+- PR workflow run `41649930049` is running for HEAD `697f7586518c69ca1d5228b3c4645838fd6cf8eb`.
+- Do not mark this slice CI PASS until Linux Business Understanding and Windows trust-boundary jobs complete successfully.
+- Controlled pytest execution, pre-execution source snapshot capture from the exact files loaded by the process, and authenticated runner origin remain NOT IMPLEMENTED.
