@@ -452,7 +452,7 @@ def verify_business_function_evidence(
                 "mapped_test_cases": test_case_evidence,
             } if test else None,
             "code_coverage_status":cs,
-            "line_coverage_percent": (cov.get("line_coverage_percent") if cov and percent_valid else None),
+            "line_coverage_percent": (percent if cov and percent_valid else None),
             "code_coverage_detail": {
                 "source_hashes": dict(coverage_results.get("source_hashes", {})) if cov else {},
                 "coverage_basis": cov.get("coverage_basis"),
