@@ -208,6 +208,8 @@ def main(argv=None):
     ir.add_argument('--out',required=True,help='New JSON result path; existing files are never overwritten')
     ir.add_argument('--format',choices=['junit-xml','pytest-json'],default='junit-xml',help='Completed test report format')
     ir.add_argument('--project-root',help='Absolute source-tree root for read-only verification of mapped test source files')
+    ir.add_argument('--provenance-record',help='Optional controlled-runner execution provenance JSON')
+    ir.add_argument('--source-manifest',help='Source snapshot manifest paired with --provenance-record')
     cr=sub.add_parser('ingest-coverage',help='Import coverage.py JSON or JaCoCo XML through explicit source-line mappings; never runs tests')
     cr.add_argument('--coverage',required=True,help='Completed coverage report file')
     cr.add_argument('--mapping',required=True,help='Reviewed source_file + line range to business_function_id mapping JSON')
@@ -676,12 +678,25 @@ def main(argv=None):
             if output.is_symlink(): raise ValueError('output must not be a symbolic link')
             output=output.resolve()
             if output.exists(): raise ValueError('test-result output already exists; choose a new path to preserve prior evidence')
-            result=ingest_junit_results(a.junit,a.mapping,a.graph,a.format,a.project_root)
+            result=ingest_junit_results(
+                a.junit,a.mapping,a.graph,a.format,a.project_root,
+                provenance_record_path=a.provenance_record,
+                source_manifest_path=a.source_manifest,
+            )
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ('schema_version','test_case_count','test_case_status_counts','unmapped_test_case_count','business_function_count','business_function_status_counts')}
             summary['result_path']=str(output)
             summary['code_coverage']='NOT_MEASURED'
+            provenance=result.get('execution_provenance')
+            summary['execution_provenance_status']=(
+                provenance.get('record_validation_status','NOT_ESTABLISHED')
+                if isinstance(provenance,dict) else 'NOT_PROVIDED'
+            )
+            summary['provenance_authenticity_status']=(
+                provenance.get('provenance_authenticity_status','UNAUTHENTICATED')
+                if isinstance(provenance,dict) else 'NOT_PROVIDED'
+            )
             print(json.dumps(summary,ensure_ascii=False,indent=2))
             return 0
         auth=load_authorization_file(a.authorization_file,a.project,a.out)
