@@ -432,6 +432,66 @@ def ingest_junit_results(
         if actual_snapshot_artifacts != expected_snapshot_artifacts:
             raise ValueError("evidence bundle source_snapshot artifact set differs from source manifest")
         provenance_doc_for_bundle = json.loads(Path(provenance_record_path).read_text(encoding="utf-8"))
+        runtime_import_validation = {"status": "RUNTIME_IMPORTS_NOT_PROVIDED"}
+        runtime_meta = provenance_doc_for_bundle.get("runtime_imports")
+        if runtime_meta is not None:
+            if not isinstance(runtime_meta, dict) or runtime_meta.get("path") != "runtime-imports.json":
+                raise ValueError("provenance runtime_imports metadata is invalid")
+            runtime_artifact = artifact_index.get("runtime-imports.json")
+            if runtime_artifact is None:
+                raise ValueError("evidence manifest omits runtime-imports.json")
+            runtime_path = evidence_root / "runtime-imports.json"
+            runtime_bytes = _read_regular(runtime_path, MAX_MANIFEST_BYTES)
+            runtime_digest = _sha256(runtime_bytes)
+            if runtime_digest != runtime_meta.get("sha256") or runtime_artifact.get("sha256") != runtime_digest:
+                raise ValueError("runtime imports digest does not match provenance/evidence manifest")
+            runtime_doc = json.loads(runtime_bytes.decode("utf-8"))
+            if not isinstance(runtime_doc, dict) or runtime_doc.get("schema_version") != "usit-runtime-imports-v1":
+                raise ValueError("runtime imports manifest schema is invalid")
+            runtime_modules = runtime_doc.get("modules")
+            if not isinstance(runtime_modules, list) or len(runtime_modules) != runtime_meta.get("module_count"):
+                raise ValueError("runtime imports module count does not match provenance")
+            snapshot_hashes = {
+                entry["path"]: entry["sha256"] for entry in source_entries
+                if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                and isinstance(entry.get("sha256"), str)
+            }
+            staged_count = outside_count = unreadable_count = 0
+            runtime_errors = []
+            for module in runtime_modules:
+                if not isinstance(module, dict):
+                    runtime_errors.append("INVALID_MODULE_ENTRY")
+                    continue
+                state = module.get("status")
+                if state == "STAGED_SOURCE":
+                    staged_count += 1
+                    relative = module.get("path")
+                    if not isinstance(relative, str) or snapshot_hashes.get(relative) != module.get("sha256"):
+                        runtime_errors.append("STAGED_MODULE_HASH_OR_PATH_MISMATCH")
+                elif state == "OUTSIDE_SNAPSHOT":
+                    outside_count += 1
+                    runtime_errors.append("PROJECT_MODULE_LOADED_OUTSIDE_SNAPSHOT")
+                elif state == "SOURCE_UNREADABLE":
+                    unreadable_count += 1
+                    runtime_errors.append("PROJECT_MODULE_SOURCE_UNREADABLE")
+                else:
+                    runtime_errors.append("UNKNOWN_MODULE_SOURCE_STATUS")
+            if (staged_count != runtime_doc.get("staged_module_count")
+                    or outside_count != runtime_doc.get("outside_snapshot_module_count")
+                    or unreadable_count != runtime_doc.get("unreadable_module_count")):
+                runtime_errors.append("RUNTIME_MODULE_COUNTS_MISMATCH")
+            if runtime_doc.get("status") != "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT":
+                runtime_errors.append("RUNTIME_IMPORTS_STATUS_NOT_MATCHED")
+            runtime_import_validation = {
+                "status": "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT" if not runtime_errors
+                          else "RUNTIME_IMPORTS_NOT_BOUND",
+                "module_count": len(runtime_modules),
+                "staged_module_count": staged_count,
+                "outside_snapshot_module_count": outside_count,
+                "unreadable_module_count": unreadable_count,
+                "errors": runtime_errors,
+                "authenticity_status": "UNAUTHENTICATED",
+            }
         runner_doc_for_bundle = provenance_doc_for_bundle.get("runner")
         if not isinstance(runner_doc_for_bundle, dict):
             raise ValueError("provenance runner metadata must be an object")
@@ -446,6 +506,7 @@ def ingest_junit_results(
             "artifacts_checked": bundle_check.get("artifacts_checked"),
             "source_file_count": len(source_entries),
             "authenticity_status": "UNAUTHENTICATED",
+            "runtime_import_validation": runtime_import_validation,
         }
     report_bytes = _read_regular(report_path, MAX_REPORT_BYTES)
     mapping_bytes = _read_regular(mapping_path, 2 * 1024 * 1024)
