@@ -263,6 +263,9 @@ def ingest_junit_results(
             unmapped.append({**case, "linkage_status": "UNMAPPED"})
         else:
             source_binding = _verify_test_source_binding(mapping_item, project_root)
+            source_binding.setdefault("declared_test_source_file", mapping_item.get("test_source_file"))
+            source_binding.setdefault("declared_test_source_line", mapping_item.get("test_source_line"))
+            source_binding.setdefault("declared_test_source_file_sha256", mapping_item.get("test_source_file_sha256"))
             mapped_cases[mapping_item["business_function_id"]].append({
                 **case, "test_source_binding_evidence": source_binding,
                 "test_source_binding_status": source_binding["status"],

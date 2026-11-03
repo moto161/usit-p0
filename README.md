@@ -806,4 +806,4 @@ usit ingest-test-results --junit .\artifacts\junit.xml --mapping .\test-result-m
 - 导入结果逐 testcase 保留 `test_source_binding_evidence`。状态包括 `TEST_SOURCE_BYTES_MATCHED`、`TEST_SOURCE_HASH_MISMATCH`、`TEST_SOURCE_FILE_MISSING`、`TEST_SOURCE_LINE_OUT_OF_BOUNDS`、`TEST_SOURCE_BINDING_NOT_CHECKED` 等。
 - 业务证据验证器再次检查匹配状态、声明/实际摘要相等性、文件定位字段和行号范围，并单独输出 `test_source_binding_status`；源码未绑定/未核验不会被伪装成已验证。
 - 测试报告中的 PASSED/FAILED 是报告执行结果；测试源码绑定是独立维度。SHA-256 相等仅证明本次读取字节与 mapping 声明一致，不证明来源真实性、测试充分性、测试与报告执行进程的因果关系或业务正确性。
-- 不提供 `--project-root` 时保持 `TEST_SOURCE_BINDING_NOT_CHECKED`；旧 mapping 可继续导入，但不能据此声称测试源码位置已核验。
+- mapping 声明了测试源码定位但未提供 `--project-root` 时保持 `TEST_SOURCE_BINDING_NOT_CHECKED`；旧 mapping 未声明源码定位时为 `TEST_SOURCE_BINDING_NOT_PROVIDED`。两种状态均不能声称测试源码位置已核验。

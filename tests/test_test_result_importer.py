@@ -312,6 +312,11 @@ class TestResultImporterTests(unittest.TestCase):
                           if x["business_function_id"] == "bf-upload")
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
                              "TEST_SOURCE_BINDING_NOT_CHECKED")
+            result = ingest_junit_results(report, mapping, graph, project_root=base)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
+                             "TEST_SOURCE_LINE_OUT_OF_BOUNDS")
 
     def test_cli_writes_result_file_without_running_tests(self):
         from contextlib import redirect_stdout
