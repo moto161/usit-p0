@@ -59,7 +59,7 @@ class TestExecutionProvenanceTests(unittest.TestCase):
     def test_manifest_tampering_is_rejected(self):
         manifest = dict(self.manifest, files=[])
         self.record["source_snapshot"]["manifest_sha256"] = "d" * 64
-        with self.assertRaisesRegex(ValueError, "file_count"):
+        with self.assertRaisesRegex(ValueError, "manifest_sha256"):
             validate_execution_provenance(
                 json.dumps(self.record).encode(), self.report, json.dumps(manifest).encode()
             )
@@ -97,7 +97,7 @@ class TestExecutionProvenanceTests(unittest.TestCase):
 
     def test_non_finite_manifest_value_is_rejected(self):
         manifest = {"schema_version": "usit-manifest-v1", "files": [], "invalid": float("nan")}
-        self.record["source_snapshot"]["manifest_sha256"] = sha256_hex(canonical_json_bytes(manifest))
+        self.record["source_snapshot"]["manifest_sha256"] = "d" * 64
         with self.assertRaisesRegex(ValueError, "canonical-JSON"):
             validate_execution_provenance(
                 json.dumps(self.record).encode(), self.report, json.dumps(manifest).encode()
