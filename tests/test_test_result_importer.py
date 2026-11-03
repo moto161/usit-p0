@@ -312,6 +312,9 @@ class TestResultImporterTests(unittest.TestCase):
                           if x["business_function_id"] == "bf-upload")
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
                              "TEST_SOURCE_BINDING_NOT_CHECKED")
+            mapping_doc = json.loads(mapping.read_text(encoding="utf-8"))
+            mapping_doc["mappings"][0]["test_source_line"] = 3
+            mapping.write_text(json.dumps(mapping_doc), encoding="utf-8")
             result = ingest_junit_results(report, mapping, graph, project_root=base)
             upload = next(x for x in result["business_function_results"]
                           if x["business_function_id"] == "bf-upload")
