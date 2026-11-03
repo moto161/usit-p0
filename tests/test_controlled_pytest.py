@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from xml.etree import ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -62,6 +63,17 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertEqual(result["execution_source_binding_status"], "STAGED_SNAPSHOT_USED_UNAUTHENTICATED")
         evidence = Path(result["evidence_dir"])
         self.assertTrue(verify_manifest(evidence)["valid"])
+        junit = ET.parse(evidence / "junit.xml").getroot()
+        testcase = junit.find(".//testcase")
+        properties = {
+            item.attrib.get("name"): item.attrib.get("value")
+            for item in testcase.findall("./properties/property")
+        }
+        self.assertEqual(properties.get("usit_source_file"), "tests/test_smoke.py")
+        self.assertEqual(properties.get("usit_source_line"), "1")
+        self.assertEqual(properties.get("usit_source_symbol"), "test_snapshot_execution")
+        self.assertEqual(properties.get("usit_nodeid"), "tests/test_smoke.py::test_snapshot_execution")
+        self.assertTrue(Path(result["runner_plugin"]).is_file())
         snapshot_root = Path(result["source_snapshot_root"])
         self.assertEqual(
             (snapshot_root / "tests" / "test_smoke.py").read_bytes(),
