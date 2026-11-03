@@ -326,13 +326,13 @@ def run_controlled_pytest(
         plugin_digest = sha256_hex(_RUNNER_PLUGIN.encode("utf-8"))
         command = [
             sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin", "--junitxml", str(pytest_report),
-            "-p", "no:cacheprovider", *selected_args,
+            "--assert=plain", "-p", "no:cacheprovider", *selected_args,
         ]
         env = _minimal_environment(staging)
         normalized_command = [
             sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin",
             "--junitxml", "<STAGING>/.usit-junit.xml",
-            "-p", "no:cacheprovider", *selected_args,
+            "--assert=plain", "-p", "no:cacheprovider", *selected_args,
         ]
         command_fingerprint = sha256_hex(canonical_json_bytes(normalized_command))
         normalized_env = {
