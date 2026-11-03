@@ -822,8 +822,8 @@ Authorization file schema (usit-test-execution-authorization-v1):
 \`\`\`json
 {
   "schema_version": "usit-test-execution-authorization-v1",
-  "project_root": "C:\path\to\clean-git-project",
-  "evidence_parent": "C:\USIT-Evidence",
+  "project_root": "C:/path/to/clean-git-project",
+  "evidence_parent": "C:/USIT-Evidence",
   "allowed_actions": ["run_pytest_on_git_snapshot"],
   "acknowledges_project_code_execution": true,
   "approval_ref": "REPLACE_WITH_REVIEWED_APPROVAL_REFERENCE",
@@ -832,12 +832,12 @@ Authorization file schema (usit-test-execution-authorization-v1):
 }
 \`\`\`
 
-The authorization must be created and reviewed by the operator; USIT does not auto-authorize execution. The project must be a clean Git worktree: tracked modifications and untracked files are refused. Git submodules, symlinks and special files in the archived source are refused. USIT stages the committed HEAD with git archive, executes pytest in that separate staging tree, and preserves the exact archived source under the run's source_snapshot/ directory. The evidence bundle includes the JUnit report, source manifest, provenance record, pre/post snapshots, logs, final gate report, and a hash-verified evidence manifest.
+The authorization must be created and reviewed by the operator; USIT does not auto-authorize execution. The project must be a clean Git worktree: tracked modifications and untracked files are refused. Git submodules, symlinks and special files in the archived source are refused. USIT stages the committed HEAD with git archive, executes pytest in that separate staging tree, and preserves the exact archived source under the run's source_snapshot/ directory. The evidence bundle includes the JUnit report, source manifest, provenance record, runner plugin, pytest-declared source file/line/qualified symbol/nodeid properties, preserved source files, pre/post snapshots, logs, final gate report, and a hash-verified evidence manifest. The importer can verify the complete bundle with --evidence-dir and compare the report-declared locator to the reviewed mapping; this comparison remains UNAUTHENTICATED.
 
 Import the generated report against the preserved snapshot (not the current checkout):
 
 \`\`\`powershell
-python -m usit ingest-test-results --junit "C:\USIT-Evidence\RUN\junit.xml" --mapping "C:\USIT-Evidence\reviewed-test-mapping.json" --graph "C:\USIT-Evidence\business_knowledge_graph.json" --project-root "C:\USIT-Evidence\RUN\source_snapshot" --provenance-record "C:\USIT-Evidence\RUN\execution-provenance.json" --source-manifest "C:\USIT-Evidence\RUN\source-manifest.json" --out "C:\USIT-Evidence\RUN\test-results.json"
+python -m usit ingest-test-results --junit "C:\USIT-Evidence\RUN\junit.xml" --mapping "C:\USIT-Evidence\reviewed-test-mapping.json" --graph "C:\USIT-Evidence\business_knowledge_graph.json" --project-root "C:\USIT-Evidence\RUN\source_snapshot" --provenance-record "C:\USIT-Evidence\RUN\execution-provenance.json" --source-manifest "C:\USIT-Evidence\RUN\source-manifest.json" --evidence-dir "C:\USIT-Evidence\RUN" --out "C:\USIT-Evidence\RUN\test-results.json"
 \`\`\`
 
 Important limits:
