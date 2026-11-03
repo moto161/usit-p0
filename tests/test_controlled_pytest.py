@@ -70,6 +70,12 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
         self.assertEqual(result["execution_source_binding_status"], "STAGED_SNAPSHOT_USED_UNAUTHENTICATED")
+        self.assertEqual(result["runtime_import_binding_status"], "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT", result)
+        runtime_path = Path(result["runtime_imports_manifest"])
+        runtime_doc = json.loads(runtime_path.read_text(encoding="utf-8"))
+        self.assertEqual(runtime_doc["schema_version"], "usit-runtime-imports-v1")
+        self.assertGreater(runtime_doc["staged_module_count"], 0)
+        self.assertEqual(runtime_doc["outside_snapshot_module_count"], 0)
         evidence = Path(result["evidence_dir"])
         self.assertTrue(verify_manifest(evidence)["valid"])
         junit = ET.parse(evidence / "junit.xml").getroot()
@@ -252,6 +258,10 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertEqual(
             imported["evidence_bundle_validation"]["status"],
             "EVIDENCE_BUNDLE_AND_SOURCE_SNAPSHOT_HASHES_VALIDATED",
+        )
+        self.assertEqual(
+            imported["evidence_bundle_validation"]["runtime_import_validation"]["status"],
+            "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT",
         )
         smoke = next(item for item in imported["business_function_results"]
                      if item["business_function_id"] == "bf-smoke")
