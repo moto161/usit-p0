@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from usit.controlled_pytest import AUTH_SCHEMA, run_controlled_pytest
 from usit.verification_capture import verify_manifest
+from usit.test_result_importer import ingest_junit_results
 
 
 class ControlledPytestTests(unittest.TestCase):
@@ -185,6 +187,69 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertTrue(any("generated-during-test.py" in item
                             for item in result["source_tree_inventory_errors"]))
         self.assertTrue(result["evidence_manifest_valid"])
+
+
+    def test_runner_bundle_imports_through_snapshot_and_business_mapping(self):
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        evidence = Path(result["evidence_dir"])
+        snapshot = Path(result["source_snapshot_root"])
+        report_root = ET.parse(evidence / "junit.xml").getroot()
+        testcase = report_root.find(".//testcase")
+        case_id = testcase.attrib.get("classname", "") + "::" + testcase.attrib["name"]
+        source_path = snapshot / "tests" / "test_smoke.py"
+        graph = {
+            "schema_version": "usit-graph-v1",
+            "business_understanding": {
+                "business_function_views": [
+                    {"business_function_id": "bf-smoke", "endpoint_id": "ep-smoke"}
+                ]
+            },
+        }
+        graph_path = self.base / "business_graph.json"
+        graph_bytes = json.dumps(graph).encode("utf-8")
+        graph_path.write_bytes(graph_bytes)
+        source_manifest = json.loads((evidence / "source-manifest.json").read_text(encoding="utf-8"))
+        source_entry = next(item for item in source_manifest["files"]
+                            if item["path"] == "tests/test_smoke.py")
+        mapping = {
+            "schema_version": "usit-test-result-mapping-v1",
+            "source_graph_sha256": hashlib.sha256(graph_bytes).hexdigest(),
+            "mappings": [{
+                "test_case_id": case_id,
+                "business_function_id": "bf-smoke",
+                "test_source_file": "tests/test_smoke.py",
+                "test_source_line": 1,
+                "test_source_file_sha256": source_entry["sha256"],
+                "test_source_symbol": "test_snapshot_execution",
+                "pytest_nodeid": "tests/test_smoke.py::test_snapshot_execution",
+            }],
+        }
+        mapping_path = self.base / "mapping.json"
+        mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+        imported = ingest_junit_results(
+            evidence / "junit.xml", mapping_path, graph_path,
+            project_root=snapshot,
+            provenance_record_path=evidence / "execution-provenance.json",
+            source_manifest_path=evidence / "source-manifest.json",
+            evidence_dir=evidence,
+        )
+        self.assertEqual(
+            imported["evidence_bundle_validation"]["status"],
+            "EVIDENCE_BUNDLE_AND_SOURCE_SNAPSHOT_HASHES_VALIDATED",
+        )
+        smoke = next(item for item in imported["business_function_results"]
+                     if item["business_function_id"] == "bf-smoke")
+        mapped = smoke["mapped_test_cases"][0]
+        self.assertEqual(smoke["execution_status"], "PASSED")
+        self.assertEqual(mapped["test_source_snapshot_binding_status"], "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED")
+        self.assertEqual(mapped["test_source_symbol_evidence"]["status"], "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED")
+        self.assertEqual(mapped["test_source_report_locator_status"], "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED")
+        self.assertEqual(imported["execution_provenance"]["provenance_authenticity_status"], "UNAUTHENTICATED")
 
 
 if __name__ == "__main__":
