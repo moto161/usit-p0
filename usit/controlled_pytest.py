@@ -35,8 +35,12 @@ MAX_FILES = 50_000
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 
-_RUNNER_PLUGIN = """\
+_RUNNER_PLUGIN = """\\
 from pathlib import Path
+import hashlib
+import json
+import os
+import sys
 import pytest
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -63,6 +67,55 @@ def pytest_runtest_makereport(item, call):
     report = outcome.get_result()
     if call.when == "call":
         report.user_properties = list(getattr(item, "user_properties", []))
+
+def pytest_sessionfinish(session, exitstatus):
+    root = Path(str(session.config.rootpath)).resolve()
+    roots = set(json.loads(os.environ.get("USIT_SOURCE_MODULE_ROOTS", "[]")))
+    entries = []
+    for name, module in sorted(tuple(sys.modules.items())):
+        if not isinstance(name, str) or name.split(".", 1)[0] not in roots:
+            continue
+        if name == "_usit_runner_plugin":
+            continue
+        spec = getattr(module, "__spec__", None)
+        origin = getattr(module, "__file__", None) or getattr(spec, "origin", None)
+        if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+            continue
+        try:
+            source = Path(origin).resolve(strict=True)
+            if not source.is_file():
+                continue
+            raw = source.read_bytes()
+            digest = hashlib.sha256(raw).hexdigest()
+            try:
+                relative = source.relative_to(root).as_posix()
+                status = "STAGED_SOURCE"
+            except ValueError:
+                relative = None
+                status = "OUTSIDE_SNAPSHOT"
+            entries.append({
+                "module": name, "status": status, "path": relative,
+                "origin_basename": source.name, "sha256": digest, "size": len(raw),
+            })
+        except (OSError, RuntimeError):
+            entries.append({
+                "module": name, "status": "SOURCE_UNREADABLE", "path": None,
+                "origin_basename": Path(origin).name, "sha256": None, "size": None,
+            })
+    staged = sum(item["status"] == "STAGED_SOURCE" for item in entries)
+    outside = sum(item["status"] == "OUTSIDE_SNAPSHOT" for item in entries)
+    unreadable = sum(item["status"] == "SOURCE_UNREADABLE" for item in entries)
+    status = "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT" if entries and not outside and not unreadable else "RUNTIME_IMPORTS_NOT_BOUND"
+    record = {
+        "schema_version": "usit-runtime-imports-v1", "status": status,
+        "project_module_roots": sorted(roots), "module_count": len(entries),
+        "staged_module_count": staged, "outside_snapshot_module_count": outside,
+        "unreadable_module_count": unreadable, "modules": entries,
+    }
+    Path(os.environ["USIT_RUNTIME_IMPORTS_PATH"]).write_text(
+        json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\\n",
+        encoding="utf-8",
+    )
 """
 
 _ALLOWED_PYTEST_OPTIONS = {"-q", "-v", "-vv", "-x", "--maxfail=1", "--maxfail=2",
@@ -251,7 +304,7 @@ def _staging_inventory_errors(staging: Path, source_files: Sequence[dict[str, An
             if candidate.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400 or not candidate.is_file():
                 errors.append(f"unsafe non-regular file created during test: {relative}")
                 continue
-            if relative in expected or relative in {".usit-junit.xml", "_usit_runner_plugin.py"}:
+            if relative in expected or relative in {".usit-junit.xml", "_usit_runner_plugin.py", ".usit-runtime-imports.json"}:
                 continue
             if relative.startswith(".usit-home/") or relative.startswith(".usit-tmp/"):
                 continue
@@ -328,6 +381,15 @@ def run_controlled_pytest(
             "--assert=plain", "-p", "no:cacheprovider", *selected_args,
         ]
         env = _minimal_environment(staging)
+        module_roots = set()
+        for source_item in source_files:
+            source_path = PurePosixPath(source_item["path"])
+            if len(source_path.parts) > 1:
+                module_roots.add(source_path.parts[0])
+            elif source_path.suffix == ".py":
+                module_roots.add(source_path.stem)
+        env["USIT_SOURCE_MODULE_ROOTS"] = json.dumps(sorted(module_roots))
+        env["USIT_RUNTIME_IMPORTS_PATH"] = str(staging / ".usit-runtime-imports.json")
         normalized_command = [
             sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin",
             "--junitxml", "<STAGING>/.usit-junit.xml",
@@ -375,6 +437,35 @@ def run_controlled_pytest(
                 "provenance_authenticity_status": "UNAUTHENTICATED",
             }
         report_bytes = report_source.read_bytes()
+        runtime_path = staging / ".usit-runtime-imports.json"
+        runtime_imports = None
+        runtime_imports_bytes = b""
+        runtime_imports_errors: list[str] = []
+        try:
+            runtime_imports_bytes = runtime_path.read_bytes()
+            runtime_imports = json.loads(runtime_imports_bytes.decode("utf-8"))
+            if not isinstance(runtime_imports, dict) or runtime_imports.get("schema_version") != "usit-runtime-imports-v1":
+                raise ValueError("unsupported runtime imports schema")
+            runtime_modules = runtime_imports.get("modules")
+            if not isinstance(runtime_modules, list):
+                raise ValueError("runtime imports modules must be a list")
+            source_hashes = {item["path"]: item["sha256"] for item in source_files}
+            for module in runtime_modules:
+                if not isinstance(module, dict):
+                    runtime_imports_errors.append("invalid runtime module entry")
+                    continue
+                if module.get("status") == "STAGED_SOURCE":
+                    relative = module.get("path")
+                    if not isinstance(relative, str) or source_hashes.get(relative) != module.get("sha256"):
+                        runtime_imports_errors.append(f"runtime module does not match source snapshot: {module.get('module')}")
+                elif module.get("status") in {"OUTSIDE_SNAPSHOT", "SOURCE_UNREADABLE"}:
+                    runtime_imports_errors.append(f"runtime module source is not bound to snapshot: {module.get('module')}")
+            if runtime_imports.get("status") != "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT":
+                runtime_imports_errors.append("runtime imports are not fully bound to staged snapshot")
+            if not runtime_modules:
+                runtime_imports_errors.append("no project runtime modules were observed")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            runtime_imports_errors.append(f"runtime imports manifest unavailable or invalid: {type(exc).__name__}")
         try:
             root = ET.fromstring(report_bytes)
             if root.tag not in {"testsuite", "testsuites"}:
@@ -392,6 +483,8 @@ def run_controlled_pytest(
             raise ValueError("preserved source snapshot differs from the executed Git archive")
         (evidence / "junit.xml").write_bytes(report_bytes)
         (evidence / "runner-plugin.py").write_text(_RUNNER_PLUGIN, encoding="utf-8")
+        if runtime_imports is not None:
+            (evidence / "runtime-imports.json").write_bytes(runtime_imports_bytes)
         (evidence / "source-manifest.json").write_bytes(
             (json.dumps(source_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
         )
@@ -415,6 +508,12 @@ def run_controlled_pytest(
             "working_tree_state": {"state": "CLEAN", "untracked_files": "INCLUDED"},
             "command_fingerprint": command_fingerprint,
             "environment_fingerprint": environment_fingerprint,
+            "runtime_imports": {
+                "path": "runtime-imports.json" if runtime_imports is not None else None,
+                "sha256": sha256_hex(runtime_imports_bytes) if runtime_imports is not None else None,
+                "module_count": runtime_imports.get("module_count") if runtime_imports is not None else 0,
+                "status": runtime_imports.get("status") if runtime_imports is not None else "NOT_AVAILABLE",
+            },
         }
         validation = validate_execution_provenance(
             json.dumps(provenance).encode("utf-8"), report_bytes, source_manifest_bytes,
@@ -434,15 +533,20 @@ def run_controlled_pytest(
         gate["pytest_exit_status"] = capture.status
         gate["source_tree_inventory_status"] = "CLEAN" if not inventory_errors else "CHANGED_OR_UNSAFE"
         gate["source_tree_inventory_errors"] = inventory_errors
-        if inventory_errors and gate.get("status") == "PASS":
+        gate["runtime_import_binding_status"] = (
+            "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT" if not runtime_imports_errors
+            else "RUNTIME_IMPORTS_NOT_BOUND"
+        )
+        gate["runtime_import_binding_errors"] = runtime_imports_errors
+        if (inventory_errors or runtime_imports_errors) and gate.get("status") == "PASS":
             gate["status"] = "FAIL"
             gate.setdefault("errors", []).extend(inventory_errors)
         gate_path.write_text(json.dumps(gate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         manifest_path = evidence / "evidence_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         names = {item["path"] for item in manifest["artifacts"]}
-        for name in ("junit.xml", "source-manifest.json", "execution-provenance.json", "runner-plugin.py"):
-            if name not in names:
+        for name in ("junit.xml", "source-manifest.json", "execution-provenance.json", "runner-plugin.py", "runtime-imports.json"):
+            if (evidence / name).is_file() and name not in names:
                 manifest["artifacts"].append(_artifact_record(evidence, name))
         for item in source_files:
             snapshot_name = "source_snapshot/" + item["path"]
@@ -454,7 +558,7 @@ def run_controlled_pytest(
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         verified = verify_manifest(evidence)
         final_status = capture.status if verified["valid"] else "NOT_VERIFIED"
-        if inventory_errors and final_status == "PASS":
+        if (inventory_errors or runtime_imports_errors) and final_status == "PASS":
             final_status = "FAIL"
         return {
             "status": final_status,
@@ -474,11 +578,17 @@ def run_controlled_pytest(
             "provenance_authenticity_status": "UNAUTHENTICATED",
             "execution_source_binding_status": "STAGED_SNAPSHOT_USED_UNAUTHENTICATED",
             "execution_provenance_validation": "STRUCTURE_AND_DIGESTS_VALIDATED",
+            "runtime_import_binding_status": (
+                "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT" if not runtime_imports_errors
+                else "RUNTIME_IMPORTS_NOT_BOUND"
+            ),
+            "runtime_import_binding_errors": runtime_imports_errors,
+            "runtime_imports_manifest": str(evidence / "runtime-imports.json") if runtime_imports is not None else None,
             "limitations": [
                 "Project code executes; this runner is not an OS sandbox and does not block network or host-resource access.",
                 "Git worktree must be clean; untracked/modified files are refused rather than silently omitted.",
                 "The test process runs from a staged Git archive, not the original project directory.",
-                "Hashes and staging do not authenticate the runner binary or prove the runtime import graph; authenticity remains UNAUTHENTICATED.",
+                "Runtime import paths and hashes are collected but remain unauthenticated; OS-level isolation and runner authenticity are not established.",
                 "A passing pytest report does not establish business-function correctness without reviewed mappings and independent evidence verification.",
             ],
         }
