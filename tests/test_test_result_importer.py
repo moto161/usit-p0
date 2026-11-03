@@ -405,5 +405,65 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["business_function_status_counts"],
                              {"NOT_EXECUTED": 1, "PASSED": 1, "UNKNOWN": 1})
 
+
+    def test_python_test_symbol_ast_matches_declared_function_and_line(self):
+        from usit.test_result_importer import _verify_python_test_symbol
+        source = """import pytest
+
+class TestPhoto:
+    @pytest.mark.parametrize('value', [1, 2])
+    def test_upload(self, value):
+        assert value > 0
+
+async def test_async_upload():
+    return True
+"""
+        result = _verify_python_test_symbol({
+            "test_source_file": "tests/test_photo.py",
+            "test_source_line": 5,
+            "test_source_symbol": "TestPhoto.test_upload",
+        }, source)
+        self.assertEqual(result["status"], "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED")
+        self.assertEqual(result["qualified_symbol"], "TestPhoto.test_upload")
+        self.assertEqual(result["symbol_start_line"], 4)
+        self.assertEqual(result["symbol_end_line"], 6)
+
+    def test_python_test_symbol_rejects_wrong_line_and_wrong_symbol(self):
+        from usit.test_result_importer import _verify_python_test_symbol
+        source = """def test_upload():
+    assert True
+
+def test_delete():
+    assert True
+"""
+        wrong_line = _verify_python_test_symbol({
+            "test_source_file": "tests/test_photo.py",
+            "test_source_line": 4,
+            "test_source_symbol": "test_upload",
+        }, source)
+        self.assertEqual(wrong_line["status"], "TEST_SOURCE_SYMBOL_MISMATCH")
+        self.assertEqual(wrong_line["reason"], "DECLARED_LINE_OUTSIDE_SYMBOL")
+        wrong_symbol = _verify_python_test_symbol({
+            "test_source_file": "tests/test_photo.py",
+            "test_source_line": 1,
+            "test_source_symbol": "test_missing",
+        }, source)
+        self.assertEqual(wrong_symbol["status"], "TEST_SOURCE_SYMBOL_MISMATCH")
+        self.assertEqual(wrong_symbol["reason"], "SYMBOL_NOT_UNIQUE_OR_NOT_FOUND")
+
+    def test_python_test_symbol_fails_closed_when_source_unverified_or_unsupported(self):
+        from usit.test_result_importer import _verify_python_test_symbol
+        mapping = {
+            "test_source_file": "tests/test_photo.py",
+            "test_source_line": 1,
+            "test_source_symbol": "test_upload",
+        }
+        unchecked = _verify_python_test_symbol(mapping, None)
+        self.assertEqual(unchecked["status"], "TEST_SOURCE_SYMBOL_NOT_CHECKED")
+        unsupported = _verify_python_test_symbol({
+            **mapping, "test_source_file": "tests/test_photo.ts",
+        }, "function test_upload() {}")
+        self.assertEqual(unsupported["status"], "TEST_SOURCE_SYMBOL_NOT_SUPPORTED")
+
 if __name__ == "__main__":
     unittest.main()
