@@ -81,6 +81,75 @@ def _case_id(classname: str, name: str) -> str:
     return f"{classname}::{name}" if classname else name
 
 
+def _junit_runner_source_locator(element: ET.Element) -> tuple[dict[str, Any] | None, str]:
+    properties = element.find("properties")
+    if properties is None:
+        return None, "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED"
+    values: dict[str, str] = {}
+    for prop in properties.findall("property"):
+        name = prop.attrib.get("name")
+        if not isinstance(name, str) or not name.startswith("usit_"):
+            continue
+        if name in values:
+            return None, "RUNNER_SOURCE_LOCATOR_DUPLICATE_PROPERTY"
+        value = prop.attrib.get("value")
+        if not isinstance(value, str) or len(value) > 4096:
+            return None, "RUNNER_SOURCE_LOCATOR_INVALID_PROPERTY"
+        values[name] = value
+    required = {"usit_source_file", "usit_source_line", "usit_source_symbol", "usit_nodeid"}
+    if not values:
+        return None, "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED"
+    if not required.issubset(values):
+        return None, "RUNNER_SOURCE_LOCATOR_INCOMPLETE"
+    relative = values["usit_source_file"]
+    parts = relative.split("/")
+    if (not relative or relative.startswith("/") or "\\" in relative or ":" in relative
+            or any(part in {"", ".", ".."} for part in parts)):
+        return None, "RUNNER_SOURCE_LOCATOR_INVALID_PATH"
+    try:
+        line = int(values["usit_source_line"])
+    except ValueError:
+        return None, "RUNNER_SOURCE_LOCATOR_INVALID_LINE"
+    if line < 1 or not values["usit_source_symbol"].strip() or not values["usit_nodeid"].strip():
+        return None, "RUNNER_SOURCE_LOCATOR_INVALID_VALUE"
+    return {
+        "test_source_file": relative,
+        "test_source_line": line,
+        "test_source_symbol": values["usit_source_symbol"],
+        "pytest_nodeid": values["usit_nodeid"],
+    }, "RUNNER_SOURCE_LOCATOR_DECLARED_UNAUTHENTICATED"
+
+
+def _verify_report_source_locator(
+    mapping_item: dict[str, Any], testcase: dict[str, Any],
+) -> dict[str, Any]:
+    locator = testcase.get("runner_source_locator")
+    status = testcase.get("runner_source_locator_status", "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED")
+    if locator is None:
+        return {"status": status}
+    expected = {
+        "test_source_file": mapping_item.get("test_source_file"),
+        "test_source_line": mapping_item.get("test_source_line"),
+        "test_source_symbol": mapping_item.get("test_source_symbol"),
+        "pytest_nodeid": mapping_item.get("pytest_nodeid"),
+    }
+    if any(value is None for value in expected.values()):
+        return {
+            "status": "REPORT_SOURCE_LOCATOR_MAPPING_INCOMPLETE",
+            "runner_locator": locator,
+        }
+    if expected != locator:
+        return {
+            "status": "REPORT_SOURCE_LOCATOR_MISMATCH",
+            "runner_locator": locator,
+            "mapping_locator": expected,
+        }
+    return {
+        "status": "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED",
+        "runner_locator": locator,
+    }
+
+
 def _parse_junit(data: bytes) -> list[dict[str, Any]]:
     # ElementTree does not resolve external entities, and explicitly rejecting
     # declarations keeps the accepted report format deliberately conservative.
@@ -101,6 +170,7 @@ def _parse_junit(data: bytes) -> list[dict[str, Any]]:
         name = (element.attrib.get("name") or "").strip()
         if not name:
             raise ValueError("JUnit testcase is missing a name")
+        runner_locator, runner_locator_status = _junit_runner_source_locator(element)
         outcomes = [child.tag for child in list(element)
                     if child.tag in {"failure", "error", "skipped"}]
         status = "FAILED" if any(x in outcomes for x in ("failure", "error")) else (
@@ -114,6 +184,8 @@ def _parse_junit(data: bytes) -> list[dict[str, Any]]:
             "failure_count": outcomes.count("failure"),
             "error_count": outcomes.count("error"),
             "skipped_count": outcomes.count("skipped"),
+            "runner_source_locator": runner_locator,
+            "runner_source_locator_status": runner_locator_status,
         })
         if len(cases) > MAX_TESTCASES:
             raise ValueError(f"JUnit testcase limit exceeded ({MAX_TESTCASES})")
@@ -400,6 +472,7 @@ def ingest_junit_results(
             symbol_binding = _verify_python_test_symbol(mapping_item, verified_source_text)
             symbol_binding.setdefault("declared_test_source_symbol", mapping_item.get("test_source_symbol"))
             snapshot_binding = _verify_test_source_snapshot_binding(mapping_item, execution_provenance)
+            report_locator_binding = _verify_report_source_locator(mapping_item, case)
             source_binding.setdefault("declared_test_source_file", mapping_item.get("test_source_file"))
             source_binding.setdefault("declared_test_source_line", mapping_item.get("test_source_line"))
             source_binding.setdefault("declared_test_source_file_sha256", mapping_item.get("test_source_file_sha256"))
@@ -408,6 +481,8 @@ def ingest_junit_results(
                 "test_source_binding_status": source_binding["status"],
                 "test_source_snapshot_binding_evidence": snapshot_binding,
                 "test_source_snapshot_binding_status": snapshot_binding["status"],
+                "test_source_report_locator_evidence": report_locator_binding,
+                "test_source_report_locator_status": report_locator_binding["status"],
                 "test_source_symbol_evidence": symbol_binding,
                 "test_source_symbol_status": symbol_binding["status"],
             })
