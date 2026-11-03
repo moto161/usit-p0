@@ -88,8 +88,10 @@ class CoverageImporterTests(unittest.TestCase):
                 {"business_function_id": "bf-a", "source_file": "src/a.py",
                  "line_start": 1, "line_end": 10**12}
             ])
-            result = ingest_coverage_results(report, mapping, graph, "coverage-py-json")
-            self.assertEqual(result["business_function_coverage"][0]["code_coverage_status"], "PARTIAL")
+            result = ingest_coverage_results(report, mapping, graph, "coverage-py-json", base / "project")
+            self.assertEqual(result["business_function_coverage"][0]["code_coverage_status"], "UNKNOWN")
+            self.assertEqual(result["business_function_coverage"][0]["source_binding_evidence"][0]["source_binding_status"],
+                             "SOURCE_LINE_RANGE_OUT_OF_BOUNDS")
 
     def test_source_hash_mismatch_and_out_of_bounds_ranges_fail_closed(self):
         with tempfile.TemporaryDirectory() as td:
