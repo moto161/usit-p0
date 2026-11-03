@@ -322,7 +322,7 @@ def run_controlled_pytest(
         pytest_report = staging / ".usit-junit.xml"
         plugin_path = staging / "_usit_runner_plugin.py"
         plugin_path.write_text(_RUNNER_PLUGIN, encoding="utf-8")
-        plugin_digest = sha256_hex(_RUNNER_PLUGIN.encode("utf-8"))
+        plugin_digest = sha256_hex(plugin_path.read_bytes())
         command = [
             sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin", "--junitxml", str(pytest_report),
             "--assert=plain", "-p", "no:cacheprovider", *selected_args,
