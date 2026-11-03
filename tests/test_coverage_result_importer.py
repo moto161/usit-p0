@@ -25,7 +25,7 @@ def _write_graph_and_mapping(base: Path, function_ids: list[str], mappings: list
         source = base / "project" / item["source_file"]
         source.parent.mkdir(parents=True, exist_ok=True)
         if not source.exists():
-            source.write_text("\\n".join("source line" for _ in range(min(max(item["line_end"], 10), 10))) + "\\n", encoding="utf-8")
+            source.write_text(chr(10).join("source line" for _ in range(min(max(item["line_end"], 10), 10))) + chr(10), encoding="utf-8")
         item["source_file_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
     mapping.write_text(json.dumps({
         "schema_version": "usit-coverage-mapping-v1",
@@ -99,7 +99,7 @@ class CoverageImporterTests(unittest.TestCase):
             mappings = [{"business_function_id": "bf-a", "source_file": "src/a.py", "line_start": 1, "line_end": 20}]
             mapping, graph = _write_graph_and_mapping(base, ["bf-a"], mappings)
             source = base / "project" / "src" / "a.py"
-            source.write_text("changed\\n", encoding="utf-8")
+            source.write_text(chr(10).join("source line" for _ in range(min(max(item["line_end"], 10), 10))) + chr(10), encoding="utf-8")
             result = ingest_coverage_results(report, mapping, graph, "coverage-py-json", base / "project")
             row = result["business_function_coverage"][0]
             self.assertEqual(row["source_binding_evidence"][0]["source_binding_status"], "SOURCE_HASH_MISMATCH")
