@@ -253,6 +253,44 @@ def _verify_python_test_symbol(item: dict[str, Any], source_text: str | None) ->
     }
 
 
+def _verify_test_source_snapshot_binding(
+    item: dict[str, Any], execution_provenance: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compare an explicit mapping locator with the captured manifest entry.
+
+    This is a consistency check against a manifest digest already validated by
+    the provenance validator. It does not authenticate the runner or prove the
+    test process loaded the declared source.
+    """
+    if execution_provenance is None:
+        return {"status": "TEST_SOURCE_SNAPSHOT_NOT_CHECKED"}
+    relative = item.get("test_source_file")
+    digest = item.get("test_source_file_sha256")
+    if relative is None and digest is None:
+        return {"status": "TEST_SOURCE_SNAPSHOT_LOCATOR_NOT_PROVIDED"}
+    if not isinstance(relative, str) or not relative or not isinstance(digest, str):
+        return {"status": "TEST_SOURCE_SNAPSHOT_LOCATOR_INVALID"}
+    manifest_hashes = execution_provenance.get("source_manifest_file_hashes", {})
+    captured = manifest_hashes.get(relative)
+    if captured is None:
+        return {
+            "status": "TEST_SOURCE_NOT_IN_EXECUTION_SNAPSHOT",
+            "test_source_file": relative,
+        }
+    if captured != digest:
+        return {
+            "status": "TEST_SOURCE_SNAPSHOT_HASH_MISMATCH",
+            "test_source_file": relative,
+            "mapping_sha256": digest,
+            "snapshot_sha256": captured,
+        }
+    return {
+        "status": "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED",
+        "test_source_file": relative,
+        "sha256": captured,
+    }
+
+
 def ingest_junit_results(
     report_path: str | Path,
     mapping_path: str | Path,
@@ -361,12 +399,15 @@ def ingest_junit_results(
             verified_source_text = source_binding.pop("_verified_source_text", None)
             symbol_binding = _verify_python_test_symbol(mapping_item, verified_source_text)
             symbol_binding.setdefault("declared_test_source_symbol", mapping_item.get("test_source_symbol"))
+            snapshot_binding = _verify_test_source_snapshot_binding(mapping_item, execution_provenance)
             source_binding.setdefault("declared_test_source_file", mapping_item.get("test_source_file"))
             source_binding.setdefault("declared_test_source_line", mapping_item.get("test_source_line"))
             source_binding.setdefault("declared_test_source_file_sha256", mapping_item.get("test_source_file_sha256"))
             mapped_cases[mapping_item["business_function_id"]].append({
                 **case, "test_source_binding_evidence": source_binding,
                 "test_source_binding_status": source_binding["status"],
+                "test_source_snapshot_binding_evidence": snapshot_binding,
+                "test_source_snapshot_binding_status": snapshot_binding["status"],
                 "test_source_symbol_evidence": symbol_binding,
                 "test_source_symbol_status": symbol_binding["status"],
             })
@@ -447,5 +488,6 @@ def ingest_junit_results(
             "测试源码绑定仅在 mapping 提供 test_source_file、test_source_line、test_source_file_sha256 且调用方提供 project_root 时核对；哈希匹配仅证明字节一致，不证明测试充分性或报告执行了该源码。",
             "未提供或未核验测试源码绑定时，JUnit 执行状态仍仅表示报告中的 testcase 结果，不代表测试源码位置已验证。",
             "执行来源记录与源码清单为可选导入输入；提供时仅验证记录结构及报告/清单摘要一致性，记录来源仍为 UNAUTHENTICATED，不能证明 runner 身份或测试进程实际加载的源码。",
+            "映射中的测试源码路径与 SHA-256 可独立对照执行源码清单条目；即使条目匹配，也不证明 runner 真实性、测试进程实际加载该文件或测试符号身份。",
         ],
     }
