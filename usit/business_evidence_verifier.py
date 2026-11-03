@@ -194,9 +194,11 @@ def verify_business_function_evidence(
                     status = source_item.get("source_binding_status")
                     expected_hash = source_item.get("expected_source_file_sha256")
                     actual_hash = source_item.get("actual_source_file_sha256")
-                    if status not in {"SOURCE_BYTES_MATCHED", "SOURCE_BINDING_NOT_CHECKED",
-                                      "SOURCE_FILE_MISSING", "SOURCE_HASH_MISMATCH",
-                                      "SOURCE_ENCODING_UNSUPPORTED", "SOURCE_LINE_RANGE_OUT_OF_BOUNDS"}:
+                    if (not isinstance(source_item.get("source_file"), str)
+                            or not source_item["source_file"].strip()
+                            or status not in {"SOURCE_BYTES_MATCHED", "SOURCE_BINDING_NOT_CHECKED",
+                                              "SOURCE_FILE_MISSING", "SOURCE_HASH_MISMATCH",
+                                              "SOURCE_ENCODING_UNSUPPORTED", "SOURCE_LINE_RANGE_OUT_OF_BOUNDS"}):
                         source_binding_valid = False
                         break
                     for digest in (expected_hash, actual_hash):
@@ -256,7 +258,25 @@ def verify_business_function_evidence(
                 conflicts.append({
                     "kind": "INVALID_COVERAGE_MAPPING_EVIDENCE",
                     "business_function_id": function_id,
-                })
+                })            elif source_binding_valid:
+                mapped_ranges = sorted(
+                    (item["source_file"], item["line_start"], item["line_end"])
+                    for item in ranges
+                )
+                bound_ranges = sorted(
+                    (item["source_file"], item["line_start"], item["line_end"])
+                    for item in source_evidence
+                    if all(isinstance(item.get(field), int) and not isinstance(item.get(field), bool)
+                           for field in ("line_start", "line_end"))
+                )
+                if mapped_ranges != bound_ranges:
+                    conflicts.append({
+                        "kind": "COVERAGE_SOURCE_BINDING_RANGE_MISMATCH",
+                        "business_function_id": function_id,
+                    })
+                    cs = "UNKNOWN"
+                    percent = None
+                    coverage_source_verified = False
         if ts not in {"PASSED","FAILED","UNKNOWN","NOT_EXECUTED","NOT_MEASURED"}:
             conflicts.append({"kind":"INVALID_TEST_STATUS","business_function_id":function_id,"status":ts})
         if cs not in {"COVERED","PARTIAL","NOT_COVERED","UNKNOWN","NOT_MEASURED"}:
