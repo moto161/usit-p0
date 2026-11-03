@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import stat
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .safeio import is_reparse, open_no_follow
@@ -66,8 +66,72 @@ def _read(path: str | Path, limit: int) -> bytes:
         os.close(fd)
 
 
+def _verify_source_bindings(mapping: dict[str, Any], project_root: str | Path) -> dict[str, list[dict[str, Any]]]:
+    """Bind reviewed mapping ranges to exact source bytes beneath an explicit root."""
+    root = Path(project_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("project_root must be an absolute path")
+    root_bytes = _read(root / ".usit-root-probe-never-created", 1) if False else None
+    # Inspect the root and all its ancestors without following links.
+    absolute_root = Path(os.path.abspath(root))
+    cursor = Path(absolute_root.anchor)
+    for part in absolute_root.parts[1:]:
+        cursor = cursor / part
+        info = cursor.lstat()
+        if cursor.is_symlink() or is_reparse(info):
+            raise ValueError("project_root must not contain symbolic links or reparse points")
+    resolved_root = absolute_root.resolve(strict=True)
+    if not resolved_root.is_dir():
+        raise ValueError("project_root must be a directory")
+    by_function: dict[str, list[dict[str, Any]]] = {}
+    for index, item in enumerate(mapping.get("mappings", [])):
+        if not isinstance(item, dict):
+            raise ValueError(f"coverage mapping entry {index} must be an object")
+        relative = item.get("source_file")
+        if not isinstance(relative, str) or not relative:
+            raise ValueError(f"coverage mapping entry {index} has invalid source_file")
+        normalized = relative.replace("\\\\", "/")
+        pure = PurePosixPath(normalized)
+        if pure.is_absolute() or (pure.parts and pure.parts[0].endswith(":")) or any(p in {"", ".", ".."} for p in pure.parts):
+            raise ValueError(f"coverage mapping entry {index} source_file must be a normalized relative path")
+        function_id = item.get("business_function_id")
+        expected = item.get("source_file_sha256")
+        evidence = {"source_file": pure.as_posix(), "source_binding_status": "SOURCE_BINDING_NOT_CHECKED",
+                    "expected_source_file_sha256": expected if isinstance(expected, str) else None,
+                    "actual_source_file_sha256": None, "source_line_count": None,
+                    "line_start": item.get("line_start"), "line_end": item.get("line_end")}
+        if not isinstance(expected, str) or len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+            evidence["source_binding_status"] = "SOURCE_BINDING_NOT_CHECKED"
+        else:
+            target = resolved_root.joinpath(*pure.parts)
+            try:
+                raw = _read(target, MAX_COVERAGE_BYTES)
+            except FileNotFoundError:
+                evidence["source_binding_status"] = "SOURCE_FILE_MISSING"
+            else:
+                actual = hashlib.sha256(raw).hexdigest()
+                evidence["actual_source_file_sha256"] = actual
+                if actual != expected:
+                    evidence["source_binding_status"] = "SOURCE_HASH_MISMATCH"
+                else:
+                    try:
+                        source_text = raw.decode("utf-8-sig")
+                    except UnicodeDecodeError:
+                        evidence["source_binding_status"] = "SOURCE_ENCODING_UNSUPPORTED"
+                    else:
+                        line_count = len(source_text.splitlines())
+                        evidence["source_line_count"] = line_count
+                        if item.get("line_end", 0) > line_count:
+                            evidence["source_binding_status"] = "SOURCE_LINE_RANGE_OUT_OF_BOUNDS"
+                        else:
+                            evidence["source_binding_status"] = "SOURCE_BYTES_MATCHED"
+        by_function.setdefault(function_id, []).append(evidence)
+    return by_function
+
+
 def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
-                            graph_path: str | Path, report_format: str) -> dict[str, Any]:
+                            graph_path: str | Path, report_format: str,
+                            project_root: str | Path | None = None) -> dict[str, Any]:
     report = _read(report_path, MAX_COVERAGE_BYTES)
     mapping_bytes = _read(mapping_path, MAX_MAPPING_BYTES)
     graph_bytes = _read(graph_path, MAX_GRAPH_BYTES)
@@ -89,6 +153,16 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
     else:
         raise ValueError("coverage format must be coverage-py-json or jacoco-xml")
     functions = map_line_coverage_to_functions(coverage, mapping, graph)
+    source_bindings = (_verify_source_bindings(mapping, project_root) if project_root is not None else {})
+    for function in functions:
+        evidence = source_bindings.get(function["business_function_id"], [])
+        function["source_binding_evidence"] = evidence
+        if project_root is None or not evidence or any(
+            item["source_binding_status"] != "SOURCE_BYTES_MATCHED" for item in evidence
+        ):
+            function["code_coverage_status"] = "UNKNOWN"
+            function["line_coverage_percent"] = None
+            function["verification_status"] = "SOURCE_BINDING_NOT_VERIFIED"
     return {
         "schema_version": "usit-code-coverage-results-v1",
         "source_format": report_format.upper().replace("-", "_"),
@@ -96,6 +170,7 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
             "coverage_report_sha256": hashlib.sha256(report).hexdigest(),
             "mapping_json_sha256": hashlib.sha256(mapping_bytes).hexdigest(),
             "business_graph_sha256": graph_sha256,
+            "source_files": {item["source_file"]: item["actual_source_file_sha256"] for rows in source_bindings.values() for item in rows if item["actual_source_file_sha256"]},
         },
         "business_function_count": len(functions),
         "coverage_status_counts": {
@@ -108,5 +183,6 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
             "覆盖率报告未提供的文件/行范围标记 UNKNOWN，不当作 0% 或未覆盖。",
             "JaCoCo package/sourcefile 路径必须与 mapping 中的项目相对路径完全一致。",
             "代码行覆盖率不等于业务需求覆盖、分支覆盖或功能正确性。",
+            "只有 source_file_sha256 与显式 project_root 下真实源码字节匹配且行范围有效时，覆盖率才保留已测状态；否则降级 UNKNOWN。",
         ],
     }
