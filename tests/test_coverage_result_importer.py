@@ -25,7 +25,7 @@ def _write_graph_and_mapping(base: Path, function_ids: list[str], mappings: list
         source = base / "project" / item["source_file"]
         source.parent.mkdir(parents=True, exist_ok=True)
         if not source.exists():
-            source.write_text("\\n".join("source line" for _ in range(max(item["line_end"], 10))) + "\\n", encoding="utf-8")
+            source.write_text("\\n".join("source line" for _ in range(min(max(item["line_end"], 10), 10))) + "\\n", encoding="utf-8")
         item["source_file_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
     mapping.write_text(json.dumps({
         "schema_version": "usit-coverage-mapping-v1",
