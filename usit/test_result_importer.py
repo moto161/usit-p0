@@ -5,6 +5,7 @@ business-function linkage is supplied by a reviewed mapping file, never guessed.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -191,7 +192,62 @@ def _verify_test_source_binding(item: dict[str, Any], project_root: str | Path |
                 "test_source_line": line}
     return {"status": "TEST_SOURCE_BYTES_MATCHED", "expected_sha256": digest, "actual_sha256": actual,
             "source_line_count": line_count, "test_source_file": normalized,
-            "test_source_line": line}
+            "test_source_line": line, "_verified_source_text": source_text}
+
+
+def _verify_python_test_symbol(item: dict[str, Any], source_text: str | None) -> dict[str, Any]:
+    """Verify a declared Python test symbol exists at the declared source line.
+
+    This verifies declaration/locator consistency only; it does not prove the
+    report testcase was emitted by, or that the runner executed, this symbol.
+    """
+    symbol = item.get("test_source_symbol")
+    if symbol is None:
+        return {"status": "TEST_SOURCE_SYMBOL_NOT_PROVIDED"}
+    if not isinstance(symbol, str) or not symbol.strip():
+        return {"status": "TEST_SOURCE_SYMBOL_INVALID"}
+    relative = item.get("test_source_file")
+    if not isinstance(relative, str) or not relative.lower().endswith(".py"):
+        return {"status": "TEST_SOURCE_SYMBOL_NOT_SUPPORTED", "reason": "NON_PYTHON_SOURCE"}
+    if source_text is None:
+        return {"status": "TEST_SOURCE_SYMBOL_NOT_CHECKED", "reason": "SOURCE_BYTES_NOT_VERIFIED"}
+    parts = symbol.split(".")
+    if any(not part.isidentifier() for part in parts):
+        return {"status": "TEST_SOURCE_SYMBOL_INVALID", "reason": "INVALID_QUALIFIED_SYMBOL"}
+    try:
+        tree = ast.parse(source_text)
+    except SyntaxError:
+        return {"status": "TEST_SOURCE_SYMBOL_NOT_SUPPORTED", "reason": "PYTHON_PARSE_FAILED"}
+    matches: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+
+    def walk(nodes: list[ast.stmt], parents: tuple[str, ...] = ()) -> None:
+        for node in nodes:
+            if isinstance(node, ast.ClassDef):
+                walk(node.body, parents + (node.name,))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if parents + (node.name,) == tuple(parts):
+                    matches.append(node)
+    walk(tree.body)
+    if len(matches) != 1:
+        return {"status": "TEST_SOURCE_SYMBOL_MISMATCH", "reason": "SYMBOL_NOT_UNIQUE_OR_NOT_FOUND"}
+    node = matches[0]
+    start_line = min([node.lineno] + [decorator.lineno for decorator in node.decorator_list])
+    end_line = node.end_lineno or node.lineno
+    line = item.get("test_source_line")
+    if isinstance(line, bool) or not isinstance(line, int) or not start_line <= line <= end_line:
+        return {
+            "status": "TEST_SOURCE_SYMBOL_MISMATCH",
+            "reason": "DECLARED_LINE_OUTSIDE_SYMBOL",
+            "symbol_start_line": start_line,
+            "symbol_end_line": end_line,
+        }
+    return {
+        "status": "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED",
+        "qualified_symbol": ".".join(parts),
+        "symbol_start_line": start_line,
+        "symbol_end_line": end_line,
+        "test_source_line": line,
+    }
 
 
 def ingest_junit_results(
@@ -278,12 +334,16 @@ def ingest_junit_results(
             unmapped.append({**case, "linkage_status": "UNMAPPED"})
         else:
             source_binding = _verify_test_source_binding(mapping_item, project_root)
+            verified_source_text = source_binding.pop("_verified_source_text", None)
+            symbol_binding = _verify_python_test_symbol(mapping_item, verified_source_text)
             source_binding.setdefault("declared_test_source_file", mapping_item.get("test_source_file"))
             source_binding.setdefault("declared_test_source_line", mapping_item.get("test_source_line"))
             source_binding.setdefault("declared_test_source_file_sha256", mapping_item.get("test_source_file_sha256"))
             mapped_cases[mapping_item["business_function_id"]].append({
                 **case, "test_source_binding_evidence": source_binding,
                 "test_source_binding_status": source_binding["status"],
+                "test_source_symbol_evidence": symbol_binding,
+                "test_source_symbol_status": symbol_binding["status"],
             })
 
     function_results = []
