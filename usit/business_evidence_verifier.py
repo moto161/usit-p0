@@ -153,7 +153,7 @@ def verify_business_function_evidence(
                             "reported_percent": percent,
                             "derived_percent": expected_percent,
                         })
-                if percent_valid and percent is not None:
+                if percent_valid and percent is not None and not cov.get("coverage_source_files_missing"):
                     expected_status = "COVERED" if covered == executable else ("PARTIAL" if covered > 0 else "NOT_COVERED")
                     if cs != expected_status:
                         conflicts.append({
