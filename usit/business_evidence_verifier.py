@@ -283,6 +283,7 @@ def verify_business_function_evidence(
             conflicts.append({"kind":"INVALID_COVERAGE_STATUS","business_function_id":function_id,"status":cs})
 
         test_case_evidence = []
+        test_source_binding_evidence = []
         missing_test_case_ids = []
         completeness_status = "NOT_PROVIDED"
         if test is not None:
@@ -317,11 +318,64 @@ def verify_business_function_evidence(
                                 "index": index,
                             })
                             continue
+                        raw_binding = item.get("test_source_binding_evidence")
+                        binding_status = item.get("test_source_binding_status", "TEST_SOURCE_BINDING_NOT_PROVIDED")
+                        allowed_binding_statuses = {
+                            "TEST_SOURCE_BINDING_NOT_PROVIDED", "TEST_SOURCE_BINDING_NOT_CHECKED",
+                            "TEST_SOURCE_BINDING_INVALID", "TEST_SOURCE_FILE_MISSING",
+                            "TEST_SOURCE_HASH_MISMATCH", "TEST_SOURCE_ENCODING_UNSUPPORTED",
+                            "TEST_SOURCE_LINE_OUT_OF_BOUNDS", "TEST_SOURCE_BYTES_MATCHED",
+                        }
+                        if binding_status not in allowed_binding_statuses:
+                            conflicts.append({
+                                "kind": "INVALID_TEST_SOURCE_BINDING_STATUS",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            binding_status = "TEST_SOURCE_BINDING_INVALID"
+                        if raw_binding is not None and (
+                            not isinstance(raw_binding, dict)
+                            or raw_binding.get("status") != binding_status
+                        ):
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_BINDING_EVIDENCE_STATUS_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            binding_status = "TEST_SOURCE_BINDING_INVALID"
+                        if binding_status == "TEST_SOURCE_BYTES_MATCHED":
+                            expected_digest = raw_binding.get("expected_sha256") if isinstance(raw_binding, dict) else None
+                            actual_digest = raw_binding.get("actual_sha256") if isinstance(raw_binding, dict) else None
+                            source_line = raw_binding.get("test_source_line") if isinstance(raw_binding, dict) else None
+                            source_line_count = raw_binding.get("source_line_count") if isinstance(raw_binding, dict) else None
+                            source_file = raw_binding.get("test_source_file") if isinstance(raw_binding, dict) else None
+                            valid_digest = lambda value: (
+                                isinstance(value, str) and len(value) == 64
+                                and all(char in "0123456789abcdef" for char in value)
+                            )
+                            if (not valid_digest(expected_digest) or not valid_digest(actual_digest)
+                                    or expected_digest != actual_digest
+                                    or not isinstance(source_file, str) or not source_file
+                                    or not isinstance(source_line, int) or isinstance(source_line, bool) or source_line < 1
+                                    or not isinstance(source_line_count, int) or isinstance(source_line_count, bool)
+                                    or source_line_count < source_line):
+                                conflicts.append({
+                                    "kind": "INVALID_MATCHED_TEST_SOURCE_BINDING_EVIDENCE",
+                                    "business_function_id": function_id,
+                                    "test_case_id": item["test_case_id"],
+                                })
+                                binding_status = "TEST_SOURCE_BINDING_INVALID"
+                        test_source_binding_evidence.append({
+                            "test_case_id": item["test_case_id"],
+                            "status": binding_status,
+                            "evidence": raw_binding if isinstance(raw_binding, dict) else None,
+                        })
                         test_case_evidence.append({
                             "test_case_id": item["test_case_id"],
                             "status": item["status"],
                             "classname": item.get("classname"),
                             "name": item.get("name"),
+                            "test_source_binding_status": binding_status,
                         })
             expected_count = test.get("expected_mapped_test_case_count")
             reported_count = test.get("reported_mapped_test_case_count")
@@ -427,6 +481,15 @@ def verify_business_function_evidence(
                 completeness_status = claimed_completeness
             elif raw_missing is not None:
                 completeness_status = "COMPLETE"
+        binding_states = [item["status"] for item in test_source_binding_evidence]
+        if not binding_states:
+            test_source_binding_status = "NOT_PROVIDED"
+        elif all(status == "TEST_SOURCE_BYTES_MATCHED" for status in binding_states):
+            test_source_binding_status = "ALL_SOURCE_BYTES_MATCHED_AT_IMPORT"
+        elif any(status == "TEST_SOURCE_BYTES_MATCHED" for status in binding_states):
+            test_source_binding_status = "PARTIALLY_SOURCE_BYTES_MATCHED_AT_IMPORT"
+        else:
+            test_source_binding_status = "SOURCE_BINDING_NOT_VERIFIED"
         if ts=="FAILED": conclusion="TEST_FAILURE_OBSERVED"
         elif ts=="PASSED" and cs=="COVERED": conclusion="TEST_PASS_AND_CODE_LINES_COVERED"
         elif ts=="PASSED" and cs in {"PARTIAL","NOT_COVERED"}: conclusion="TEST_PASS_WITH_COVERAGE_GAP"
@@ -439,6 +502,8 @@ def verify_business_function_evidence(
             "static_verification_status":view.get("verification_status","UNKNOWN"),
             "test_execution_status":ts,
             "reported_test_execution_status":reported_test_status,
+            "test_source_binding_status": test_source_binding_status,
+            "test_source_binding_evidence": test_source_binding_evidence,
             "test_case_count":test.get("mapped_test_case_count",0) if test else 0,
             "failed_test_count":test.get("failed",0) if test else 0,
             "skipped_test_count":test.get("skipped",0) if test else 0,
@@ -450,6 +515,8 @@ def verify_business_function_evidence(
                 "mapped_case_completeness": completeness_status,
                 "mapped_cases_missing_from_report": missing_test_case_ids,
                 "mapped_test_cases": test_case_evidence,
+                "test_source_binding_evidence": test_source_binding_evidence,
+                "test_source_binding_status": test_source_binding_status,
             } if test else None,
             "code_coverage_status":cs,
             "line_coverage_percent": (percent if cov and percent_valid else None),
