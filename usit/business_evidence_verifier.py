@@ -183,6 +183,59 @@ def verify_business_function_evidence(
                     "business_function_id": function_id,
                     "reported_status": cs,
                 })
+            source_evidence = cov.get("source_binding_evidence")
+            source_binding_valid = isinstance(source_evidence, list) and bool(source_evidence)
+            if source_binding_valid:
+                for source_item in source_evidence:
+                    if not isinstance(source_item, dict):
+                        source_binding_valid = False
+                        break
+                    status = source_item.get("source_binding_status")
+                    expected_hash = source_item.get("expected_source_file_sha256")
+                    actual_hash = source_item.get("actual_source_file_sha256")
+                    if status not in {"SOURCE_BYTES_MATCHED", "SOURCE_BINDING_NOT_CHECKED",
+                                      "SOURCE_FILE_MISSING", "SOURCE_HASH_MISMATCH",
+                                      "SOURCE_ENCODING_UNSUPPORTED", "SOURCE_LINE_RANGE_OUT_OF_BOUNDS"}:
+                        source_binding_valid = False
+                        break
+                    for digest in (expected_hash, actual_hash):
+                        if digest is not None and (
+                            not isinstance(digest, str) or len(digest) != 64
+                            or any(ch not in "0123456789abcdef" for ch in digest)
+                        ):
+                            source_binding_valid = False
+                            break
+                    if not source_binding_valid:
+                        break
+                    if status == "SOURCE_BYTES_MATCHED" and (
+                        not expected_hash or expected_hash != actual_hash
+                        or not isinstance(source_item.get("source_line_count"), int)
+                        or isinstance(source_item.get("source_line_count"), bool)
+                        or source_item["source_line_count"] < 1
+                        or not isinstance(source_item.get("line_start"), int)
+                        or not isinstance(source_item.get("line_end"), int)
+                        or source_item["line_start"] < 1
+                        or source_item["line_end"] < source_item["line_start"]
+                        or source_item["line_end"] > source_item["source_line_count"]
+                    ):
+                        source_binding_valid = False
+                        break
+            if not source_binding_valid:
+                conflicts.append({
+                    "kind": "INVALID_OR_MISSING_COVERAGE_SOURCE_BINDING",
+                    "business_function_id": function_id,
+                })
+                if cs != "UNKNOWN":
+                    cs = "UNKNOWN"
+                    percent = None
+            elif any(item["source_binding_status"] != "SOURCE_BYTES_MATCHED" for item in source_evidence):
+                if cs != "UNKNOWN":
+                    conflicts.append({
+                        "kind": "COVERAGE_WITH_UNVERIFIED_SOURCE_BINDING",
+                        "business_function_id": function_id,
+                    })
+                    cs = "UNKNOWN"
+                    percent = None
             ranges = cov.get("mapping_ranges", [])
             if not isinstance(ranges, list) or any(
                 not isinstance(item, dict)
