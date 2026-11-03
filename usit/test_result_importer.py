@@ -138,7 +138,7 @@ def _verify_test_source_binding(item: dict[str, Any], project_root: str | Path |
         return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "INVALID_TEST_SOURCE_FILE"}
     normalized = relative.replace(chr(92), "/")
     parts = normalized.split("/")
-    if (normalized.startswith("/") or (len(normalized) >= 2 and normalized[1] == ":")
+    if (normalized.startswith("/") or ":" in normalized
             or any(part in {"", ".", ".."} for part in parts)):
         return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": "UNSAFE_TEST_SOURCE_PATH"}
     if isinstance(line, bool) or not isinstance(line, int) or line < 1:
