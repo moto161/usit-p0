@@ -807,3 +807,43 @@ usit ingest-test-results --junit .\artifacts\junit.xml --mapping .\test-result-m
 - 业务证据验证器再次检查匹配状态、声明/实际摘要相等性、文件定位字段和行号范围，并单独输出 `test_source_binding_status`；源码未绑定/未核验不会被伪装成已验证。
 - 测试报告中的 PASSED/FAILED 是报告执行结果；测试源码绑定是独立维度。SHA-256 相等仅证明本次读取字节与 mapping 声明一致，不证明来源真实性、测试充分性、测试与报告执行进程的因果关系或业务正确性。
 - mapping 声明了测试源码定位但未提供 `--project-root` 时保持 `TEST_SOURCE_BINDING_NOT_CHECKED`；旧 mapping 未声明源码定位时为 `TEST_SOURCE_BINDING_NOT_PROVIDED`。两种状态均不能声称测试源码位置已核验。
+
+
+## Controlled pytest execution and source-snapshot evidence (S2.30 first implementation)
+
+The run-pytest command is the first controlled execution path. Unlike ingest-test-results, it actually invokes pytest, but only after a separate execution authorization file is supplied.
+
+\`\`\`powershell
+python -m usit run-pytest "C:\path\to\clean-git-project" --evidence-parent "C:\USIT-Evidence" --authorization-file "C:\USIT-Evidence\test-execution-authorization.json" --pytest-arg "tests/"
+\`\`\`
+
+Authorization file schema (usit-test-execution-authorization-v1):
+
+\`\`\`json
+{
+  "schema_version": "usit-test-execution-authorization-v1",
+  "project_root": "C:\path\to\clean-git-project",
+  "evidence_parent": "C:\USIT-Evidence",
+  "allowed_actions": ["run_pytest_on_git_snapshot"],
+  "acknowledges_project_code_execution": true,
+  "approval_ref": "REPLACE_WITH_REVIEWED_APPROVAL_REFERENCE",
+  "authorized_at": "2026-11-03T00:00:00Z",
+  "expires_at": "2026-11-03T01:00:00Z"
+}
+\`\`\`
+
+The authorization must be created and reviewed by the operator; USIT does not auto-authorize execution. The project must be a clean Git worktree: tracked modifications and untracked files are refused. Git submodules, symlinks and special files in the archived source are refused. USIT stages the committed HEAD with git archive, executes pytest in that separate staging tree, and preserves the exact archived source under the run's source_snapshot/ directory. The evidence bundle includes the JUnit report, source manifest, provenance record, pre/post snapshots, logs, final gate report, and a hash-verified evidence manifest.
+
+Import the generated report against the preserved snapshot (not the current checkout):
+
+\`\`\`powershell
+python -m usit ingest-test-results --junit "C:\USIT-Evidence\RUN\junit.xml" --mapping "C:\USIT-Evidence\reviewed-test-mapping.json" --graph "C:\USIT-Evidence\business_knowledge_graph.json" --project-root "C:\USIT-Evidence\RUN\source_snapshot" --provenance-record "C:\USIT-Evidence\RUN\execution-provenance.json" --source-manifest "C:\USIT-Evidence\RUN\source-manifest.json" --out "C:\USIT-Evidence\RUN\test-results.json"
+\`\`\`
+
+Important limits:
+- This is not an OS sandbox. It does not block project test code from accessing the network, host resources, or any credentials the OS makes available through other channels. The child process receives a reduced environment and no inherited API-key variables, but this is not a security boundary.
+- No dependencies are installed by the runner. Pytest and project dependencies must already be available in the selected Python environment.
+- Dirty/untracked worktrees are refused instead of silently omitted; ignored files are not part of the Git archive. The test process runs against committed HEAD only.
+- A passing test outcome does not establish business correctness. The report, source snapshot, source symbol, business mapping, and semantic expected-result checks remain separate dimensions.
+- Provenance is currently UNAUTHENTICATED; STAGED_SNAPSHOT_USED_UNAUTHENTICATED is an execution-path declaration, not cryptographic runner identity. Do not promote it to authenticated or VERIFIED.
+- Tests that modify a source file fail the execution gate. The original archived snapshot is still retained as evidence.
