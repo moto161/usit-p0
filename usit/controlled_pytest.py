@@ -386,7 +386,7 @@ def run_controlled_pytest(
             source_path = PurePosixPath(source_item["path"])
             if len(source_path.parts) > 1:
                 module_roots.add(source_path.parts[0])
-            elif source_path.suffix == ".py":
+            if source_path.suffix == ".py" and source_path.stem != "__init__":
                 module_roots.add(source_path.stem)
         env["USIT_SOURCE_MODULE_ROOTS"] = json.dumps(sorted(module_roots))
         env["USIT_RUNTIME_IMPORTS_PATH"] = str(staging / ".usit-runtime-imports.json")
