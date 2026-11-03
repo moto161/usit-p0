@@ -24,8 +24,8 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         coverage={"schema_version":"usit-code-coverage-results-v1",
             "source_hashes":{"coverage_report_sha256":"3"*64,"mapping_json_sha256":"4"*64,"business_graph_sha256":self.graph_hash},
             "business_function_coverage":[
-                {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0},
-                {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0}]}
+                {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0,"source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}]},
+                {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0,"source_binding_evidence":[{"source_file":"src/delete.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}]}]}
         result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
         by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
         self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED")
@@ -243,7 +243,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         self.assertNotIn("COVERAGE_STATUS_WITH_MISSING_SOURCE_FILES", kinds)
         upload = next(item for item in result["business_function_evidence"]
                       if item["business_function_id"] == "bf-upload")
-        self.assertEqual(upload["code_coverage_detail"]["verification_status"], "UNKNOWN")
+        self.assertEqual(upload["code_coverage_detail"]["verification_status"], "SOURCE_BINDING_NOT_VERIFIED")
 
     def test_coverage_counts_percent_status_and_nonfinite_values_are_cross_checked(self):
         import copy
@@ -263,6 +263,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                 "uncovered_line_count": 2,
                 "mapping_ranges": [{"source_file": "src/upload.py", "line_start": 1, "line_end": 10}],
                 "coverage_source_files_missing": [],
+                "source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],
             }],
         }
 
@@ -304,6 +305,18 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                 # Even malformed non-finite input must not make the emitted artifact invalid JSON.
                 json.dumps(result, allow_nan=False)
 
+    def test_measured_coverage_without_source_binding_is_downgraded(self):
+        coverage = {
+            "schema_version": "usit-code-coverage-results-v1",
+            "source_hashes": {"coverage_report_sha256": "3"*64, "mapping_json_sha256": "4"*64, "business_graph_sha256": self.graph_hash},
+            "business_function_coverage": [{"business_function_id": "bf-upload", "code_coverage_status": "COVERED", "line_coverage_percent": 100.0}],
+        }
+        result = verify_business_function_evidence(self.graph, coverage_results=coverage, business_graph_sha256=self.graph_hash)
+        upload = next(item for item in result["business_function_evidence"] if item["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["code_coverage_status"], "UNKNOWN")
+        self.assertIsNone(upload["line_coverage_percent"])
+        self.assertEqual(upload["code_coverage_detail"]["verification_status"], "SOURCE_BINDING_NOT_VERIFIED")
+        self.assertIn("INVALID_OR_MISSING_COVERAGE_SOURCE_BINDING", {item["kind"] for item in result["evidence_conflicts"]})
     def test_source_hashes_must_be_complete_sha256_digests(self):
         malformed = {
             "schema_version": "usit-test-execution-results-v1",
