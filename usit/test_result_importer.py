@@ -20,6 +20,7 @@ from .safeio import is_reparse, open_no_follow
 from .test_execution_provenance import (
     MAX_MANIFEST_BYTES, MAX_RECORD_BYTES, validate_execution_provenance,
 )
+from .verification_capture import verify_manifest
 
 SCHEMA_VERSION = "usit-test-execution-results-v1"
 MAX_REPORT_BYTES = 20 * 1024 * 1024
@@ -371,6 +372,7 @@ def ingest_junit_results(
     project_root: str | Path | None = None,
     provenance_record_path: str | Path | None = None,
     source_manifest_path: str | Path | None = None,
+    evidence_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Parse JUnit and compute function status using explicit testcase mappings.
 
@@ -383,6 +385,47 @@ def ingest_junit_results(
                     "test_source_line":42,
                     "test_source_file_sha256":"<sha256 of exact test source bytes>"}]}
     """
+    evidence_bundle_validation = None
+    if evidence_dir is not None:
+        if provenance_record_path is None or source_manifest_path is None:
+            raise ValueError("evidence_dir requires provenance_record_path and source_manifest_path")
+        evidence_root = Path(evidence_dir).expanduser().resolve(strict=True)
+        if not evidence_root.is_dir():
+            raise ValueError("evidence_dir must be a directory")
+        expected_inputs = {
+            "junit.xml": Path(report_path).expanduser().resolve(strict=True),
+            "execution-provenance.json": Path(provenance_record_path).expanduser().resolve(strict=True),
+            "source-manifest.json": Path(source_manifest_path).expanduser().resolve(strict=True),
+        }
+        for name, resolved_input in expected_inputs.items():
+            if resolved_input != evidence_root / name:
+                raise ValueError(f"{name} must be read from the exact evidence bundle")
+        if project_root is None or Path(project_root).expanduser().resolve(strict=True) != evidence_root / "source_snapshot":
+            raise ValueError("project_root must point to evidence_dir/source_snapshot")
+        bundle_check = verify_manifest(evidence_root)
+        if not bundle_check.get("valid"):
+            raise ValueError("evidence bundle manifest validation failed: " + "; ".join(bundle_check.get("errors", [])))
+        bundle_manifest = json.loads((evidence_root / "evidence_manifest.json").read_text(encoding="utf-8"))
+        artifact_index = {
+            item.get("path"): item for item in bundle_manifest.get("artifacts", [])
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        source_doc = json.loads(Path(source_manifest_path).read_text(encoding="utf-8"))
+        source_entries = source_doc.get("files") if isinstance(source_doc, dict) else None
+        if not isinstance(source_entries, list):
+            raise ValueError("source manifest files must be a list")
+        for entry in source_entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                raise ValueError("source manifest contains an invalid file entry")
+            artifact = artifact_index.get("source_snapshot/" + entry["path"])
+            if artifact is None or artifact.get("sha256") != entry.get("sha256"):
+                raise ValueError("source manifest entry is not bound to a matching preserved snapshot artifact")
+        evidence_bundle_validation = {
+            "status": "EVIDENCE_BUNDLE_AND_SOURCE_SNAPSHOT_HASHES_VALIDATED",
+            "artifacts_checked": bundle_check.get("artifacts_checked"),
+            "source_file_count": len(source_entries),
+            "authenticity_status": "UNAUTHENTICATED",
+        }
     report_bytes = _read_regular(report_path, MAX_REPORT_BYTES)
     mapping_bytes = _read_regular(mapping_path, 2 * 1024 * 1024)
     graph_bytes = _read_regular(business_graph_path, 50 * 1024 * 1024)
@@ -405,6 +448,7 @@ def ingest_junit_results(
         execution_provenance["record_validation_status"] = "STRUCTURE_AND_DIGESTS_VALIDATED"
         execution_provenance["provenance_authenticity_status"] = "UNAUTHENTICATED"
         execution_provenance["execution_source_binding_status"] = "NOT_ESTABLISHED"
+        execution_provenance["evidence_bundle_validation"] = evidence_bundle_validation or {"status": "NOT_CHECKED"}
     try:
         mapping_doc = json.loads(mapping_bytes)
         graph_doc = json.loads(graph_bytes)
@@ -553,6 +597,7 @@ def ingest_junit_results(
         "business_function_status_counts": dict(sorted(status_counts.items())),
         "business_function_results": function_results,
         "execution_provenance": execution_provenance,
+        "evidence_bundle_validation": evidence_bundle_validation or {"status": "NOT_PROVIDED"},
         "coverage_limitations": [
             "功能关联完全依赖显式 mapping；不使用名称相似度或 endpoint 猜测。",
             "JUnit 测试通过不等于业务需求完整正确，也不等于代码覆盖率。",
