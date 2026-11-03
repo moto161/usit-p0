@@ -220,7 +220,7 @@ class TestResultImporterTests(unittest.TestCase):
             base = Path(td)
             source = base / "tests" / "test_photo.py"
             source.parent.mkdir()
-            source.write_text("def test_upload():\\n    assert True\\n", encoding="utf-8")
+            source.write_text("def test_upload():\n    assert True\n", encoding="utf-8")
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
             mapping_rows = [{
                 "test_case_id": "tests.PhotoTests::test_upload",
@@ -246,7 +246,7 @@ class TestResultImporterTests(unittest.TestCase):
             base = Path(td)
             source = base / "tests" / "test_photo.py"
             source.parent.mkdir()
-            source.write_text("def test_upload():\\n    assert True\\n", encoding="utf-8")
+            source.write_text("def test_upload():\n    assert True\n", encoding="utf-8")
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
             rows = [{
                 "test_case_id": "tests.PhotoTests::test_upload",
@@ -258,7 +258,7 @@ class TestResultImporterTests(unittest.TestCase):
             report, mapping, graph = self._inputs(
                 base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>', rows,
             )
-            source.write_text("def test_upload():\\n    assert False\\n", encoding="utf-8")
+            source.write_text("def test_upload():\n    assert False\n", encoding="utf-8")
             result = ingest_junit_results(report, mapping, graph, project_root=base)
             upload = next(x for x in result["business_function_results"]
                           if x["business_function_id"] == "bf-upload")
@@ -279,7 +279,7 @@ class TestResultImporterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             source = base / "test_upload.py"
-            source.write_text("def test_upload():\\n    pass\\n", encoding="utf-8")
+            source.write_text("def test_upload():\n    pass\n", encoding="utf-8")
             rows = [{
                 "test_case_id": "tests.PhotoTests::test_upload",
                 "business_function_id": "bf-upload",
