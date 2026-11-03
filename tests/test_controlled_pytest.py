@@ -62,6 +62,11 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertEqual(result["execution_source_binding_status"], "STAGED_SNAPSHOT_USED_UNAUTHENTICATED")
         evidence = Path(result["evidence_dir"])
         self.assertTrue(verify_manifest(evidence)["valid"])
+        snapshot_root = Path(result["source_snapshot_root"])
+        self.assertEqual(
+            (snapshot_root / "tests" / "test_smoke.py").read_bytes(),
+            (self.project / "tests" / "test_smoke.py").read_bytes(),
+        )
         provenance = json.loads((evidence / "execution-provenance.json").read_text(encoding="utf-8"))
         manifest = json.loads((evidence / "source-manifest.json").read_text(encoding="utf-8"))
         report = (evidence / "junit.xml").read_bytes()
