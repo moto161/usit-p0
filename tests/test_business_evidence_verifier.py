@@ -243,6 +243,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         self.assertEqual(valid["evidence_conflict_count"], 0)
 
         cases = [
+            ("INCOMPLETE_COVERAGE_MEASUREMENTS", {"covered_line_count": 8}),
             ("INCONSISTENT_COVERAGE_COUNTS", {"uncovered_line_count": 1}),
             ("COVERAGE_PERCENT_COUNT_MISMATCH", {"line_coverage_percent": 75.0}),
             ("COVERAGE_STATUS_COUNT_MISMATCH", {"code_coverage_status": "COVERED"}),
