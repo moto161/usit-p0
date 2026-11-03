@@ -263,7 +263,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                 "uncovered_line_count": 2,
                 "mapping_ranges": [{"source_file": "src/upload.py", "line_start": 1, "line_end": 10}],
                 "coverage_source_files_missing": [],
-                "source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],
+                "source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":10,"line_start":1,"line_end":10}],
             }],
         }
 
