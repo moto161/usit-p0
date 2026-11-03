@@ -18,7 +18,7 @@
 
 ## 环境与安装
 
-- Python 3.10 或更新版本；Python 运行依赖由 `pyproject.toml` 声明（当前固定 `cryptography==50.0.2`），不应再描述为“无第三方依赖”。
+- Python 3.10 或更新版本；Python 运行依赖由 `pyproject.toml` 声明（当前固定 `cryptography==50.0.2`、`pytest==8.3.5`），不应再描述为“无第三方依赖”。
 - Node.js/npm 仅用于启用 JavaScript/TypeScript Compiler API 解析适配器；版本与 TypeScript 依赖见 `package.json` / `package-lock.json`。纯 Python 基础命令不应因未安装 Node 而被误认为 TS 语义已验证。
 - 在仓库根目录执行：
 
