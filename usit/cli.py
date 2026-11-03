@@ -28,6 +28,7 @@ from .ai_orchestrator import load_model_registry, run_ensemble, registry_templat
 from .ai_claim_review import review_claim_ledger_file
 from .ai_evidence_binding import verify_evidence_bindings_file
 from .scan_attestation import load_trusted_public_key, public_key_id, verify_scan_attestation
+from .controlled_pytest import run_controlled_pytest
 
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
@@ -201,6 +202,12 @@ def main(argv=None):
     bt.add_argument('--out',required=True,help='New output directory outside the project root')
     bt.add_argument('--authorization-file',required=True,help='External authorization record for static read-only analysis')
     bt.add_argument('--graph',help='Optional existing knowledge_graph.json from a completed USIT scan; emits business_knowledge_graph.json')
+    rp=sub.add_parser('run-pytest',help='Run pytest only against a clean staged Git HEAD snapshot; requires explicit execution authorization')
+    rp.add_argument('project',help='Absolute Git project root; dirty or untracked worktrees are refused')
+    rp.add_argument('--evidence-parent',required=True,help='Existing absolute directory outside the project for immutable run evidence')
+    rp.add_argument('--authorization-file',required=True,help='External usit-test-execution-authorization-v1 record acknowledging project-code execution')
+    rp.add_argument('--timeout',type=float,default=1800,help='Maximum execution seconds (default: 1800)')
+    rp.add_argument('--pytest-arg',action='append',default=[],help='Allow-listed pytest selector/option; repeat as needed')
     ir=sub.add_parser('ingest-test-results',help='Import completed JUnit XML or pytest JSON results through an explicit mapping; never runs tests')
     ir.add_argument('--junit',required=True,help='JUnit XML report from an already completed test run')
     ir.add_argument('--mapping',required=True,help='Reviewed JSON mapping of exact testcase IDs to business_function_id')
@@ -673,6 +680,16 @@ def main(argv=None):
             summary["result_path"]=str(output)
             print(json.dumps(summary,ensure_ascii=False,indent=2))
             return 0
+        if a.cmd=='run-pytest':
+            if a.timeout <= 0 or a.timeout > 24*60*60:
+                raise ValueError('timeout must be greater than zero and no more than 24 hours')
+            result=run_controlled_pytest(
+                a.project,evidence_parent=a.evidence_parent,
+                authorization_file=a.authorization_file,pytest_args=a.pytest_arg,
+                timeout=a.timeout,
+            )
+            print(json.dumps(result,ensure_ascii=False,indent=2))
+            return 0 if result.get('status')=='PASS' else 1
         if a.cmd=='ingest-test-results':
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError('output must not be a symbolic link')
