@@ -570,5 +570,59 @@ def test_delete():
                 )
 
 
+    def test_runner_source_locator_is_preserved_and_compared_to_reviewed_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            snapshot = base / "source_snapshot"
+            (snapshot / "tests").mkdir(parents=True)
+            source = snapshot / "tests" / "test_photo.py"
+            source.write_text("def test_upload():\n    assert True\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            mapping_rows = [{
+                "test_case_id": "tests.test_photo::test_upload",
+                "business_function_id": "bf-upload",
+                "test_source_file": "tests/test_photo.py",
+                "test_source_line": 1,
+                "test_source_file_sha256": digest,
+                "test_source_symbol": "test_upload",
+                "pytest_nodeid": "tests/test_photo.py::test_upload",
+            }]
+            xml = """<testsuite><testcase classname="tests.test_photo" name="test_upload">
+              <properties>
+                <property name="usit_source_file" value="tests/test_photo.py"/>
+                <property name="usit_source_line" value="1"/>
+                <property name="usit_source_symbol" value="test_upload"/>
+                <property name="usit_nodeid" value="tests/test_photo.py::test_upload"/>
+              </properties>
+            </testcase></testsuite>"""
+            report, mapping, graph = self._inputs(base, xml, mapping_rows)
+            result = ingest_junit_results(report, mapping, graph, project_root=snapshot)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            testcase = upload["mapped_test_cases"][0]
+            self.assertEqual(
+                testcase["test_source_report_locator_status"],
+                "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED",
+            )
+            self.assertEqual(
+                testcase["test_source_symbol_evidence"]["status"],
+                "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED",
+            )
+            self.assertEqual(
+                testcase["test_source_binding_status"],
+                "TEST_SOURCE_BYTES_MATCHED",
+            )
+
+            mismatched_xml = xml.replace('value="test_upload"/>', 'value="test_delete"/>', 1)
+            report.write_text(mismatched_xml, encoding="utf-8")
+            mismatch = ingest_junit_results(report, mapping, graph, project_root=snapshot)
+            mismatch_upload = next(x for x in mismatch["business_function_results"]
+                                   if x["business_function_id"] == "bf-upload")
+            self.assertEqual(
+                mismatch_upload["mapped_test_cases"][0]["test_source_report_locator_status"],
+                "REPORT_SOURCE_LOCATOR_MISMATCH",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
