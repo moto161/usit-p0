@@ -114,7 +114,7 @@ def _safe_archive_path(name: str) -> str:
     if not isinstance(name, str) or not name or "\\" in name:
         raise ValueError("Git archive contains an invalid path")
     pure = PurePosixPath(name)
-    if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts) or pure.as_posix() != name:
+    if pure.is_absolute() or ":" in pure.parts[0] or any(part in ("", ".", "..") for part in pure.parts) or pure.as_posix() != name:
         raise ValueError(f"Git archive contains unsafe path: {name!r}")
     return name
 
@@ -231,6 +231,9 @@ def run_controlled_pytest(
     status = _git(project, "status", "--porcelain=v1", "--untracked-files=all", limit=4 * 1024 * 1024)
     if status.strip():
         raise ValueError("project Git worktree is not clean; commit or separately review all tracked/untracked changes first")
+    index_entries = _git(project, "ls-files", "--stage", "-z", limit=8 * 1024 * 1024)
+    if any(entry.startswith(b"160000 ") for entry in index_entries.split(b"\\0") if entry):
+        raise ValueError("Git submodules are not supported by the staged snapshot runner")
     head = _git(project, "rev-parse", "HEAD", limit=4096).decode("ascii").strip()
     archive = _git(project, "archive", "--format=tar", "HEAD")
     staging = Path(tempfile.mkdtemp(prefix=".usit-stage-", dir=parent)).resolve()
@@ -280,6 +283,11 @@ def run_controlled_pytest(
                 "evidence_dir": str(evidence), "reason": f"JUnit report is invalid: {exc}",
                 "provenance_authenticity_status": "UNAUTHENTICATED",
             }
+        snapshot_root = evidence / "source_snapshot"
+        snapshot_root.mkdir(mode=0o700, exist_ok=False)
+        archived_files = _extract_archive(archive, snapshot_root)
+        if archived_files != source_files:
+            raise ValueError("preserved source snapshot differs from the executed Git archive")
         (evidence / "junit.xml").write_bytes(report_bytes)
         (evidence / "source-manifest.json").write_bytes(
             (json.dumps(source_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
@@ -318,6 +326,7 @@ def run_controlled_pytest(
         gate["pytest_report"] = "junit.xml"
         gate["pytest_report_sha256"] = validation["report_sha256"]
         gate["source_manifest"] = "source-manifest.json"
+        gate["source_snapshot_root"] = "source_snapshot/"
         gate["source_manifest_sha256"] = validation["source_manifest_sha256"]
         gate["pytest_exit_status"] = capture.status
         gate_path.write_text(json.dumps(gate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -327,6 +336,9 @@ def run_controlled_pytest(
         for name in ("junit.xml", "source-manifest.json", "execution-provenance.json"):
             if name not in names:
                 manifest["artifacts"].append(_artifact_record(evidence, name))
+        for item in source_files:
+            snapshot_name = "source_snapshot/" + item["path"]
+            manifest["artifacts"].append(_artifact_record(evidence, snapshot_name))
         for item in manifest["artifacts"]:
             if item["path"] == "final_gate_report.json":
                 item.update(_artifact_record(evidence, "final_gate_report.json"))
@@ -343,6 +355,7 @@ def run_controlled_pytest(
             "pytest_report": str(evidence / "junit.xml"),
             "provenance_record": str(provenance_path),
             "source_manifest": str(evidence / "source-manifest.json"),
+            "source_snapshot_root": str(snapshot_root),
             "evidence_manifest_valid": verified["valid"],
             "evidence_manifest_errors": verified["errors"],
             "provenance_authenticity_status": "UNAUTHENTICATED",
