@@ -480,8 +480,17 @@ def test_delete():
         )
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
+            mapping_rows = [{
+                "test_case_id": "tests.PhotoTests::test_upload",
+                "business_function_id": "bf-upload",
+                "test_source_file": "tests/test_photo.py",
+                "test_source_line": 1,
+                "test_source_file_sha256": "a" * 64,
+            }]
             report, mapping, graph = self._inputs(
-                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>'
+                base,
+                '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>',
+                mapping_rows,
             )
             report_bytes = report.read_bytes()
             manifest = {
@@ -527,6 +536,12 @@ def test_delete():
             self.assertEqual(
                 result["execution_provenance"]["execution_source_binding_status"],
                 "NOT_ESTABLISHED",
+            )
+            mapped_upload = next(x for x in result["business_function_results"]
+                                 if x["business_function_id"] == "bf-upload")
+            self.assertEqual(
+                mapped_upload["mapped_test_cases"][0]["test_source_snapshot_binding_status"],
+                "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED",
             )
             self.assertEqual(
                 next(x for x in result["business_function_results"]
