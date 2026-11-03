@@ -184,6 +184,33 @@ def _validate_pytest_args(args: Sequence[str]) -> list[str]:
     return list(args)
 
 
+def _staging_inventory_errors(staging: Path, source_files: Sequence[dict[str, Any]]) -> list[str]:
+    """Reject files added outside the runner-owned report/temp locations."""
+    expected = {item["path"] for item in source_files}
+    errors: list[str] = []
+    for current, directories, filenames in os.walk(staging, topdown=True, followlinks=False):
+        base = Path(current)
+        for name in list(directories):
+            candidate = base / name
+            info = candidate.lstat()
+            if candidate.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:
+                errors.append(f"reparse directory created during test: {candidate.relative_to(staging).as_posix()}")
+                directories.remove(name)
+        for name in filenames:
+            candidate = base / name
+            relative = candidate.relative_to(staging).as_posix()
+            info = candidate.lstat()
+            if candidate.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400 or not candidate.is_file():
+                errors.append(f"unsafe non-regular file created during test: {relative}")
+                continue
+            if relative in expected or relative == ".usit-junit.xml":
+                continue
+            if relative.startswith(".usit-home/") or relative.startswith(".usit-tmp/"):
+                continue
+            errors.append(f"unexpected file created during test: {relative}")
+    return errors
+
+
 def _artifact_record(directory: Path, name: str) -> dict[str, Any]:
     path = directory / name
     raw = path.read_bytes()
@@ -265,6 +292,7 @@ def run_controlled_pytest(
             approval_ref=authorization["approval_ref"], cwd=staging, timeout=timeout,
         )
         evidence = Path(capture.evidence_dir)
+        inventory_errors = _staging_inventory_errors(staging, source_files)
         report_source = pytest_report
         if not report_source.is_file():
             return {
@@ -329,6 +357,11 @@ def run_controlled_pytest(
         gate["source_snapshot_root"] = "source_snapshot/"
         gate["source_manifest_sha256"] = validation["source_manifest_sha256"]
         gate["pytest_exit_status"] = capture.status
+        gate["source_tree_inventory_status"] = "CLEAN" if not inventory_errors else "CHANGED_OR_UNSAFE"
+        gate["source_tree_inventory_errors"] = inventory_errors
+        if inventory_errors and gate.get("status") == "PASS":
+            gate["status"] = "FAIL"
+            gate.setdefault("errors", []).extend(inventory_errors)
         gate_path.write_text(json.dumps(gate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         manifest_path = evidence / "evidence_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -346,6 +379,8 @@ def run_controlled_pytest(
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         verified = verify_manifest(evidence)
         final_status = capture.status if verified["valid"] else "NOT_VERIFIED"
+        if inventory_errors and final_status == "PASS":
+            final_status = "FAIL"
         return {
             "status": final_status,
             "capture": capture.to_dict(),
@@ -358,6 +393,8 @@ def run_controlled_pytest(
             "source_snapshot_root": str(snapshot_root),
             "evidence_manifest_valid": verified["valid"],
             "evidence_manifest_errors": verified["errors"],
+            "source_tree_inventory_status": "CLEAN" if not inventory_errors else "CHANGED_OR_UNSAFE",
+            "source_tree_inventory_errors": inventory_errors,
             "provenance_authenticity_status": "UNAUTHENTICATED",
             "execution_source_binding_status": "STAGED_SNAPSHOT_USED_UNAUTHENTICATED",
             "execution_provenance_validation": "STRUCTURE_AND_DIGESTS_VALIDATED",
