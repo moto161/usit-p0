@@ -67,6 +67,10 @@ class TestReportAdapters(unittest.TestCase):
             map_line_coverage_to_functions({}, {"schema_version":"usit-coverage-mapping-v1",
                 "mappings":[{"business_function_id":"bf-upload","source_file":"../secret.py",
                 "line_start":1,"line_end":2}]}, graph)
+        with self.assertRaisesRegex(ValueError, "normalized relative path"):
+            map_line_coverage_to_functions({}, {"schema_version":"usit-coverage-mapping-v1",
+                "mappings":[{"business_function_id":"bf-upload","source_file":"C:outside.py",
+                "line_start":1,"line_end":2}]}, graph)
         with self.assertRaisesRegex(ValueError, "unknown business_function_id"):
             map_line_coverage_to_functions({}, {"schema_version":"usit-coverage-mapping-v1",
                 "mappings":[{"business_function_id":"missing","source_file":"src/a.py",
