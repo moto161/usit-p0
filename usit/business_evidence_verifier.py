@@ -162,7 +162,9 @@ def verify_business_function_evidence(
                             "reported_status": cs,
                             "derived_status": expected_status,
                         })
-            elif percent_valid and percent is not None:
+            elif percent_valid and percent is not None and any(
+                value is not None for value in counts.values()
+            ):
                 conflicts.append({
                     "kind": "INCOMPLETE_COVERAGE_MEASUREMENTS",
                     "business_function_id": function_id,
