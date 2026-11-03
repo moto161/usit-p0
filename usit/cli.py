@@ -712,6 +712,11 @@ def main(argv=None):
                 provenance.get('record_validation_status','NOT_ESTABLISHED')
                 if isinstance(provenance,dict) else 'NOT_PROVIDED'
             )
+            summary['evidence_bundle_validation']=result.get('evidence_bundle_validation',{'status':'NOT_PROVIDED'})
+            summary['execution_source_binding_status']=(
+                provenance.get('execution_source_binding_status','NOT_ESTABLISHED')
+                if isinstance(provenance,dict) else 'NOT_ESTABLISHED'
+            )
             summary['provenance_authenticity_status']=(
                 provenance.get('provenance_authenticity_status','UNAUTHENTICATED')
                 if isinstance(provenance,dict) else 'NOT_PROVIDED'
