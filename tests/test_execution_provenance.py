@@ -104,5 +104,48 @@ class TestExecutionProvenanceTests(unittest.TestCase):
             )
 
 
+    def test_duplicate_manifest_paths_are_rejected(self):
+        manifest = {"schema_version": "usit-manifest-v1", "files": [
+            {"path": "tests/test_x.py", "sha256": "a" * 64},
+            {"path": "tests/test_x.py", "sha256": "b" * 64},
+        ]}
+        self.record["source_snapshot"]["file_count"] = 2
+        self.record["source_snapshot"]["manifest_sha256"] = sha256_hex(canonical_json_bytes(manifest))
+        with self.assertRaisesRegex(ValueError, "duplicate source manifest path"):
+            validate_execution_provenance(
+                json.dumps(self.record).encode(), self.report, json.dumps(manifest).encode()
+            )
+
+    def test_case_colliding_manifest_paths_are_rejected(self):
+        manifest = {"schema_version": "usit-manifest-v1", "files": [
+            {"path": "Tests/test_x.py", "sha256": "a" * 64},
+            {"path": "tests/test_x.py", "sha256": "b" * 64},
+        ]}
+        self.record["source_snapshot"]["file_count"] = 2
+        self.record["source_snapshot"]["manifest_sha256"] = sha256_hex(canonical_json_bytes(manifest))
+        with self.assertRaisesRegex(ValueError, "case-colliding"):
+            validate_execution_provenance(
+                json.dumps(self.record).encode(), self.report, json.dumps(manifest).encode()
+            )
+
+    def test_manifest_file_digest_and_path_are_validated(self):
+        invalid_manifests = [
+            {"schema_version": "usit-manifest-v1", "files": [
+                {"path": "../outside.py", "sha256": "a" * 64}
+            ]},
+            {"schema_version": "usit-manifest-v1", "files": [
+                {"path": "tests/test_x.py", "sha256": "A" * 64}
+            ]},
+        ]
+        for manifest in invalid_manifests:
+            with self.subTest(manifest=manifest):
+                self.record["source_snapshot"]["file_count"] = 1
+                self.record["source_snapshot"]["manifest_sha256"] = sha256_hex(canonical_json_bytes(manifest))
+                with self.assertRaises(ValueError):
+                    validate_execution_provenance(
+                        json.dumps(self.record).encode(), self.report, json.dumps(manifest).encode()
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
