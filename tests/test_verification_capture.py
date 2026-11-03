@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -208,6 +209,24 @@ class VerificationCaptureTests(unittest.TestCase):
                 approval_ref=" ",
             )
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+
+    def test_explicit_child_environment_is_passed_without_shell(self):
+        env = os.environ.copy()
+        env["USIT_CAPTURE_ENV_TEST"] = "expected-value"
+        result = capture.capture_run(
+            [sys.executable, "-c", "import os; print(os.environ['USIT_CAPTURE_ENV_TEST'])"],
+            project_root=self.project,
+            evidence_parent=self.evidence_parent,
+            files=["input.txt"],
+            approval_ref="unit-test-authorization",
+            env=env,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(
+            (Path(result.evidence_dir) / "stdout.log").read_text(encoding="utf-8").strip(),
+            "expected-value",
+        )
 
 
 if __name__ == "__main__":
