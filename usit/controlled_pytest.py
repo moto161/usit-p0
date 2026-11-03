@@ -235,7 +235,7 @@ def _staging_inventory_errors(staging: Path, source_files: Sequence[dict[str, An
             if candidate.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400 or not candidate.is_file():
                 errors.append(f"unsafe non-regular file created during test: {relative}")
                 continue
-            if relative in expected or relative in {".usit-junit.xml", ".usit_runner_plugin.py"}:
+            if relative in expected or relative in {".usit-junit.xml", "_usit_runner_plugin.py"}:
                 continue
             if relative.startswith(".usit-home/") or relative.startswith(".usit-tmp/"):
                 continue
@@ -302,7 +302,7 @@ def run_controlled_pytest(
         source_manifest_bytes = canonical_json_bytes(source_manifest)
         manifest_hash = sha256_hex(source_manifest_bytes)
         pytest_report = staging / ".usit-junit.xml"
-        plugin_path = staging / ".usit_runner_plugin.py"
+        plugin_path = staging / "_usit_runner_plugin.py"
         plugin_path.write_text(_RUNNER_PLUGIN, encoding="utf-8")
         plugin_digest = sha256_hex(_RUNNER_PLUGIN.encode("utf-8"))
         command = [
