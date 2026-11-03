@@ -474,5 +474,86 @@ def test_delete():
         }, "function test_upload() {}")
         self.assertEqual(unsupported["status"], "TEST_SOURCE_SYMBOL_NOT_SUPPORTED")
 
+    def test_execution_provenance_is_verified_before_report_import(self):
+        from usit.test_execution_provenance import (
+            SCHEMA_VERSION, canonical_json_bytes, sha256_hex,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>'
+            )
+            report_bytes = report.read_bytes()
+            manifest = {
+                "schema_version": "usit-manifest-v1",
+                "files": [{"path": "tests/test_photo.py", "sha256": "a" * 64}],
+            }
+            manifest_path = base / "source-manifest.json"
+            manifest_path.write_bytes(json.dumps(manifest).encode("utf-8"))
+            provenance = {
+                "schema_version": SCHEMA_VERSION,
+                "execution_id": "ci-run-123",
+                "started_at": "2026-11-03T10:00:00Z",
+                "completed_at": "2026-11-03T10:00:02Z",
+                "runner": {"name": "pytest", "version": "8.3.5"},
+                "report_format": "JUNIT_XML",
+                "report_relative_path": "reports/junit.xml",
+                "report_sha256": sha256_hex(report_bytes),
+                "source_snapshot": {
+                    "manifest_schema_version": "usit-manifest-v1",
+                    "manifest_sha256": sha256_hex(canonical_json_bytes(manifest)),
+                    "file_count": 1,
+                    "capture_method": "PRE_EXECUTION_READ_ONLY_CAPTURE",
+                },
+                "working_tree_state": {"state": "CLEAN", "untracked_files": "INCLUDED"},
+                "command_fingerprint": "b" * 64,
+                "environment_fingerprint": "c" * 64,
+            }
+            record_path = base / "execution-provenance.json"
+            record_path.write_text(json.dumps(provenance), encoding="utf-8")
+            result = ingest_junit_results(
+                report, mapping, graph,
+                provenance_record_path=record_path,
+                source_manifest_path=manifest_path,
+            )
+            self.assertEqual(
+                result["execution_provenance"]["record_validation_status"],
+                "STRUCTURE_AND_DIGESTS_VALIDATED",
+            )
+            self.assertEqual(
+                result["execution_provenance"]["provenance_authenticity_status"],
+                "UNAUTHENTICATED",
+            )
+            self.assertEqual(
+                result["execution_provenance"]["execution_source_binding_status"],
+                "NOT_ESTABLISHED",
+            )
+            self.assertEqual(
+                next(x for x in result["business_function_results"]
+                     if x["business_function_id"] == "bf-upload")["execution_status"],
+                "PASSED",
+            )
+
+            report.write_bytes(report_bytes + b" ")
+            with self.assertRaisesRegex(ValueError, "report_sha256"):
+                ingest_junit_results(
+                    report, mapping, graph,
+                    provenance_record_path=record_path,
+                    source_manifest_path=manifest_path,
+                )
+
+    def test_execution_provenance_inputs_must_be_paired(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase name="test_upload"/></testsuite>'
+            )
+            with self.assertRaisesRegex(ValueError, "must be provided together"):
+                ingest_junit_results(
+                    report, mapping, graph,
+                    provenance_record_path=base / "record.json",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
