@@ -161,16 +161,20 @@ def _verify_test_source_binding(item: dict[str, Any], project_root: str | Path |
         return {"status": "TEST_SOURCE_BINDING_INVALID", "reason": type(exc).__name__}
     actual = _sha256(raw)
     if actual != digest:
-        return {"status": "TEST_SOURCE_HASH_MISMATCH", "actual_sha256": actual}
+        return {"status": "TEST_SOURCE_HASH_MISMATCH", "expected_sha256": digest,
+                "actual_sha256": actual, "test_source_file": normalized, "test_source_line": line}
     try:
         source_text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
-        return {"status": "TEST_SOURCE_ENCODING_UNSUPPORTED", "actual_sha256": actual}
+        return {"status": "TEST_SOURCE_ENCODING_UNSUPPORTED", "expected_sha256": digest,
+                "actual_sha256": actual, "test_source_file": normalized, "test_source_line": line}
     line_count = len(source_text.splitlines())
     if line > line_count:
         return {"status": "TEST_SOURCE_LINE_OUT_OF_BOUNDS",
-                "actual_sha256": actual, "source_line_count": line_count}
-    return {"status": "TEST_SOURCE_BYTES_MATCHED", "actual_sha256": actual,
+                "expected_sha256": digest, "actual_sha256": actual,
+                "source_line_count": line_count, "test_source_file": normalized,
+                "test_source_line": line}
+    return {"status": "TEST_SOURCE_BYTES_MATCHED", "expected_sha256": digest, "actual_sha256": actual,
             "source_line_count": line_count, "test_source_file": normalized,
             "test_source_line": line}
 
