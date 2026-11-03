@@ -336,6 +336,7 @@ def ingest_junit_results(
             source_binding = _verify_test_source_binding(mapping_item, project_root)
             verified_source_text = source_binding.pop("_verified_source_text", None)
             symbol_binding = _verify_python_test_symbol(mapping_item, verified_source_text)
+            symbol_binding.setdefault("declared_test_source_symbol", mapping_item.get("test_source_symbol"))
             source_binding.setdefault("declared_test_source_file", mapping_item.get("test_source_file"))
             source_binding.setdefault("declared_test_source_line", mapping_item.get("test_source_line"))
             source_binding.setdefault("declared_test_source_file_sha256", mapping_item.get("test_source_file_sha256"))
