@@ -140,3 +140,22 @@ STOP conditions:
 - Business-function semantic correctness: NOT ESTABLISHED by these artifacts alone.
 
 This contract is the acceptance boundary for the next code implementation. Do not report the project evidence chain complete until the relevant dimensions have independent, adversarially tested evidence.
+
+
+## 9. Implementation follow-up — 2026-11-03
+
+The first validator slice is now present on `feature/understanding-to-test-v1`:
+
+- `usit/test_execution_provenance.py` defines the `usit-test-execution-provenance-v1` structural contract, canonical JSON hashing, duplicate-key rejection, UTC timestamp ordering, report-byte digest verification, source-manifest digest/schema/file-count verification, safe relative report paths, and explicit working-tree/untracked-file states.
+- The validator deliberately returns `provenance_authenticity_status=UNAUTHENTICATED`. Hash consistency is not runner authentication and does not prove which source files the test process loaded.
+- Reproducibility is only labelled `CANDIDATE_ONLY` for a declared clean tree with untracked files included; dirty/unknown trees remain `NOT_ESTABLISHED`.
+- `tests/test_execution_provenance.py` adds adversarial tests for report tampering, manifest mismatch, duplicate JSON keys, invalid timestamps, path traversal/absolute paths, dirty trees, and non-finite JSON values.
+- The new test module is included in the required Linux business-understanding gate and Windows trust-boundary gate.
+
+Implementation commits:
+- Validator: `7b95397d6325e67a8a40cc5330edadf55b0b8174`
+- Tests: `4f67569b8503852c188a79e9b7e5bb85dbd11def`
+- Required CI wiring: `7e634ce4df7fbb5dd95aeb4c9a0d961e9f4cfab4`
+- Test-fixture correction: `b36db234030be1a94297787f2c803313d476cfb3`
+
+This is **schema/integrity validation only**. The controlled pytest runner, execution-time source snapshot capture, report-to-run binding, authenticated runner origin, and importer integration remain **NOT IMPLEMENTED**. Do not promote any execution/source provenance status on the basis of this validator alone.
