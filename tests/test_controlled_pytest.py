@@ -153,5 +153,27 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertTrue(result["evidence_manifest_valid"])
 
 
+    def test_untracked_file_created_during_test_fails_gate(self):
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "from pathlib import Path\n"
+            "def test_creates_untracked_file():\n"
+            "    Path('generated-during-test.py').write_text('not in source manifest')\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture creates an untracked file")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["source_tree_inventory_status"], "CHANGED_OR_UNSAFE")
+        self.assertTrue(any("generated-during-test.py" in item
+                            for item in result["source_tree_inventory_errors"]))
+        self.assertTrue(result["evidence_manifest_valid"])
+
+
 if __name__ == "__main__":
     unittest.main()
