@@ -63,6 +63,7 @@ def pytest_runtest_makereport(item, call):
     report = outcome.get_result()
     if call.when == "call":
         report.user_properties = list(getattr(item, "user_properties", []))
+"""
 
 _ALLOWED_PYTEST_OPTIONS = {"-q", "-v", "-vv", "-x", "--maxfail=1", "--maxfail=2",
                            "--maxfail=3", "--tb=short", "--tb=long", "--tb=line",
