@@ -145,6 +145,22 @@ def validate_execution_provenance(
     files = manifest.get("files")
     if not isinstance(files, list) or len(files) != file_count:
         raise ValueError("source manifest files count does not match source_snapshot.file_count")
+    source_file_hashes: dict[str, str] = {}
+    folded_paths: dict[str, str] = {}
+    for index, entry in enumerate(files):
+        if not isinstance(entry, dict):
+            raise ValueError(f"source manifest files[{index}] must be an object")
+        relative = _safe_relative_path(entry.get("path"), f"source manifest files[{index}].path")
+        digest = _require_hash(entry.get("sha256"), f"source manifest files[{index}].sha256")
+        folded = relative.casefold()
+        if relative in source_file_hashes:
+            raise ValueError(f"duplicate source manifest path: {relative}")
+        if folded in folded_paths and folded_paths[folded] != relative:
+            raise ValueError(
+                f"case-colliding source manifest paths: {folded_paths[folded]} and {relative}"
+            )
+        folded_paths[folded] = relative
+        source_file_hashes[relative] = digest
     capture_method = snapshot.get("capture_method")
     if not isinstance(capture_method, str) or not capture_method.strip():
         raise ValueError("source_snapshot.capture_method is required")
@@ -175,6 +191,7 @@ def validate_execution_provenance(
         "report_sha256": actual_report_hash,
         "source_manifest_sha256": actual_manifest_hash,
         "source_file_count": file_count,
+        "source_manifest_file_hashes": dict(sorted(source_file_hashes.items())),
         "limitations": [
             "Digest consistency does not authenticate the record creator.",
             "This validator does not prove the test process loaded the declared source snapshot.",
