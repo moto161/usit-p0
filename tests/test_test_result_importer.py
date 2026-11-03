@@ -291,6 +291,15 @@ class TestResultImporterTests(unittest.TestCase):
                           if x["business_function_id"] == "bf-upload")
             self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
                              "TEST_SOURCE_BINDING_INVALID")
+            rows[0]["test_source_file"] = "tests/test_photo.py:stream"
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>', rows,
+            )
+            result = ingest_junit_results(report, mapping, graph, project_root=base)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
+                             "TEST_SOURCE_BINDING_INVALID")
 
     def test_test_source_binding_without_root_is_not_checked(self):
         with tempfile.TemporaryDirectory() as td:
