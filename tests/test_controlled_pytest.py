@@ -115,5 +115,43 @@ class ControlledPytestTests(unittest.TestCase):
             )
 
 
+    def test_failed_pytest_keeps_report_and_never_passes_gate(self):
+        (self.project / "tests" / "test_smoke.py").write_text(
+            "def test_failure():\n    assert False, 'expected fixture failure'\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "make fixture test fail")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertTrue(Path(result["pytest_report"]).is_file())
+        self.assertTrue(result["evidence_manifest_valid"])
+        self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
+
+    def test_source_mutation_during_test_fails_gate_and_preserves_original_snapshot(self):
+        source = self.project / "tests" / "test_smoke.py"
+        original = (
+            "from pathlib import Path\n"
+            "def test_mutates_staged_source():\n"
+            "    Path(__file__).write_text('def test_replaced(): assert True\\\\n')\n"
+        )
+        source.write_text(original, encoding="utf-8")
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture attempts source mutation")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "FAIL")
+        snapshot = Path(result["source_snapshot_root"]) / "tests" / "test_smoke.py"
+        self.assertEqual(snapshot.read_text(encoding="utf-8"), original)
+        self.assertTrue(result["evidence_manifest_valid"])
+
+
 if __name__ == "__main__":
     unittest.main()
