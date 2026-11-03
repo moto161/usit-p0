@@ -39,32 +39,32 @@ _RUNNER_PLUGIN = """\
 from pathlib import Path
 import pytest
 
-@pytest.hookimpl(hookwrapper=True, trylast=True)
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
+    if call.when == "call":
+        function = getattr(item, "function", None)
+        code = getattr(function, "__code__", None)
+        if code is not None:
+            try:
+                root = Path(str(item.config.rootpath)).resolve()
+                source = Path(code.co_filename).resolve()
+                relative = source.relative_to(root).as_posix()
+            except (OSError, ValueError):
+                relative = None
+            if relative and not relative.startswith("../") and relative != "..":
+                properties = [
+                    ("usit_source_file", relative),
+                    ("usit_source_line", str(code.co_firstlineno)),
+                    ("usit_source_symbol", getattr(function, "__qualname__", getattr(function, "__name__", ""))),
+                    ("usit_nodeid", str(item.nodeid)),
+                ]
+                item.user_properties = list(getattr(item, "user_properties", [])) + properties
     outcome = yield
     report = outcome.get_result()
-    if call.when != "call":
-        return
-    function = getattr(item, "function", None)
-    code = getattr(function, "__code__", None)
-    if code is None:
-        return
-    try:
-        root = Path(str(item.config.rootpath)).resolve()
-        source = Path(code.co_filename).resolve()
-        relative = source.relative_to(root).as_posix()
-    except (OSError, ValueError):
-        return
-    if relative.startswith("../") or relative == "..":
-        return
-    properties = [
-        ("usit_source_file", relative),
-        ("usit_source_line", str(code.co_firstlineno)),
-        ("usit_source_symbol", getattr(function, "__qualname__", getattr(function, "__name__", ""))),
-        ("usit_nodeid", str(item.nodeid)),
-    ]
-    report.user_properties = list(getattr(report, "user_properties", [])) + properties
+    if call.when == "call":
+        report.user_properties = list(getattr(item, "user_properties", []))
 """
+
 
 _ALLOWED_PYTEST_OPTIONS = {"-q", "-v", "-vv", "-x", "--maxfail=1", "--maxfail=2",
                            "--maxfail=3", "--tb=short", "--tb=long", "--tb=line",
