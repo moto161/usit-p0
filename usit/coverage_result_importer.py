@@ -91,7 +91,7 @@ def _verify_source_bindings(mapping: dict[str, Any], project_root: str | Path) -
             raise ValueError(f"coverage mapping entry {index} has invalid source_file")
         normalized = relative.replace(chr(92), "/")
         pure = PurePosixPath(normalized)
-        if (pure.is_absolute() or (len(normalized) >= 2 and normalized[1] == ":")
+        if (pure.is_absolute() or ":" in normalized
                 or (pure.parts and pure.parts[0].endswith(":"))
                 or any(p in {"", ".", ".."} for p in pure.parts)):
             raise ValueError(f"coverage mapping entry {index} source_file must be a normalized relative path")
