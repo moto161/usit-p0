@@ -217,6 +217,7 @@ def main(argv=None):
     ir.add_argument('--project-root',help='Absolute source-tree root for read-only verification of mapped test source files')
     ir.add_argument('--provenance-record',help='Optional controlled-runner execution provenance JSON')
     ir.add_argument('--source-manifest',help='Source snapshot manifest paired with --provenance-record')
+    ir.add_argument('--evidence-dir',help='Optional complete controlled-run evidence bundle; verifies every artifact and snapshot file')
     cr=sub.add_parser('ingest-coverage',help='Import coverage.py JSON or JaCoCo XML through explicit source-line mappings; never runs tests')
     cr.add_argument('--coverage',required=True,help='Completed coverage report file')
     cr.add_argument('--mapping',required=True,help='Reviewed source_file + line range to business_function_id mapping JSON')
@@ -699,6 +700,7 @@ def main(argv=None):
                 a.junit,a.mapping,a.graph,a.format,a.project_root,
                 provenance_record_path=a.provenance_record,
                 source_manifest_path=a.source_manifest,
+                evidence_dir=a.evidence_dir,
             )
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
