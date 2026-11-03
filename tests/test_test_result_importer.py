@@ -215,6 +215,87 @@ class TestResultImporterTests(unittest.TestCase):
             )
 
 
+    def test_test_source_binding_matches_real_file_and_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            source = base / "tests" / "test_photo.py"
+            source.parent.mkdir()
+            source.write_text("def test_upload():\\n    assert True\\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            mapping_rows = [{
+                "test_case_id": "tests.PhotoTests::test_upload",
+                "business_function_id": "bf-upload",
+                "test_source_file": "tests/test_photo.py",
+                "test_source_line": 1,
+                "test_source_file_sha256": digest,
+            }]
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>',
+                mapping_rows,
+            )
+            result = ingest_junit_results(report, mapping, graph, project_root=base)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["execution_status"], "PASSED")
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
+                             "TEST_SOURCE_BYTES_MATCHED")
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_evidence"]["source_line_count"], 2)
+
+    def test_test_source_binding_fails_closed_for_changed_file_and_unsafe_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            source = base / "tests" / "test_photo.py"
+            source.parent.mkdir()
+            source.write_text("def test_upload():\\n    assert True\\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            rows = [{
+                "test_case_id": "tests.PhotoTests::test_upload",
+                "business_function_id": "bf-upload",
+                "test_source_file": "tests/test_photo.py",
+                "test_source_line": 1,
+                "test_source_file_sha256": digest,
+            }]
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>', rows,
+            )
+            source.write_text("def test_upload():\\n    assert False\\n", encoding="utf-8")
+            result = ingest_junit_results(report, mapping, graph, project_root=base)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["execution_status"], "PASSED")
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
+                             "TEST_SOURCE_HASH_MISMATCH")
+            rows[0]["test_source_file"] = "../outside.py"
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>', rows,
+            )
+            result = ingest_junit_results(report, mapping, graph, project_root=base)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
+                             "TEST_SOURCE_BINDING_INVALID")
+
+    def test_test_source_binding_without_root_is_not_checked(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            source = base / "test_upload.py"
+            source.write_text("def test_upload():\\n    pass\\n", encoding="utf-8")
+            rows = [{
+                "test_case_id": "tests.PhotoTests::test_upload",
+                "business_function_id": "bf-upload",
+                "test_source_file": "test_upload.py",
+                "test_source_line": 1,
+                "test_source_file_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }]
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>', rows,
+            )
+            result = ingest_junit_results(report, mapping, graph)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["mapped_test_cases"][0]["test_source_binding_status"],
+                             "TEST_SOURCE_BINDING_NOT_CHECKED")
+
     def test_cli_writes_result_file_without_running_tests(self):
         from contextlib import redirect_stdout
         from io import StringIO
