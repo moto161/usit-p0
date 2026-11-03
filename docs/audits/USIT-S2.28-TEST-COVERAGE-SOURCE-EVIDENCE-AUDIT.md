@@ -115,3 +115,10 @@ Recommended next implementation slice:
 - Coverage report-to-function mapping: explicit and graph-hash-bound; real-source byte/line binding is not implemented.
 - Stronger claim "coverage evidence is bound to the current real source locations": **NOT ESTABLISHED**.
 - Next action: implement source-byte and line-boundary verification, then add adversarial regression coverage and rerun Linux/Windows/Business Understanding CI.
+
+
+## 8. Superseding follow-up
+
+This S2.28 document is a historical audit snapshot. Its implementation-gap statements in sections 4–7 are superseded by [USIT S2.29 — Evidence-chain follow-up audit](USIT-S2.29-EVIDENCE-CHAIN-FOLLOWUP-AUDIT.md), audited at HEAD `74cdf17df1d97005e8e667eba7ffb687c7d61d71`. The coverage importer now supports explicit project-root source-byte SHA-256 and line-boundary verification; the test-result importer now supports test-source byte/line locator verification. These are provenance controls, not proof that a named test symbol executed or that a mapped range semantically implements a business function.
+
+S2.29 also records that all four required PR workflow jobs passed while the non-gating diagnostic full-repository baseline suites reported failures/errors on both Ubuntu and Windows. Do not interpret the workflow-job green status as a full-suite regression PASS.
