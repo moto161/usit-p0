@@ -378,7 +378,7 @@ def verify_business_function_evidence(
             "code_coverage_detail": {
                 "source_hashes": dict(coverage_results.get("source_hashes", {})) if cov else {},
                 "coverage_basis": cov.get("coverage_basis"),
-                "verification_status": cov.get("verification_status"),
+                "verification_status": cov.get("verification_status", cs),
                 "executable_line_count": cov.get("executable_line_count"),
                 "covered_line_count": cov.get("covered_line_count"),
                 "uncovered_line_count": cov.get("uncovered_line_count"),
