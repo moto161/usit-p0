@@ -776,3 +776,34 @@ A business-function coverage result remains measured only when every mapped sour
 
 The `--project-root` must be the exact source tree that produced the coverage report. Do not reuse a mapping after source edits without reviewing and updating its source digest. Test execution and test-source provenance remain separate evidence dimensions; a JUnit/pytest PASS is not proof that the test implementation itself is current or adequate.
 
+
+
+### S2.29 — 测试用例到真实测试源码位置的证据绑定
+
+```json
+{
+  "schema_version": "usit-test-result-mapping-v1",
+  "source_graph_sha256": "<sha256 of exact business graph bytes>",
+  "mappings": [
+    {
+      "test_case_id": "tests.PhotoTests::test_upload",
+      "business_function_id": "bf-photo-upload",
+      "test_source_file": "tests/test_photo.py",
+      "test_source_line": 42,
+      "test_source_file_sha256": "<64 lowercase hex SHA-256 of exact test source bytes>"
+    }
+  ]
+}
+```
+
+```powershell
+usit ingest-test-results --junit .\artifacts\junit.xml --mapping .\test-result-mapping.json --graph .\business_knowledge_graph.json --project-root C:\\work\\my-project --out .\artifacts\test-results.json
+```
+
+- `test_source_file` 必须是相对于 `--project-root` 的项目内路径；拒绝绝对路径、盘符路径、路径穿越及符号链接/reparse point。
+- `test_source_line` 是映射声明的测试源码位置；当前验证器核对其为正整数且不超过真实文件行数。它不证明该行必然定义或执行了对应 testcase。
+- `test_source_file_sha256` 必须与项目根目录中读取的真实文件原始字节 SHA-256 完全一致。
+- 导入结果逐 testcase 保留 `test_source_binding_evidence`。状态包括 `TEST_SOURCE_BYTES_MATCHED`、`TEST_SOURCE_HASH_MISMATCH`、`TEST_SOURCE_FILE_MISSING`、`TEST_SOURCE_LINE_OUT_OF_BOUNDS`、`TEST_SOURCE_BINDING_NOT_CHECKED` 等。
+- 业务证据验证器再次检查匹配状态、声明/实际摘要相等性、文件定位字段和行号范围，并单独输出 `test_source_binding_status`；源码未绑定/未核验不会被伪装成已验证。
+- 测试报告中的 PASSED/FAILED 是报告执行结果；测试源码绑定是独立维度。SHA-256 相等仅证明本次读取字节与 mapping 声明一致，不证明来源真实性、测试充分性、测试与报告执行进程的因果关系或业务正确性。
+- 不提供 `--project-root` 时保持 `TEST_SOURCE_BINDING_NOT_CHECKED`；旧 mapping 可继续导入，但不能据此声称测试源码位置已核验。
