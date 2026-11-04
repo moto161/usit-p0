@@ -185,16 +185,16 @@ class ControlledPytestTests(unittest.TestCase):
     def test_project_module_loaded_from_original_worktree_fails_runtime_binding(self):
         package = self.project / "shadow_pkg"
         package.mkdir()
-        (package / "__init__.py").write_text("VALUE = 'original-worktree'\\n", encoding="utf-8")
+        (package / "__init__.py").write_text("VALUE = 'original-worktree'\n", encoding="utf-8")
         self.git("add", "shadow_pkg/__init__.py")
         self.git("commit", "-q", "-m", "add shadow package fixture")
         source = self.project / "tests" / "test_smoke.py"
         source.write_text(
-            "import sys\\n"
-            f"sys.path.insert(0, {str(self.project)!r})\\n"
-            "import shadow_pkg\\n"
-            "def test_imports_project_module_from_original_worktree():\\n"
-            "    assert shadow_pkg.VALUE == 'original-worktree'\\n",
+            "import sys\n"
+            f"sys.path.insert(0, {str(self.project)!r})\n"
+            "import shadow_pkg\n"
+            "def test_imports_project_module_from_original_worktree():\n"
+            "    assert shadow_pkg.VALUE == 'original-worktree'\n",
             encoding="utf-8",
         )
         self.git("add", "tests/test_smoke.py")
