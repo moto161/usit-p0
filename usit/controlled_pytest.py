@@ -71,11 +71,14 @@ def pytest_runtest_makereport(item, call):
 def pytest_sessionfinish(session, exitstatus):
     root = Path(str(session.config.rootpath)).resolve()
     roots = set(json.loads(os.environ.get("USIT_SOURCE_MODULE_ROOTS", "[]")))
+    original_root_raw = os.environ.get("USIT_ORIGINAL_PROJECT_ROOT", "")
+    try:
+        original_root = Path(original_root_raw).resolve(strict=True) if original_root_raw else None
+    except OSError:
+        original_root = None
     entries = []
     for name, module in sorted(tuple(sys.modules.items())):
-        if not isinstance(name, str) or name.split(".", 1)[0] not in roots:
-            continue
-        if name == "_usit_runner_plugin":
+        if not isinstance(name, str) or name == "_usit_runner_plugin":
             continue
         spec = getattr(module, "__spec__", None)
         origin = getattr(module, "__file__", None) or getattr(spec, "origin", None)
@@ -84,6 +87,16 @@ def pytest_sessionfinish(session, exitstatus):
         try:
             source = Path(origin).resolve(strict=True)
             if not source.is_file():
+                continue
+            declared_project_module = name.split(".", 1)[0] in roots
+            loaded_from_original_project = False
+            if original_root is not None:
+                try:
+                    source.relative_to(original_root)
+                    loaded_from_original_project = True
+                except ValueError:
+                    pass
+            if not declared_project_module and not loaded_from_original_project:
                 continue
             raw = source.read_bytes()
             digest = hashlib.sha256(raw).hexdigest()
@@ -389,6 +402,7 @@ def run_controlled_pytest(
             if source_path.suffix == ".py" and source_path.stem != "__init__":
                 module_roots.add(source_path.stem)
         env["USIT_SOURCE_MODULE_ROOTS"] = json.dumps(sorted(module_roots))
+        env["USIT_ORIGINAL_PROJECT_ROOT"] = str(project)
         env["USIT_RUNTIME_IMPORTS_PATH"] = str(staging / ".usit-runtime-imports.json")
         normalized_command = [
             sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin",
