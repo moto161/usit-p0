@@ -107,6 +107,29 @@ class AndroidEventAdapterTests(unittest.TestCase):
                 overwrite = main(args)
             self.assertEqual(overwrite, 2)
 
+    def test_file_adapter_rejects_oversized_inputs_before_unbounded_read(self):
+        from usit.android_event_adapter import MAX_INPUT_BYTES, _read
+        with tempfile.TemporaryDirectory() as td:
+            oversized = Path(td) / "oversized.jsonl"
+            with oversized.open("wb") as stream:
+                stream.truncate(MAX_INPUT_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "exceeds size limit"):
+                _read(oversized)
+
+    def test_file_adapter_rejects_final_component_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            target = base / "events.jsonl"
+            target.write_bytes(self._raw())
+            link = base / "events-link.jsonl"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+            from usit.android_event_adapter import _read
+            with self.assertRaises(OSError):
+                _read(link)
+
 
 if __name__ == "__main__":
     unittest.main()
