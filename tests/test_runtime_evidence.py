@@ -78,6 +78,22 @@ class RuntimeEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported fields"):
             validate_runtime_evidence(doc, self.graph, self.graph_hash)
 
+    def test_rejects_oversized_identifiers_and_malformed_runtime_digest(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["session"]["session_id"] = "s" * 129
+        with self.assertRaisesRegex(ValueError, "session_id"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][0]["event_id"] = "e" * 257
+        with self.assertRaisesRegex(ValueError, "event_id"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][0]["correlation_id"] = "c" * 257
+        with self.assertRaisesRegex(ValueError, "correlation_id"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        with self.assertRaisesRegex(ValueError, "runtime_evidence_sha256"):
+            validate_runtime_evidence(self.doc, self.graph, self.graph_hash, "not-a-digest")
+
     def test_rejects_duplicate_ids_bad_parent_and_timezone_less_timestamp(self):
         doc = json.loads(json.dumps(self.doc))
         doc["events"][1]["event_id"] = "e1"
