@@ -130,6 +130,18 @@ class AndroidEventAdapterTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 _read(link)
 
+    def test_file_adapter_rejects_oversized_graph_before_unbounded_read(self):
+        from usit.android_event_adapter import MAX_INPUT_BYTES, adapt_android_jsonl_file
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            event_path = base / "events.jsonl"
+            event_path.write_bytes(self._raw())
+            graph_path = base / "oversized-graph.json"
+            with graph_path.open("wb") as stream:
+                stream.truncate(MAX_INPUT_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "exceeds size limit"):
+                adapt_android_jsonl_file(event_path, graph_path, "s1", "2026-11-01T12:00:00+08:00")
+
 
 if __name__ == "__main__":
     unittest.main()
