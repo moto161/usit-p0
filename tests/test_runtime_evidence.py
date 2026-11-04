@@ -148,6 +148,26 @@ class RuntimeEvidenceTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertFalse(out_path.exists())
 
+    def test_cli_rejects_final_component_symlink_without_following_it(self):
+        from usit.cli import main
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            target = base / "events.json"
+            target.write_text(json.dumps(self.doc), encoding="utf-8")
+            link = base / "events-link.json"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+            graph_path = base / "graph.json"
+            graph_path.write_bytes(self.graph_bytes)
+            out_path = base / "report.json"
+            with redirect_stdout(StringIO()):
+                code = main(["validate-runtime-evidence", "--events", str(link),
+                             "--graph", str(graph_path), "--out", str(out_path)])
+            self.assertEqual(code, 2)
+            self.assertFalse(out_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
