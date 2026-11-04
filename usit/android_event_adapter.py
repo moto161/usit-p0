@@ -9,6 +9,8 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
+
+from .safeio import read_bounded_no_follow
 from typing import Any
 
 MAX_INPUT_BYTES = 50 * 1024 * 1024
@@ -34,16 +36,7 @@ FIELDS = {
 
 
 def _read(path: str | Path) -> bytes:
-    source = Path(path).expanduser()
-    if source.is_symlink():
-        raise ValueError("Android event input must not be a symbolic link")
-    resolved = source.resolve(strict=True)
-    if not resolved.is_file():
-        raise ValueError("Android event input must be a regular file")
-    data = resolved.read_bytes()
-    if len(data) > MAX_INPUT_BYTES:
-        raise ValueError(f"Android event input exceeds size limit ({MAX_INPUT_BYTES} bytes)")
-    return data
+    return read_bounded_no_follow(Path(path).expanduser(), MAX_INPUT_BYTES)
 
 
 def adapt_android_jsonl(
@@ -157,12 +150,7 @@ def adapt_android_jsonl_file(
     captured_at: str,
 ) -> dict[str, Any]:
     raw = _read(input_path)
-    graph_file = Path(graph_path).expanduser()
-    if graph_file.is_symlink():
-        raise ValueError("business graph input must not be a symbolic link")
-    graph_raw = graph_file.resolve(strict=True).read_bytes()
-    if len(graph_raw) > MAX_INPUT_BYTES:
-        raise ValueError("business graph exceeds size limit")
+    graph_raw = read_bounded_no_follow(Path(graph_path).expanduser(), MAX_INPUT_BYTES)
     graph = json.loads(graph_raw)
     result = adapt_android_jsonl(raw, graph, hashlib.sha256(graph_raw).hexdigest(), session_id, captured_at)
     return result
