@@ -526,6 +526,8 @@ python -m usit validate-runtime-evidence --events .\\runtime-events.json --graph
 
 适配器只接受白名单字段；未知字段（包括 token、密码、请求正文、Cookie 等）直接拒绝。业务功能 ID 必须已存在于输入图谱；不按 Activity、页面名或控件名猜测业务归属。事件 ID 必须唯一，时间戳必须带时区。输入和输出不得为符号链接，输出不得覆盖已有文件。
 
+文件输入通过 `safeio.read_bounded_no_follow` 使用 no-follow 文件描述符读取：在读取前检查常规文件类型和大小上限，流式读取时再次强制字节上限，并在读取后复核文件身份、大小及时间戳。Android JSONL、业务图谱和运行时事件 JSON 不再先执行无上限 `read_bytes()` 再检查大小。该机制约束最终文件组件；不应将其描述为操作系统沙箱或来源认证。
+
 ### 采集端接入约定
 
 Android 测试适配器应在明确的测试/观测授权下发出结构化事件，优先使用不含个人信息的 screen_id、control_id、route_template 与 opaque actor_ref。每个 UI 测试动作由采集端生成 event_id 和 correlation_id；父事件关系必须由采集端真实掌握后再写入 parent_event_id。禁止把完整 logcat、HTTP headers/body、访问令牌、用户手机号/邮箱或数据库原始值当作事件属性提交。
