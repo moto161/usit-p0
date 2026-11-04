@@ -119,7 +119,10 @@ def read_bounded_no_follow(path: str | os.PathLike[str], limit: int) -> bytes:
                 raise ValueError(f"input exceeds size limit ({limit} bytes)")
             chunks.append(block)
         after = os.fstat(descriptor)
-        if identity_of(before) != identity_of(after) or before.st_size != after.st_size:
+        if (identity_of(before) != identity_of(after)
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns):
             raise ValueError("input changed while being read")
         if total != after.st_size:
             raise ValueError("input size changed or could not be read completely")
