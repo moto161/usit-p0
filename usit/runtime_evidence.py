@@ -17,6 +17,7 @@ from typing import Any
 SCHEMA_VERSION = "usit-runtime-evidence-v1"
 MAX_EVENT_BYTES = 50 * 1024 * 1024
 MAX_EVENTS = 500_000
+MAX_ID_LENGTH = 256
 EVENT_TYPES = {
     "UI_ACTION", "APP_STATE", "PERMISSION_RESULT", "AUTH_CONTEXT",
     "HTTP_REQUEST", "HTTP_RESPONSE", "BACKEND_SPAN", "DATABASE_CHANGE",
@@ -94,11 +95,17 @@ def validate_runtime_evidence(
         raise ValueError("session contains unsupported fields: " + ", ".join(sorted(extra_session)[:8]))
     session_id = metadata.get("session_id")
     platform = metadata.get("platform")
-    if not isinstance(session_id, str) or not session_id.strip():
-        raise ValueError("session.session_id is required")
+    if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 128:
+        raise ValueError("session.session_id must be a non-empty string of at most 128 characters")
     if platform not in {"ANDROID", "IOS", "WEB", "DESKTOP", "BACKEND"}:
         raise ValueError("session.platform is invalid")
     _aware_timestamp(metadata.get("captured_at"), "session.captured_at")
+    if runtime_evidence_sha256 is not None and (
+        not isinstance(runtime_evidence_sha256, str)
+        or len(runtime_evidence_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in runtime_evidence_sha256)
+    ):
+        raise ValueError("runtime_evidence_sha256 must be a lowercase SHA-256 digest")
     graph_hash = document.get("source_graph_sha256")
     conflicts = []
     if graph_hash != business_graph_sha256:
@@ -121,20 +128,20 @@ def validate_runtime_evidence(
             label = "potentially sensitive fields" if unsafe else "unsupported fields"
             raise ValueError(f"events[{index}] contains {label}: {', '.join(sorted(unknown)[:8])}")
         event_id = event.get("event_id")
-        if not isinstance(event_id, str) or not event_id.strip():
-            raise ValueError(f"events[{index}].event_id is required")
+        if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > MAX_ID_LENGTH:
+            raise ValueError(f"events[{index}].event_id must be a non-empty string of at most {MAX_ID_LENGTH} characters")
         if event_id in indexed:
             raise ValueError(f"duplicate runtime event_id: {event_id}")
         event_type = event.get("event_type")
         if event_type not in EVENT_TYPES:
             raise ValueError(f"events[{index}].event_type is invalid")
         correlation_id = event.get("correlation_id")
-        if not isinstance(correlation_id, str) or not correlation_id.strip():
-            raise ValueError(f"events[{index}].correlation_id is required")
+        if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > MAX_ID_LENGTH:
+            raise ValueError(f"events[{index}].correlation_id must be a non-empty string of at most {MAX_ID_LENGTH} characters")
         parsed_times[event_id] = _aware_timestamp(event.get("timestamp"), f"events[{index}].timestamp")
         function_id = event.get("business_function_id")
-        if function_id is not None and (not isinstance(function_id, str) or not function_id):
-            raise ValueError(f"events[{index}].business_function_id must be a non-empty string")
+        if function_id is not None and (not isinstance(function_id, str) or not function_id or len(function_id) > MAX_ID_LENGTH):
+            raise ValueError(f"events[{index}].business_function_id must be a non-empty string of at most {MAX_ID_LENGTH} characters")
         if function_id and function_id not in known:
             conflicts.append({"kind": "UNKNOWN_BUSINESS_FUNCTION", "event_id": event_id, "business_function_id": function_id})
         duration = event.get("duration_ms")
