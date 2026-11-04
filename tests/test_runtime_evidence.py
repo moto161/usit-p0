@@ -131,6 +131,23 @@ class RuntimeEvidenceTests(unittest.TestCase):
                                        "--graph", str(graph_path), "--out", str(out_path)])
             self.assertEqual(overwrite_code, 2)
 
+    def test_cli_rejects_oversized_runtime_evidence_before_reading(self):
+        from usit.runtime_evidence import MAX_EVENT_BYTES
+        from usit.cli import main
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            event_path = base / "oversized.json"
+            with event_path.open("wb") as stream:
+                stream.truncate(MAX_EVENT_BYTES + 1)
+            graph_path = base / "graph.json"
+            graph_path.write_bytes(self.graph_bytes)
+            out_path = base / "report.json"
+            with redirect_stdout(StringIO()):
+                code = main(["validate-runtime-evidence", "--events", str(event_path),
+                             "--graph", str(graph_path), "--out", str(out_path)])
+            self.assertEqual(code, 2)
+            self.assertFalse(out_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
