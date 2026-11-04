@@ -10,6 +10,8 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
+
+from .safeio import read_bounded_no_follow
 from typing import Any
 
 SCHEMA_VERSION = "usit-runtime-evidence-v1"
@@ -43,16 +45,7 @@ STAGE_BY_TYPE = {
 
 
 def _read_regular(path: str | Path, limit: int) -> bytes:
-    source = Path(path).expanduser()
-    if source.is_symlink():
-        raise ValueError("input must not be a symbolic link")
-    resolved = source.resolve(strict=True)
-    if not resolved.is_file():
-        raise ValueError("input must be a regular file")
-    data = resolved.read_bytes()
-    if len(data) > limit:
-        raise ValueError(f"input exceeds size limit ({limit} bytes)")
-    return data
+    return read_bounded_no_follow(Path(path).expanduser(), limit)
 
 
 def _aware_timestamp(value: Any, label: str) -> datetime:
