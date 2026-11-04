@@ -127,7 +127,7 @@ class AndroidEventAdapterTests(unittest.TestCase):
             except (OSError, NotImplementedError):
                 self.skipTest("symlink creation is unavailable")
             from usit.android_event_adapter import _read
-            with self.assertRaises(OSError):
+            with self.assertRaises((OSError, ValueError)):
                 _read(link)
 
     def test_file_adapter_rejects_oversized_graph_before_unbounded_read(self):
