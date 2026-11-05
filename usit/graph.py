@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .snapshot import LineCountSnapshot
+from .safeio import read_bounded_no_follow
 
 GRAPH_SCHEMA = "usit-graph-v1"
 RELATION_TYPES = {"defines", "imports", "calls", "references"}
