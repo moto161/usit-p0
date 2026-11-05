@@ -138,6 +138,13 @@ def validate_runtime_evidence(
         correlation_id = event.get("correlation_id")
         if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > MAX_ID_LENGTH:
             raise ValueError(f"events[{index}].correlation_id must be a non-empty string of at most {MAX_ID_LENGTH} characters")
+        parent_event_id = event.get("parent_event_id")
+        if parent_event_id is not None and (
+            not isinstance(parent_event_id, str)
+            or not parent_event_id.strip()
+            or len(parent_event_id) > MAX_ID_LENGTH
+        ):
+            raise ValueError(f"events[{index}].parent_event_id must be a non-empty string of at most {MAX_ID_LENGTH} characters when provided")
         parsed_times[event_id] = _aware_timestamp(event.get("timestamp"), f"events[{index}].timestamp")
         function_id = event.get("business_function_id")
         if function_id is not None and (not isinstance(function_id, str) or not function_id or len(function_id) > MAX_ID_LENGTH):
