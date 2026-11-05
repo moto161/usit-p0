@@ -56,6 +56,34 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             f"- 运行时事件观察：{_cell(observation.get('status') or (stages.get('runtime_observation') if isinstance(stages, dict) else 'NOT_MEASURED'))}",
             f"- 运行时关联 ID：{_cell(', '.join(map(str, correlation_ids)) if correlation_ids else '无')}",
             f"- 代码覆盖：{_cell(stages.get('code_coverage') if isinstance(stages, dict) else 'UNKNOWN')}"])
+        for correlation in _items(observation.get("correlations")):
+            if not isinstance(correlation, dict):
+                continue
+            lines.append(
+                f"- 运行时关联详情：{_cell(correlation.get('correlation_id'))}；"
+                f"拓扑：{_cell(correlation.get('parent_topology_status') or 'NOT_PROVIDED')}；"
+                f"父子关联覆盖：{_cell(correlation.get('parent_link_coverage_ratio') if correlation.get('parent_link_coverage_ratio') is not None else 'NOT_PROVIDED')}"
+            )
+            event_ids = _items(correlation.get("observed_event_ids_by_timestamp"))
+            if event_ids:
+                lines.append(f"  - 事件审阅顺序（非因果）：{_cell(' → '.join(map(str, event_ids)))}")
+            for edge in _items(correlation.get("explicit_parent_edges")):
+                if isinstance(edge, dict):
+                    lines.append(
+                        f"  - 采集端声明父子边：{_cell(edge.get('parent_event_id'))} → {_cell(edge.get('child_event_id'))}"
+                    )
+            for field, label in (
+                ("root_event_ids", "根事件"),
+                ("leaf_event_ids", "叶事件"),
+                ("branching_parent_event_ids", "分支父事件"),
+                ("isolated_event_ids", "孤立事件"),
+                ("cycle_event_ids", "循环事件"),
+            ):
+                values = _items(correlation.get(field))
+                if values:
+                    lines.append(f"  - {label}：{_cell(', '.join(map(str, values)))}")
+            if correlation.get("interpretation"):
+                lines.append(f"  - 解释边界：{_cell(correlation.get('interpretation'))}")
         runtime_evidence = row.get("runtime_evidence")
         runtime_evidence = runtime_evidence if isinstance(runtime_evidence, dict) else {}
         execution_detail = runtime_evidence.get("test_execution_detail")
