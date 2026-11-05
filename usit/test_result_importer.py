@@ -405,7 +405,7 @@ def ingest_junit_results(
         bundle_check = verify_manifest(evidence_root)
         if not bundle_check.get("valid"):
             raise ValueError("evidence bundle manifest validation failed: " + "; ".join(bundle_check.get("errors", [])))
-        bundle_manifest = json.loads((evidence_root / "evidence_manifest.json").read_text(encoding="utf-8"))
+        bundle_manifest = json.loads(_read_regular(evidence_root / "evidence_manifest.json", MAX_MANIFEST_BYTES).decode("utf-8"))
         artifact_index = {
             item.get("path"): item for item in bundle_manifest.get("artifacts", [])
             if isinstance(item, dict) and isinstance(item.get("path"), str)
@@ -413,7 +413,7 @@ def ingest_junit_results(
         required_bundle_artifacts = {"junit.xml", "execution-provenance.json", "source-manifest.json"}
         if not required_bundle_artifacts.issubset(artifact_index):
             raise ValueError("evidence manifest omits a required report/provenance/source-manifest artifact")
-        source_doc = json.loads(Path(source_manifest_path).read_text(encoding="utf-8"))
+        source_doc = json.loads(_read_regular(Path(source_manifest_path), MAX_MANIFEST_BYTES).decode("utf-8"))
         source_entries = source_doc.get("files") if isinstance(source_doc, dict) else None
         if not isinstance(source_entries, list):
             raise ValueError("source manifest files must be a list")
@@ -431,7 +431,7 @@ def ingest_junit_results(
         }
         if actual_snapshot_artifacts != expected_snapshot_artifacts:
             raise ValueError("evidence bundle source_snapshot artifact set differs from source manifest")
-        provenance_doc_for_bundle = json.loads(Path(provenance_record_path).read_text(encoding="utf-8"))
+        provenance_doc_for_bundle = json.loads(_read_regular(Path(provenance_record_path), MAX_RECORD_BYTES).decode("utf-8"))
         runtime_import_validation = {"status": "RUNTIME_IMPORTS_NOT_PROVIDED"}
         runtime_meta = provenance_doc_for_bundle.get("runtime_imports")
         if runtime_meta is not None:
