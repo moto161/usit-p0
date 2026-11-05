@@ -579,7 +579,7 @@ def validate_graph_file(graph_path: str | Path, project_root: str | Path | None 
     """
     path = Path(graph_path)
     try:
-        graph = json.loads(path.read_text(encoding="utf-8"))
+        graph = json.loads(read_bounded_no_follow(path, 256 * 1024 * 1024).decode("utf-8"))
         if trusted_snapshot is not None:
             result = validate_graph_trusted(graph, trusted_snapshot,
                                             project_root=project_root)
@@ -597,7 +597,7 @@ def validate_graph_file(graph_path: str | Path, project_root: str | Path | None 
     except json.JSONDecodeError as exc:
         result = _result(None, [_diagnostic("ERROR", "INVALID_JSON", f"$@{exc.lineno}:{exc.colno}",
                                             exc.msg, "Fix the JSON syntax and rerun validation.")], [], [], [], [], project_root)
-    except OSError as exc:
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
         result = _result(None, [_diagnostic("ERROR", "GRAPH_READ_ERROR", str(path), type(exc).__name__,
                                             "Check the graph path and file access.")], [], [], [], [], project_root)
     if out_json is not None:
