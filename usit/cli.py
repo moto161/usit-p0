@@ -34,7 +34,7 @@ from .safeio import read_bounded_no_follow
 
 
 def _read_bounded_json(path, limit):
-    """Read a trace-business JSON input through a bounded no-follow descriptor."""
+    """Read a CLI artifact JSON input through a bounded no-follow descriptor."""
     raw = read_bounded_no_follow(Path(path).expanduser(), limit)
     return raw, json.loads(raw)
 
