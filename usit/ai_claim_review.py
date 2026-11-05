@@ -51,6 +51,8 @@ def _sha256(value: Any, label: str) -> str:
 
 def load_claim_ledger(path: str | Path) -> tuple[dict[str, Any], str]:
     source = Path(path).expanduser()
+    if source.is_symlink():
+        raise ValueError("claim ledger must not be a symbolic link")
     raw = read_bounded_no_follow(source, MAX_INPUT_BYTES)
     try:
         ledger = json.loads(raw.decode("utf-8"))
