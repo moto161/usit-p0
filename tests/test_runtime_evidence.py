@@ -151,6 +151,14 @@ class RuntimeEvidenceTests(unittest.TestCase):
         doc["events"][0]["timestamp"] = "2026-11-01T12:00:01"
         with self.assertRaisesRegex(ValueError, "include a timezone"):
             validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][1]["parent_event_id"] = "p" * 257
+        with self.assertRaisesRegex(ValueError, "parent_event_id"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][1]["parent_event_id"] = 123
+        with self.assertRaisesRegex(ValueError, "parent_event_id"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
 
     def test_parent_cycle_is_reported_even_when_timestamps_are_equal(self):
         doc = json.loads(json.dumps(self.doc))
