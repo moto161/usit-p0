@@ -33,7 +33,7 @@ from .controlled_pytest import run_controlled_pytest
 from .safeio import read_bounded_no_follow
 
 
-def _read_trace_json(path, limit):
+def _read_bounded_json(path, limit):
     """Read a trace-business JSON input through a bounded no-follow descriptor."""
     raw = read_bounded_no_follow(Path(path).expanduser(), limit)
     return raw, json.loads(raw)
@@ -477,16 +477,8 @@ def main(argv=None):
             return _plan_business_tests(a)
         if a.cmd=='init-traceability-template':
             import hashlib
-            def read_template_input(path, limit):
-                source=Path(path).expanduser()
-                if source.is_symlink(): raise ValueError("input must not be a symbolic link")
-                resolved=source.resolve(strict=True)
-                if not resolved.is_file(): raise ValueError("input must be a regular file")
-                raw=resolved.read_bytes()
-                if len(raw)>limit: raise ValueError("traceability template input exceeds size limit")
-                return raw,json.loads(raw)
-            sem_bytes,sem_doc=read_template_input(a.semantics,20*1024*1024)
-            graph_bytes,graph_doc=read_template_input(a.graph,50*1024*1024)
+            sem_bytes,sem_doc=_read_bounded_json(a.semantics,20*1024*1024)
+            graph_bytes,graph_doc=_read_bounded_json(a.graph,50*1024*1024)
             if graph_doc.get("schema_version")!="usit-graph-v1" or not isinstance(graph_doc.get("business_understanding"),dict):
                 raise ValueError("graph must be a business-projected usit-graph-v1 artifact")
             output=Path(a.out).expanduser()
@@ -505,13 +497,13 @@ def main(argv=None):
             return 0
         if a.cmd=='trace-business':
             import hashlib
-            sem_bytes,sem_doc=_read_trace_json(a.semantics,20*1024*1024)
-            graph_bytes,graph_doc=_read_trace_json(a.graph,50*1024*1024)
-            mapping_bytes,mapping_doc=_read_trace_json(a.mapping,10*1024*1024)
-            plan_pair=_read_trace_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
-            matrix_pair=_read_trace_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
-            runtime_pair=_read_trace_json(a.runtime_evidence,50*1024*1024) if a.runtime_evidence else (None,None)
-            security_pair=_read_trace_json(a.security_test_plan,20*1024*1024) if a.security_test_plan else (None,None)
+            sem_bytes,sem_doc=_read_bounded_json(a.semantics,20*1024*1024)
+            graph_bytes,graph_doc=_read_bounded_json(a.graph,50*1024*1024)
+            mapping_bytes,mapping_doc=_read_bounded_json(a.mapping,10*1024*1024)
+            plan_pair=_read_bounded_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
+            matrix_pair=_read_bounded_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
+            runtime_pair=_read_bounded_json(a.runtime_evidence,50*1024*1024) if a.runtime_evidence else (None,None)
+            security_pair=_read_bounded_json(a.security_test_plan,20*1024*1024) if a.security_test_plan else (None,None)
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
@@ -548,19 +540,11 @@ def main(argv=None):
             return 0
         if a.cmd=='assess-quality':
             import hashlib
-            def read_quality_json(path, limit):
-                source=Path(path).expanduser()
-                if source.is_symlink(): raise ValueError("input must not be a symbolic link")
-                resolved=source.resolve(strict=True)
-                if not resolved.is_file(): raise ValueError("input must be a regular file")
-                raw=resolved.read_bytes()
-                if len(raw)>limit: raise ValueError("quality assessment input exceeds size limit")
-                return raw,json.loads(raw)
-            sem_bytes,sem_doc=read_quality_json(a.semantics,20*1024*1024)
-            graph_bytes,graph_doc=read_quality_json(a.graph,50*1024*1024)
-            plan_pair=read_quality_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
-            matrix_pair=read_quality_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
-            gaps_pair=read_quality_json(a.gap_backlog,50*1024*1024) if a.gap_backlog else (None,None)
+            sem_bytes,sem_doc=_read_bounded_json(a.semantics,20*1024*1024)
+            graph_bytes,graph_doc=_read_bounded_json(a.graph,50*1024*1024)
+            plan_pair=_read_bounded_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
+            matrix_pair=_read_bounded_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
+            gaps_pair=_read_bounded_json(a.gap_backlog,50*1024*1024) if a.gap_backlog else (None,None)
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
@@ -591,19 +575,11 @@ def main(argv=None):
             return 0
         if a.cmd=='analyze-gaps':
             import hashlib
-            def read_gap_json(path, limit):
-                source=Path(path).expanduser()
-                if source.is_symlink(): raise ValueError("input must not be a symbolic link")
-                resolved=source.resolve(strict=True)
-                if not resolved.is_file(): raise ValueError("input must be a regular file")
-                raw=resolved.read_bytes()
-                if len(raw)>limit: raise ValueError("gap analysis input exceeds size limit")
-                return raw,json.loads(raw)
-            sem_bytes,sem_doc=read_gap_json(a.semantics,20*1024*1024)
-            graph_bytes,graph_doc=read_gap_json(a.graph,50*1024*1024)
-            plan_pair=read_gap_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
-            matrix_pair=read_gap_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
-            trace_pair=read_gap_json(a.traceability,50*1024*1024) if a.traceability else (None,None)
+            sem_bytes,sem_doc=_read_bounded_json(a.semantics,20*1024*1024)
+            graph_bytes,graph_doc=_read_bounded_json(a.graph,50*1024*1024)
+            plan_pair=_read_bounded_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
+            matrix_pair=_read_bounded_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
+            trace_pair=_read_bounded_json(a.traceability,50*1024*1024) if a.traceability else (None,None)
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
@@ -647,17 +623,9 @@ def main(argv=None):
             return 0 if result["evidence_conflict_count"]==0 else 1
         if a.cmd=='verify-evidence':
             import hashlib
-            def read_evidence_json(path, limit):
-                source=Path(path).expanduser()
-                if source.is_symlink(): raise ValueError("input must not be a symbolic link")
-                resolved=source.resolve(strict=True)
-                if not resolved.is_file(): raise ValueError("input must be a regular file")
-                raw=resolved.read_bytes()
-                if len(raw)>limit: raise ValueError("evidence input exceeds size limit")
-                return raw, json.loads(raw)
-            graph_bytes, graph_doc=read_evidence_json(a.graph,50*1024*1024)
-            test_doc=read_evidence_json(a.test_results,20*1024*1024)[1] if a.test_results else None
-            coverage_doc=read_evidence_json(a.coverage_results,50*1024*1024)[1] if a.coverage_results else None
+            graph_bytes, graph_doc=_read_bounded_json(a.graph,50*1024*1024)
+            test_doc=_read_bounded_json(a.test_results,20*1024*1024)[1] if a.test_results else None
+            coverage_doc=_read_bounded_json(a.coverage_results,50*1024*1024)[1] if a.coverage_results else None
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
