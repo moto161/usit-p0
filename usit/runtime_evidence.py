@@ -227,6 +227,37 @@ def validate_runtime_evidence(
             row["event_id"] for row in rows
             if row.get("parent_event_id") is None
         )
+        child_ids_by_parent: dict[str, list[str]] = {}
+        for parent_id, child_id in edges:
+            child_ids_by_parent.setdefault(parent_id, []).append(child_id)
+        parent_ids = {parent_id for parent_id, _ in edges}
+        child_ids = {child_id for _, child_id in edges}
+        roots = summaries[-1]["root_event_ids"]
+        leaves = sorted(row_ids - parent_ids)
+        branching = sorted(parent_id for parent_id, children in child_ids_by_parent.items() if len(children) > 1)
+        isolated = sorted(row_ids - parent_ids - child_ids)
+        cycle_event_ids = sorted({
+            conflict["event_id"] for conflict in conflicts
+            if conflict.get("kind") == "PARENT_EVENT_CYCLE" and conflict.get("event_id") in row_ids
+        })
+        if cycle_event_ids:
+            topology_status = "CYCLE_DETECTED"
+        elif branching:
+            topology_status = "BRANCHED"
+        elif len(roots) > 1:
+            topology_status = "MULTI_ROOT"
+        elif edges and len(roots) == 1 and len(edges) == len(rows) - 1:
+            topology_status = "LINEAR_CHAIN"
+        elif edges:
+            topology_status = "PARTIAL_LINKAGE"
+        else:
+            topology_status = "NO_EXPLICIT_LINKS"
+        summaries[-1]["leaf_event_ids"] = leaves
+        summaries[-1]["branching_parent_event_ids"] = branching
+        summaries[-1]["isolated_event_ids"] = isolated
+        summaries[-1]["cycle_event_ids"] = cycle_event_ids
+        summaries[-1]["parent_link_coverage_ratio"] = round(len(linked) / len(rows), 6) if rows else 0.0
+        summaries[-1]["parent_topology_status"] = topology_status
 
     return {
         "schema_version": "usit-runtime-evidence-validation-v1",
