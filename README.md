@@ -673,6 +673,8 @@ python -m usit review-ai-claims --input .\\ai-claim-ledger.json --out .\\ai-clai
 
 既有条目没有 `artifact_path` 时兼容保留，但状态为 `UNVERIFIED_REFERENCE`，不能因为 ID 存在于目录就算验证通过。
 
+账本输入通过有界 no-follow 文件描述符读取，最大 10 MiB；拒绝最终文件组件为符号链接/reparse point、非普通文件或超限文件。
+
 ### 运行
 
 ```powershell
@@ -820,6 +822,8 @@ usit ingest-test-results --junit .\artifacts\junit.xml --mapping .\test-result-m
 ## Controlled pytest execution and source-snapshot evidence (S2.30 first implementation)
 
 The run-pytest command is the first controlled execution path. Unlike ingest-test-results, it actually invokes pytest, but only after a separate execution authorization file is supplied.
+
+The authorization JSON is read with `safeio.read_bounded_no_follow` (16 KiB maximum); the final file component must be a regular non-reparse file and is read through the opened descriptor. This avoids an unbounded read and final-component symlink substitution between a path pre-check and file read. Parent-directory components are not claimed to be symlink-free.
 
 ```powershell
 python -m usit run-pytest "C:\path\to\clean-git-project" --evidence-parent "C:\USIT-Evidence" --authorization-file "C:\USIT-Evidence\test-execution-authorization.json" --pytest-arg "tests/"
