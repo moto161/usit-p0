@@ -426,6 +426,10 @@ class BusinessTraceabilityTests(unittest.TestCase):
                          {"parent_event_id": "evt-1", "child_event_id": "evt-2"})
         self.assertEqual(chain["observed_event_ids_by_timestamp"], ["evt-1", "evt-2", "evt-3"])
         self.assertIn("时间排序不代表因果", chain["interpretation"])
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("LINEAR_CHAIN", markdown)
+        self.assertIn("事件审阅顺序（非因果）", markdown)
+        self.assertIn("采集端声明父子边：evt-1 → evt-2", markdown)
 
     def test_rejects_malformed_runtime_correlation_parent_edges(self):
         runtime = {
