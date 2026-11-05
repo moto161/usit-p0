@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+from .safeio import read_bounded_no_follow
+
 __all__ = ["STATUSES", "CaptureResult", "capture_run", "verify_manifest"]
 
 STATUSES = frozenset({
@@ -211,7 +213,7 @@ def verify_manifest(evidence_dir: str | os.PathLike[str]) -> dict[str, Any]:
         root = _canonical_directory(evidence_dir, "evidence directory")
         manifest_path = root / _MANIFEST_NAME
         _reject_reparse_components(manifest_path)
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(read_bounded_no_follow(manifest_path, 50 * 1024 * 1024).decode("utf-8"))
         if manifest.get("schema_version") != 1 or not _RUN_ID_RE.fullmatch(str(manifest.get("run_id", ""))):
             raise ValueError("unsupported or invalid manifest identity")
         artifacts = manifest.get("artifacts")
