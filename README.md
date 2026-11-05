@@ -481,7 +481,9 @@ python -m usit validate-runtime-evidence --events .\\runtime-events.json --graph
 ### 证据解释边界
 
 - `RUNTIME_OBSERVED` 仅表示输入中存在运行时事件，不等于测试通过、业务正确或需求已满足。
-- `CORRELATED_EVENTS_OBSERVED` 要求至少存在显式父子事件关联；仅有相同 correlation ID 的阶段共现仍不足以证明因果。
+- `PARENT_LINKED_EVENTS_OBSERVED` 要求至少存在两类事件和显式父子事件关联；仅有相同 correlation ID 的阶段共现仍不足以建立父子链。
+- 每个 correlation 汇总额外输出 `parent_topology_status`（`LINEAR_CHAIN`、`BRANCHED`、`MULTI_ROOT`、`PARTIAL_LINKAGE`、`NO_EXPLICIT_LINKS`、`CYCLE_DETECTED`）、根/叶/孤立事件、分支父事件、循环事件和父子链接覆盖比例。拓扑标签只描述输入中声明的 parent_event_id 结构，不代表真实调用因果或完整业务流程。
+- `observed_event_ids_by_timestamp` 仅供审阅排序，不会转换为因果边；缺失 parent_event_id 的事件不会被自动补链。
 - 未关联业务功能的事件不会按页面名称、API 路由或时间邻近自动猜测归属。
 - 图谱 SHA-256 不一致、未知业务功能 ID、缺失父事件、跨关联父子关系、父子时间倒置和父事件循环均保留为冲突。
 - 完整 UI→HTTP→后端→数据库链不是每项业务功能的强制模板；缺失阶段表示未观察，不自动认定为缺陷。
