@@ -66,7 +66,42 @@ class RuntimeEvidenceTests(unittest.TestCase):
         self.assertEqual(chain["parent_linked_event_count"], 4)
         self.assertEqual(chain["root_event_ids"], ["e1"])
         self.assertEqual(chain["unlinked_event_ids"], [])
+        self.assertEqual(chain["leaf_event_ids"], ["e4"])
+        self.assertEqual(chain["branching_parent_event_ids"], [])
+        self.assertEqual(chain["isolated_event_ids"], [])
+        self.assertEqual(chain["cycle_event_ids"], [])
+        self.assertEqual(chain["parent_link_coverage_ratio"], 1.0)
+        self.assertEqual(chain["parent_topology_status"], "LINEAR_CHAIN")
         self.assertTrue(any("不证明功能正确" in x for x in result["limitations"]))
+
+    def test_reports_branched_and_disconnected_event_topology(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"] = [
+            doc["events"][0],
+            {**doc["events"][1], "event_id": "e2", "parent_event_id": "e1"},
+            {**doc["events"][2], "event_id": "e3", "parent_event_id": "e1"},
+            {**doc["events"][3], "event_id": "e4", "parent_event_id": None},
+        ]
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        chain = result["correlations"][0]
+        self.assertEqual(chain["parent_topology_status"], "BRANCHED")
+        self.assertEqual(chain["branching_parent_event_ids"], ["e1"])
+        self.assertEqual(chain["root_event_ids"], ["e1", "e4"])
+        self.assertEqual(chain["leaf_event_ids"], ["e2", "e3", "e4"])
+        self.assertEqual(chain["isolated_event_ids"], ["e4"])
+        self.assertEqual(chain["parent_link_coverage_ratio"], 0.75)
+
+    def test_reports_no_explicit_links_without_inventing_roots_as_a_chain(self):
+        doc = json.loads(json.dumps(self.doc))
+        for event in doc["events"]:
+            event["parent_event_id"] = None
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        chain = result["correlations"][0]
+        self.assertEqual(chain["parent_topology_status"], "NO_EXPLICIT_LINKS")
+        self.assertEqual(chain["root_event_ids"], ["e1", "e2", "e3", "e4"])
+        self.assertEqual(chain["leaf_event_ids"], ["e1", "e2", "e3", "e4"])
+        self.assertEqual(chain["isolated_event_ids"], ["e1", "e2", "e3", "e4"])
+        self.assertEqual(chain["parent_link_coverage_ratio"], 0.0)
 
     def test_graph_hash_and_unknown_function_are_conflicts(self):
         doc = json.loads(json.dumps(self.doc))
