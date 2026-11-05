@@ -32,6 +32,9 @@ from typing import Any
 
 from . import safety
 from .safeio import open_no_follow
+from .database_access import extract_database_accesses
+from .permission_evidence import extract_authorization_evidence
+from .identity_evidence import extract_identity_evidence
 
 SCHEMA_VERSION = "usit-business-semantics-v1"
 
@@ -53,6 +56,50 @@ _ADMIN_REQUIRED = re.compile(r"\badminRequired\b")
 _ROLE_ADMIN = re.compile(r"role\s*[!=]==?\s*['\"]admin['\"]")
 _SECRET_CHECK = re.compile(r"\bis_secret\s*[!=]==?\s*1\b")
 _ONLY_SELF_CHECK = re.compile(r"\bis_only_self\s*[!=]==?\s*1\b")
+
+def _route_handler_reference(line: str, start: int) -> str:
+    """Extract a simple named final callback from a single-line route call."""
+    tail = line[start:].lstrip()
+    if not tail.startswith(","):
+        return ""
+    tail = tail[1:]
+    args: list[str] = []
+    token: list[str] = []
+    depth = 0
+    quote = ""
+    escaped = False
+    for char in tail:
+        if quote:
+            token.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            token.append(char)
+        elif char in "([{":
+            depth += 1
+            token.append(char)
+        elif char in ")]}":
+            if char == ")" and depth == 0:
+                args.append("".join(token).strip())
+                break
+            depth = max(0, depth - 1)
+            token.append(char)
+        elif char == "," and depth == 0:
+            args.append("".join(token).strip())
+            token = []
+        else:
+            token.append(char)
+    if not args:
+        return ""
+    candidate = args[-1].strip()
+    return candidate if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*", candidate) else ""
+
 
 # Markdown table row: `| a | b | c |`.
 _MD_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
@@ -153,6 +200,7 @@ class Endpoint:
     source: str = ""
     line: int = 0
     confidence: str = CONF_UNKNOWN
+    handler_reference: str = ""
 
 
 @dataclass
@@ -439,7 +487,9 @@ class BusinessSemanticsAdapter:
     def _extract_doc_endpoints(self, doc_path: Path, text: str) -> list[dict[str, str]]:
         out: list[dict[str, str]] = []
         for m in re.finditer(r"\b(GET|POST|PUT|DELETE|PATCH)\s+(/api/[\w/:{}_.-]+)", text):
-            out.append({"method": m.group(1).upper(), "path": m.group(2), "source": self._rel(doc_path)})
+            out.append({"method": m.group(1).upper(), "path": m.group(2),
+                        "source": self._rel(doc_path),
+                        "line": text.count("\n", 0, m.start()) + 1})
         return out
 
     def _extract_code_endpoints(self, route_path: Path, text: str) -> list[Endpoint]:
@@ -459,6 +509,7 @@ class BusinessSemanticsAdapter:
             if not m:
                 continue
             method, path = m.group(1).upper(), m.group(2)
+            handler_reference = _route_handler_reference(line, m.end())
             # Auth signal: the route's own line first (most specific), then the
             # file-level router.use default.
             auth = ""
@@ -472,6 +523,7 @@ class BusinessSemanticsAdapter:
                 method=method, path=path, code_auth=auth,
                 source=f"{self._rel(route_path)}:{i}", line=i,
                 confidence=CONF_VERIFIED if auth else CONF_INFERRED,
+                handler_reference=handler_reference,
             ))
         return out
 
@@ -579,6 +631,66 @@ class BusinessSemanticsAdapter:
                 continue
             endpoints.extend(self._extract_code_endpoints(rf, data["text"]))
 
+        # S2.11: exact documented API contract ↔ code route reconciliation.
+        # No path normalization or name-based guessing: only exact method/path pairs match.
+        endpoint_contract_alignment: list[dict[str, Any]] = []
+        matched_code_keys: set[tuple[str, str, str, int]] = set()
+        for documented in doc_endpoints:
+            matches = [
+                ep for ep in endpoints
+                if ep.method == documented["method"] and ep.path == documented["path"]
+            ]
+            if len(matches) == 1:
+                status = "EXACT_MATCH"
+            elif len(matches) > 1:
+                status = "MULTIPLE_CODE_MATCHES"
+            else:
+                status = "DOCUMENTED_NOT_FOUND_IN_CODE"
+            code_evidence = [
+                {"method": ep.method, "path": ep.path, "source": ep.source,
+                 "line": ep.line, "confidence": "STATIC_INFERENCE"}
+                for ep in matches
+            ]
+            for ep in matches:
+                matched_code_keys.add((ep.method, ep.path, ep.source, ep.line))
+            endpoint_contract_alignment.append({
+                "status": status,
+                "method": documented["method"], "path": documented["path"],
+                "document_evidence": {"source": documented["source"], "line": documented.get("line")},
+                "code_evidence": code_evidence,
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "limitations": [
+                    "仅按 HTTP method 与 path 精确匹配；未做 base path、router mount、版本前缀或动态路由展开。",
+                    "文档缺失不证明接口不应存在；代码未匹配也不证明功能未实现。",
+                ],
+            })
+        for ep in endpoints:
+            key = (ep.method, ep.path, ep.source, ep.line)
+            if key in matched_code_keys:
+                continue
+            endpoint_contract_alignment.append({
+                "status": "CODE_ENDPOINT_NOT_DOCUMENTED",
+                "method": ep.method, "path": ep.path,
+                "document_evidence": None,
+                "code_evidence": [{
+                    "method": ep.method, "path": ep.path,
+                    "source": ep.source, "line": ep.line,
+                    "confidence": "STATIC_INFERENCE",
+                }],
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "limitations": [
+                    "需求/API 文档可能不完整或存放在未识别文件中；未文档化不等于未授权或错误。",
+                    "仅按 HTTP method 与 path 精确匹配；未展开 router mount、动态路由或 API gateway。",
+                ],
+            })
+        endpoint_contract_alignment.sort(key=lambda item: (
+            item["method"], item["path"], item["status"],
+            str((item.get("document_evidence") or {}).get("source") or ""),
+            int((item.get("document_evidence") or {}).get("line") or 0),
+        ))
+
         # (1) Endpoints the code exposes with NO auth at all — but only flag the
         #     ones that are not public-by-design (login/register/health/...).
         for ep in endpoints:
@@ -599,6 +711,9 @@ class BusinessSemanticsAdapter:
             if data["read_ok"]:
                 code_blob_by_file[self._rel(cf)] = data["text"]
         all_code = "\n".join(code_blob_by_file.values())
+        database_accesses = extract_database_accesses(code_blob_by_file)
+        authorization_checks = extract_authorization_evidence(code_blob_by_file)
+        identity_evidence = extract_identity_evidence(code_blob_by_file)
 
         # (3) PRD features marked ✅ DONE whose backing permission field is never
         #     referenced in code.  This is the strongest "documented-but-fake"
@@ -672,9 +787,13 @@ class BusinessSemanticsAdapter:
             ],
             "doc_endpoint_count": len(doc_endpoints),
             "endpoint_count": len(endpoints),
+            "endpoint_contract_alignment_count": len(endpoint_contract_alignment),
+            "endpoint_contract_alignment": endpoint_contract_alignment,
             "endpoints": [
                 {"method": ep.method, "path": ep.path, "code_auth": ep.code_auth,
-                 "source": ep.source, "confidence": ep.confidence}
+                 "authorization_status": "DETECTED" if ep.code_auth else "NOT_DETECTED_STATIC_SCAN",
+                 "source": ep.source, "line": ep.line, "confidence": ep.confidence,
+                 "handler_reference": ep.handler_reference}
                 for ep in endpoints
             ],
             "discrepancy_count": len(discrepancies),
@@ -682,6 +801,12 @@ class BusinessSemanticsAdapter:
                 {"kind": d.kind, "message": d.message, "evidence": d.evidence, "confidence": d.confidence}
                 for d in discrepancies
             ],
+            "authorization_check_count": len(authorization_checks),
+            "authorization_checks": authorization_checks,
+            "database_access_count": len(database_accesses),
+            "database_accesses": database_accesses,
+            "identity_evidence_count": len(identity_evidence),
+            "identity_evidence": identity_evidence,
             "field_gap_count": len(field_gaps),
             "field_gaps": [
                 {"field": g.field_name, "entity": g.entity, "anchors": g.anchors,

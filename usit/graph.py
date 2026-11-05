@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .snapshot import LineCountSnapshot
+from .safeio import read_bounded_no_follow
 
 GRAPH_SCHEMA = "usit-graph-v1"
 RELATION_TYPES = {"defines", "imports", "calls", "references"}
@@ -341,6 +342,73 @@ def validate_graph(graph: Any, project_root: str | Path | None = None,
                 errors.append(_diagnostic("ERROR", "RESOLUTION_CONTRADICTION", f"{loc}.resolved",
                                           "resolved must be true exactly when resolution_status is RESOLVED",
                                           "Keep the legacy boolean synchronized with the explicit state.", ref))
+            if "argument_binding_status" in edge or "argument_bindings" in edge:
+                binding_status = edge.get("argument_binding_status")
+                bindings = edge.get("argument_bindings")
+                if resolution != "RESOLVED":
+                    errors.append(_diagnostic("ERROR", "ARGUMENT_BINDING_ON_UNRESOLVED_CALL",
+                                              f"{loc}.argument_binding_status",
+                                              "argument mappings are valid only for uniquely RESOLVED calls",
+                                              "Remove argument mapping evidence unless the call target is RESOLVED.", ref))
+                if binding_status not in {"EXACT_STATIC_MAPPING", "UNSUPPORTED_ARGUMENT_SHAPE"}:
+                    errors.append(_diagnostic("ERROR", "INVALID_ARGUMENT_BINDING_STATUS",
+                                              f"{loc}.argument_binding_status",
+                                              "argument binding status is missing or unsupported",
+                                              "Use EXACT_STATIC_MAPPING or UNSUPPORTED_ARGUMENT_SHAPE.", ref))
+                if not isinstance(bindings, list):
+                    errors.append(_diagnostic("ERROR", "INVALID_ARGUMENT_BINDINGS",
+                                              f"{loc}.argument_bindings",
+                                              "argument_bindings must be an array",
+                                              "Emit an array, including an empty array when no arguments are present.", ref))
+                elif binding_status == "UNSUPPORTED_ARGUMENT_SHAPE" and bindings:
+                    errors.append(_diagnostic("ERROR", "PARTIAL_UNSUPPORTED_ARGUMENT_BINDINGS",
+                                              f"{loc}.argument_bindings",
+                                              "unsupported argument shapes must not publish partial mappings",
+                                              "Clear argument_bindings when the call shape is unsupported.", ref))
+                elif isinstance(bindings, list):
+                    seen_parameters: set[str] = set()
+                    for binding_index, binding in enumerate(bindings):
+                        binding_loc = f"{loc}.argument_bindings[{binding_index}]"
+                        if not isinstance(binding, dict):
+                            errors.append(_diagnostic("ERROR", "INVALID_ARGUMENT_BINDING",
+                                                      binding_loc, "argument binding must be an object",
+                                                      "Emit a structured argument-to-parameter mapping.", ref))
+                            continue
+                        arg_location = binding.get("argument_location")
+                        param_location = binding.get("parameter_declaration")
+                        valid = (
+                            binding.get("argument_kind") in {"POSITIONAL", "KEYWORD"}
+                            and isinstance(binding.get("argument_expression"), str)
+                            and isinstance(binding.get("parameter_name"), str)
+                            and bool(binding.get("parameter_name"))
+                            and isinstance(binding.get("parameter_index"), int)
+                            and not isinstance(binding.get("parameter_index"), bool)
+                            and binding.get("parameter_index") >= 0
+                            and isinstance(arg_location, dict)
+                            and arg_location.get("path") == (evidence.get("path") if isinstance(evidence, dict) else None)
+                            and isinstance(arg_location.get("line"), int)
+                            and not isinstance(arg_location.get("line"), bool)
+                            and arg_location.get("line") > 0
+                            and isinstance(param_location, dict)
+                            and isinstance(param_location.get("path"), str)
+                            and bool(param_location.get("path"))
+                            and isinstance(param_location.get("line"), int)
+                            and not isinstance(param_location.get("line"), bool)
+                            and param_location.get("line") > 0
+                        )
+                        if not valid:
+                            errors.append(_diagnostic("ERROR", "MALFORMED_ARGUMENT_BINDING",
+                                                      binding_loc,
+                                                      "argument/parameter mapping lacks valid expression or source locations",
+                                                      "Retain exact call-site and parameter-declaration evidence.", ref))
+                        parameter_name = binding.get("parameter_name")
+                        if isinstance(parameter_name, str):
+                            if parameter_name in seen_parameters:
+                                errors.append(_diagnostic("ERROR", "DUPLICATE_ARGUMENT_PARAMETER_BINDING",
+                                                          binding_loc,
+                                                          "multiple explicit arguments map to the same parameter",
+                                                          "Reject duplicate or conflicting parameter mappings.", ref))
+                            seen_parameters.add(parameter_name)
             if (resolution == "RESOLVED" or (not explicit_resolution and legacy_resolved is True)) and target is not None:
                 target_type = target.get("type")
                 definition_path = _source_path(graph, target)
@@ -512,7 +580,7 @@ def validate_graph_file(graph_path: str | Path, project_root: str | Path | None 
     """
     path = Path(graph_path)
     try:
-        graph = json.loads(path.read_text(encoding="utf-8"))
+        graph = json.loads(read_bounded_no_follow(path, 256 * 1024 * 1024).decode("utf-8"))
         if trusted_snapshot is not None:
             result = validate_graph_trusted(graph, trusted_snapshot,
                                             project_root=project_root)
@@ -530,7 +598,7 @@ def validate_graph_file(graph_path: str | Path, project_root: str | Path | None 
     except json.JSONDecodeError as exc:
         result = _result(None, [_diagnostic("ERROR", "INVALID_JSON", f"$@{exc.lineno}:{exc.colno}",
                                             exc.msg, "Fix the JSON syntax and rerun validation.")], [], [], [], [], project_root)
-    except OSError as exc:
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
         result = _result(None, [_diagnostic("ERROR", "GRAPH_READ_ERROR", str(path), type(exc).__name__,
                                             "Check the graph path and file access.")], [], [], [], [], project_root)
     if out_json is not None:

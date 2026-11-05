@@ -91,6 +91,43 @@ class EntityExtractionTests(unittest.TestCase):
         self.assertEqual(result["entity_count"], 0)
 
 
+class DatabaseAccessSemanticsTests(unittest.TestCase):
+    def test_analyze_emits_function_line_database_access_candidates(self):
+        p = SyntheticProject(self)
+        p.route("server/repos/photo_repo.py", (
+            "def load_photos(cursor):\n"
+            '    cursor.execute("SELECT id, owner_id FROM photos WHERE id = 1")\n'
+            "    cursor.execute(sql)\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["database_access_count"], 2)
+        literal, dynamic = result["database_accesses"]
+        self.assertEqual((literal["source"], literal["line"]), ("server/repos/photo_repo.py", 2))
+        self.assertEqual(literal["operation"], "SELECT")
+        self.assertEqual(literal["tables"], ["photos"])
+        self.assertEqual(literal["columns"], ["id", "owner_id"])
+        self.assertEqual(dynamic["parse_status"], "UNKNOWN")
+        self.assertEqual(dynamic["tables"], [])
+
+
+class AuthorizationSemanticsTests(unittest.TestCase):
+    def test_analyze_emits_authorization_check_candidates(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.js", (
+            "const { authRequired, adminRequired } = require('../middleware/auth');\n"
+            "router.use(authRequired);\n"
+            "router.get('/photos', adminRequired, listPhotos);\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertGreaterEqual(result["authorization_check_count"], 2)
+        self.assertTrue(any(
+            row["kind"] == "route_middleware" and "authRequired" in row["guard_names"]
+            for row in result["authorization_checks"]
+        ))
+        endpoint = next(row for row in result["endpoints"] if row["path"] == "/photos")
+        self.assertEqual(endpoint["authorization_status"], "DETECTED")
+
+
 class EndpointAuthTests(unittest.TestCase):
     def test_module_level_router_use_applies_admin_auth(self):
         p = SyntheticProject(self)
@@ -114,6 +151,19 @@ class EndpointAuthTests(unittest.TestCase):
         ep = next(e for e in result["endpoints"] if e["path"] == "/")
         self.assertEqual(ep["code_auth"], "auth")
 
+    def test_extracts_named_and_member_route_handlers_but_not_inline_callbacks(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.js", (
+            "router.post('/photos', authRequired, uploadPhoto);\n"
+            "router.put('/photos/:id', photosController.updatePhoto);\n"
+            "router.patch('/photos/:id', async (req, res) => {});\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        by_method = {item["method"]: item for item in result["endpoints"]}
+        self.assertEqual(by_method["POST"]["handler_reference"], "uploadPhoto")
+        self.assertEqual(by_method["PUT"]["handler_reference"], "photosController.updatePhoto")
+        self.assertEqual(by_method["PATCH"]["handler_reference"], "")
+
     def test_public_login_is_not_flagged(self):
         p = SyntheticProject(self)
         p.route("server/routes/auth.js", (
@@ -122,6 +172,35 @@ class EndpointAuthTests(unittest.TestCase):
         result = BusinessSemanticsAdapter(p.root).analyze()
         # login is public-by-design, so no missing_auth discrepancy.
         self.assertFalse(any(d["kind"] == "missing_auth" for d in result["discrepancies"]))
+
+
+class EndpointContractAlignmentTests(unittest.TestCase):
+    def test_exact_documented_route_match_and_unmatched_contracts_are_explicit(self):
+        p = SyntheticProject(self)
+        p.api_doc(
+            "# API contracts\n"
+            "GET /api/photos\n"
+            "POST /api/photos\n"
+            "GET /api/missing\n"
+        )
+        p.route("server/routes/photos.js", (
+            "router.get('/api/photos', authRequired, listPhotos);\n"
+            "router.delete('/api/internal', authRequired, deleteInternal);\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        rows = result["endpoint_contract_alignment"]
+        exact = next(row for row in rows
+                     if row["method"] == "GET" and row["path"] == "/api/photos")
+        missing = next(row for row in rows
+                       if row["method"] == "POST" and row["path"] == "/api/photos")
+        undocumented = next(row for row in rows
+                            if row["method"] == "DELETE" and row["path"] == "/api/internal")
+        self.assertEqual(exact["status"], "EXACT_MATCH")
+        self.assertEqual(exact["document_evidence"]["line"], 2)
+        self.assertEqual(exact["code_evidence"][0]["line"], 1)
+        self.assertEqual(missing["status"], "DOCUMENTED_NOT_FOUND_IN_CODE")
+        self.assertEqual(undocumented["status"], "CODE_ENDPOINT_NOT_DOCUMENTED")
+        self.assertTrue(all(row["verification_status"] == "NOT_VERIFIED" for row in rows))
 
 
 class PermissionFieldDetectionTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -36,6 +37,14 @@ class VerificationCaptureTests(unittest.TestCase):
             approval_ref="unit-test-authorization",
             **kwargs,
         )
+
+    def test_verify_manifest_rejects_oversized_manifest_input(self):
+        manifest = self.evidence_parent / "evidence_manifest.json"
+        with manifest.open("wb") as stream:
+            stream.truncate(50 * 1024 * 1024 + 1)
+        result = capture.verify_manifest(self.evidence_parent)
+        self.assertFalse(result["valid"])
+        self.assertTrue(any("size limit" in error for error in result["errors"]))
 
     def test_success_captures_separate_streams_and_valid_manifest(self):
         result = self.run_capture(
@@ -95,7 +104,19 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertTrue(result.manifest_valid)
 
     def test_keyboard_interrupt_terminates_child_and_records_returncode(self):
-        with patch.object(capture.time, "sleep", side_effect=KeyboardInterrupt):
+        # Interrupt only the polling loop. subprocess.wait() shares the time
+        # module and must be allowed to wait for the terminated child.
+        original_sleep = capture.time.sleep
+        should_interrupt = True
+
+        def interrupt_once(delay):
+            nonlocal should_interrupt
+            if should_interrupt:
+                should_interrupt = False
+                raise KeyboardInterrupt
+            return original_sleep(delay)
+
+        with patch.object(capture.time, "sleep", side_effect=interrupt_once):
             result = self.run_capture("import time; time.sleep(10)", poll_interval=0.01)
         self.assertEqual(result.status, "INTERRUPTED")
         self.assertTrue(result.interrupted)
@@ -196,6 +217,24 @@ class VerificationCaptureTests(unittest.TestCase):
                 approval_ref=" ",
             )
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+
+    def test_explicit_child_environment_is_passed_without_shell(self):
+        env = os.environ.copy()
+        env["USIT_CAPTURE_ENV_TEST"] = "expected-value"
+        result = capture.capture_run(
+            [sys.executable, "-c", "import os; print(os.environ['USIT_CAPTURE_ENV_TEST'])"],
+            project_root=self.project,
+            evidence_parent=self.evidence_parent,
+            files=["input.txt"],
+            approval_ref="unit-test-authorization",
+            env=env,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(
+            (Path(result.evidence_dir) / "stdout.log").read_text(encoding="utf-8").strip(),
+            "expected-value",
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,131 @@
+name: USIT business-understanding tests
+
+# Keep only the newest validation for a branch; push and PR events share
+# the same group so stale queued runs cannot starve the current HEAD.
+concurrency:
+  group: usit-validation-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  business-understanding:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pinned Python runtime dependencies
+        run: python -m pip install 'cryptography==50.0.2' 'pytest==8.3.5'
+      - name: Install the pinned local TypeScript parser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run required business-understanding and security trust-boundary tests
+        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_test_result_importer tests.test_pytest_result_importer tests.test_test_report_adapters tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_verification_gap_analyzer tests.test_project_quality_assessment tests.test_business_traceability tests.test_traceability_cli_io tests.test_traceability_template tests.test_business_graph tests.test_graph_validation tests.test_graph_argument_bindings tests.test_database_access tests.test_permission_evidence tests.test_python_resolver tests.test_security_test_planner tests.test_identity_evidence tests.test_identity_graph tests.test_runtime_evidence tests.test_android_event_adapter tests.test_ai_gateway tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_ai_evidence_binding  tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_execution_provenance tests.test_controlled_pytest tests.test_verification_capture tests.test_p074_identity_ctime tests.test_p0710zrf12_content_verification tests.test_p079_public_paths tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_js_ts_adapter_regressions -v
+      - name: Run USIT self-test
+        run: python -m usit selftest
+      - name: Diagnostic full repository regression suite (non-gating; see step summary)
+        id: full_repository_regression
+        continue-on-error: true
+        run: python -m unittest discover -s tests -v
+      - name: Report full repository regression outcome
+        if: always()
+        env:
+          REGRESSION_OUTCOME: ${{ steps.full_repository_regression.outcome }}
+        run: |
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text(chr(10).join(['### Full repository regression (diagnostic)', '', '- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**', '- This run is non-gating; targeted business-understanding/security tests and USIT self-test are the required gates.']) + chr(10), encoding='utf-8')"
+
+  windows-regression:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install pinned Python runtime dependencies
+        run: python -m pip install 'cryptography==50.0.2' 'pytest==8.3.5'
+      - name: Install the pinned local TypeScript parser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run USIT self-test on Windows
+        run: python -m usit selftest
+      - name: Run Windows security trust-boundary tests
+        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_execution_provenance tests.test_controlled_pytest tests.test_verification_capture tests.test_runtime_evidence tests.test_android_event_adapter tests.test_test_result_importer tests.test_traceability_cli_io tests.test_graph_validation tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_p0710zrf12_content_verification -v
+      - name: Diagnostic full repository regression suite on Windows (non-gating; see step summary)
+        id: full_repository_regression
+        continue-on-error: true
+        run: python -m unittest discover -s tests -v
+      - name: Report Windows full repository regression outcome
+        if: always()
+        env:
+          REGRESSION_OUTCOME: ${{ steps.full_repository_regression.outcome }}
+        run: |
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text(chr(10).join(['### Windows full repository regression (diagnostic)', '', '- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**', '- This run is non-gating; USIT self-test and Windows trust-boundary tests are the required gates.']) + chr(10), encoding='utf-8')"
+
+  main-baseline-regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install the pinned local TypeScript parser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run main baseline self-test
+        run: python -m usit selftest
+      - name: Diagnostic main baseline suite (exclude known interrupt-test harness defect; non-gating)
+        id: main_baseline_full_regression
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import unittest
+
+          excluded = "VerificationCaptureTests.test_keyboard_interrupt_terminates_child_and_records_returncode"
+          loader = unittest.TestLoader()
+          discovered = loader.discover("tests")
+
+          def filtered(suite):
+              result = unittest.TestSuite()
+              for item in suite:
+                  if isinstance(item, unittest.TestSuite):
+                      result.addTests(filtered(item))
+                  elif not item.id().endswith(excluded):
+                      result.addTest(item)
+              return result
+
+          outcome = unittest.TextTestRunner(verbosity=2).run(filtered(discovered))
+          raise SystemExit(0 if outcome.wasSuccessful() else 1)
+          PY
+      - name: Report main baseline regression outcome
+        if: always()
+        env:
+          REGRESSION_OUTCOME: ${{ steps.main_baseline_full_regression.outcome }}
+        run: |
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text(chr(10).join(['### Main baseline regression (diagnostic)', '', '- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**', '- One known interrupt-test harness case is excluded; this is not a complete pass claim.']) + chr(10), encoding='utf-8')"

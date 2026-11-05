@@ -1,0 +1,13 @@
+{
+  "phase": "AFTER fix",
+  "scenario": "A=200 lines captured; B=same-size 1 line at the path; identities=None",
+  "record": {
+    "line_count": 200,
+    "identity_source": "self_observed",
+    "identity_available": false
+  },
+  "verified_mapping": {},
+  "strict_status": "VALID_WITH_ISSUES",
+  "strict_codes": [],
+  "accepts_A_count_as_trusted": false
+}

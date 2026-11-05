@@ -98,7 +98,7 @@ if (!TS_TRUST.trusted) {
   process.stdout.write(JSON.stringify({
     contract_version: CONTRACT, parser_name: PARSER, parser_version: "UNAVAILABLE",
     available: false,
-    availability: { available: false, reason: TS_TRUST.reason, ts_lib: TS_TRUST.tsLib, ts_lib_real_path: TS_TRUST.realPath },
+    availability: { available: false, reason: TS_TRUST.reason, parser_name: PARSER },
     project_diagnostics: [{ code: TS_TRUST.reason, severity: "ERROR",
       message: "The TypeScript install could not be proven trusted; refusing to load it." }],
     files: {}, records: [],
@@ -624,6 +624,29 @@ function main(input) {
       }
       base.resolution_status = "RESOLVED"; base.resolved = true;
       base.target = { file: target.entry, name: target.name, line: target.line, id: "symbol:" + target.entry + "#" + target.name + ":" + target.line, qualified_name: target.entry.replace(/\//g, ".") + "." + target.name };
+      const callable = (ts.isVariableDeclaration(target.target) || ts.isPropertyDeclaration(target.target))
+        ? target.target.initializer : target.target;
+      const parameters = callable && callable.parameters ? callable.parameters : [];
+      const argumentsList = call.arguments || [];
+      const unsupportedArguments = argumentsList.some((argument) => ts.isSpreadElement(argument))
+        || argumentsList.length > parameters.length
+        || parameters.some((parameter) => !!parameter.dotDotDotToken || !ts.isIdentifier(parameter.name));
+      base.argument_binding_status = unsupportedArguments ? "UNSUPPORTED_ARGUMENT_SHAPE" : "EXACT_STATIC_MAPPING";
+      base.argument_bindings = unsupportedArguments ? [] : argumentsList.map((argument, index) => {
+        const parameter = parameters[index];
+        const argumentPosition = loc(sourceFile, argument);
+        const parameterPosition = loc(parameter.getSourceFile(), parameter.name);
+        return {
+          argument_index: index,
+          argument_kind: "POSITIONAL",
+          argument_expression: argument.getText(sourceFile).slice(0, 240),
+          argument_location: { path: entry.rel, line: argumentPosition.line, column: argumentPosition.column },
+          parameter_name: parameter.name.text,
+          parameter_index: index,
+          parameter_kind: "POSITIONAL",
+          parameter_declaration: { path: target.entry, line: parameterPosition.line, column: parameterPosition.column }
+        };
+      });
       const chain = [{ kind: "call", file: entry.rel, line: pos.line, column: pos.column }];
       if (importEvidence) chain.push({ kind: "import", file: entry.rel, line: importEvidence.line, module: importEvidence.module, imported_as: localName });
       chain.push(...reexportEvidence([target]));
@@ -655,7 +678,7 @@ function main(input) {
 
   for (const entry of accepted) {
     const sourceFile = program.getSourceFile(entry.full) || ts.createSourceFile(entry.full, safeRead(entry.full), ts.ScriptTarget.Latest, true, scriptKind(entry.full));
-    const row = { path: entry.rel, language: languageFor(entry.full), parser_name: PARSER, parser_version: ts.version, syntax_status: "VALID", symbols: [], imports: [], calls: [], diagnostics: [] };
+    const row = { path: entry.rel, language: languageFor(entry.full), parser_name: PARSER, parser_version: ts.version, syntax_status: "VALID", symbols: [], imports: [], calls: [], api_client_calls: [], diagnostics: [] };
     const syntaxErrors = sourceFile.parseDiagnostics || [];
     for (const d of syntaxErrors) {
       const position = d.start == null ? null : sourceFile.getLineAndCharacterOfPosition(d.start);
@@ -695,7 +718,48 @@ function main(input) {
     }
     collectRequireImports(sourceFile);
     importsBySource.set(path.resolve(sourceFile.fileName), importEvidenceRows);
-    function visit(node, testContext) {
+    function isFunctionBoundary(node) {
+      return ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)
+        || ts.isArrowFunction(node) || ts.isFunctionExpression(node)
+        || ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node)
+        || ts.isSetAccessorDeclaration(node);
+    }
+
+    function declaredFunctionOwner(node) {
+      let name = null;
+      let locationNode = node;
+      if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name) {
+        name = node.name.getText(sourceFile);
+      } else if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+        const parent = node.parent;
+        if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+          name = parent.name.text;
+        } else if (ts.isPropertyDeclaration(parent)) {
+          name = parent.name.getText(sourceFile);
+        } else if (node.name && ts.isIdentifier(node.name)) {
+          name = node.name.text;
+        }
+      } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+          && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+        name = node.name.text;
+      } else if (ts.isPropertyDeclaration(node) && node.initializer
+          && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+        name = node.name.getText(sourceFile);
+      }
+      if (!name) return null;
+      const position = loc(sourceFile, locationNode);
+      return { name, line: position.line,
+        symbol_id: "symbol:" + entry.rel + "#" + name + ":" + position.line };
+    }
+
+    function visit(node, testContext, callerOwner) {
+      // Anonymous callbacks/lambdas are real scope boundaries. They have no
+      // stable symbol yet, so calls inside them must not inherit the outer
+      // named function's identity. Named declarations and assigned arrows
+      // retain their own exact owner symbol.
+      const currentOwner = isFunctionBoundary(node)
+        ? declaredFunctionOwner(node)
+        : (declaredFunctionOwner(node) || callerOwner || null);
       let childTestContext = testContext;
       if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && /^test\w*/i.test(node.name.getText(sourceFile))) {
         childTestContext = node.name.getText(sourceFile);
@@ -729,19 +793,151 @@ function main(input) {
           const importReference = ts.isPropertyAccessExpression(expression) ? expression.expression : expression;
           const importEvidence = localName ? findImportEvidence(sourceFile, localName, importReference) : null;
           const call = callStatus(node, sourceFile, entry, symbol, localName, importEvidence);
+          if (currentOwner) {
+            call.caller = { name: currentOwner.name, line: currentOwner.line };
+            call.caller_symbol_id = currentOwner.symbol_id;
+          }
           if (childTestContext) call.test_name = childTestContext;
           if (row.syntax_status === "INVALID" && call.resolution_status === "RESOLVED") {
             call.resolution_status = "UNKNOWN"; call.resolved = false; call.diagnostic = "SOURCE_HAS_SYNTAX_ERRORS"; delete call.target;
           }
           if (ts.isNewExpression(node) && call.resolution_status === "RESOLVED") call.relation_type = "instantiates";
           calls.push(call);
+          if (ts.isCallExpression(node)) {
+            const calleeText = node.expression.getText(sourceFile);
+            const isFetch = ts.isIdentifier(node.expression) && node.expression.text === "fetch";
+            const isAxios = /^(?:axios|http|api|client)\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText);
+            if (isFetch || isAxios) {
+              const args = node.arguments || [];
+              const urlArg = args[0];
+              const literalUrl = urlArg && (ts.isStringLiteralLike(urlArg) || ts.isNoSubstitutionTemplateLiteral(urlArg)) ? urlArg.text : null;
+              let httpMethod = isFetch ? "GET" : calleeText.split(".").pop().toUpperCase();
+              if (isFetch && args[1] && ts.isObjectLiteralExpression(args[1])) {
+                for (const property of args[1].properties) {
+                  if (ts.isPropertyAssignment(property) && property.name && property.name.getText(sourceFile).replace(/["']/g, "") === "method"
+                      && property.initializer && (ts.isStringLiteralLike(property.initializer) || ts.isNoSubstitutionTemplateLiteral(property.initializer))) {
+                    httpMethod = property.initializer.text.toUpperCase();
+                  }
+                }
+              }
+              const apiPosition = loc(sourceFile, node);
+              row.api_client_calls.push({
+                callee: calleeText, method: httpMethod,
+                path: literalUrl && literalUrl.startsWith("/") && !/[?#{}$]/.test(literalUrl) ? literalUrl : null,
+                url_expression: urlArg ? urlArg.getText(sourceFile).slice(0, 240) : null,
+                line: apiPosition.line, column: apiPosition.column,
+                caller_symbol_id: currentOwner ? currentOwner.symbol_id : null,
+                caller_name: currentOwner ? currentOwner.name : null,
+                resolution_status: literalUrl && literalUrl.startsWith("/") && !/[?#{}$]/.test(literalUrl) && httpMethod
+                  ? "LITERAL_METHOD_PATH" : "DYNAMIC_OR_UNSUPPORTED_URL",
+                confidence: "STATIC_INFERENCE", verification_status: "NOT_VERIFIED",
+              });
+            }
+          }
         }
       }
-      ts.forEachChild(node, (child) => visit(child, childTestContext));
+      ts.forEachChild(node, (child) => visit(child, childTestContext, currentOwner));
     }
-    for (const statement of sourceFile.statements) visit(statement, null);
+    for (const statement of sourceFile.statements) visit(statement, null, null);
     row.imports = imports;
     row.calls = calls;
+    row.route_handlers = [];
+    function collectRouteHandlers(node) {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+          && ["get", "post", "put", "patch", "delete", "options", "head", "all"].includes(node.expression.name.text.toLowerCase())
+          && node.arguments.length >= 2 && ts.isStringLiteralLike(node.arguments[0])) {
+        const handlerNode = node.arguments[node.arguments.length - 1];
+        const handlerReference = handlerNode.getText(sourceFile);
+        const position = loc(sourceFile, node);
+        const methodName = node.expression.name.text.toUpperCase();
+        const handlerSymbol = checker.getSymbolAtLocation(handlerNode);
+        const resolved = symbolAfterAliases(handlerSymbol);
+        const targets = declarationTargets(resolved);
+        const unique = new Map(targets.map((target) => [target.id, target]));
+        const importRoot = ts.isIdentifier(handlerNode) ? handlerNode
+          : (ts.isPropertyAccessExpression(handlerNode) && ts.isIdentifier(handlerNode.expression)
+            ? handlerNode.expression : null);
+        const importEvidence = importRoot
+          ? findImportEvidence(sourceFile, importRoot.text, importRoot) : null;
+        const recordRow = {
+          method: methodName, path: node.arguments[0].text,
+          line: position.line, column: position.column,
+          handler_reference: handlerReference,
+          resolution_status: "UNKNOWN", candidate_targets: [],
+          evidence_chain: [{ kind: "route_registration", file: entry.rel, line: position.line, column: position.column }]
+        };
+        if (unique.size === 1) {
+          const target = Array.from(unique.values())[0];
+          if (target.entry && !/\\.d\\.(?:ts|mts|cts)$/i.test(target.full)) {
+            recordRow.resolution_status = "RESOLVED";
+            recordRow.target = {
+              id: "symbol:" + target.entry + "#" + target.name + ":" + target.line,
+              path: target.entry, name: target.name, line: target.line
+            };
+            if (importEvidence) {
+              recordRow.evidence_chain.push({
+                kind: "handler_import", file: entry.rel, line: importEvidence.line,
+                module: importEvidence.module, imported_as: importRoot.text,
+              });
+            }
+            recordRow.evidence_chain.push(...reexportEvidence([target]));
+            recordRow.evidence_chain.push({
+              kind: "handler_definition", file: target.entry, line: target.line, name: target.name
+            });
+          } else {
+            recordRow.resolution_status = "EXTERNAL";
+          }
+        } else if (unique.size > 1) {
+          recordRow.resolution_status = "AMBIGUOUS";
+          recordRow.candidate_targets = Array.from(unique.keys()).sort();
+        }
+        row.route_handlers.push(recordRow);
+      }
+      ts.forEachChild(node, collectRouteHandlers);
+    }
+    collectRouteHandlers(sourceFile);
+
+    // S2.13-A: explicit JSX event-prop -> named handler evidence.
+    row.ui_event_bindings = [];
+    const uiEventProps = new Set(["onClick", "onSubmit", "onChange", "onPress", "onTap", "onLongPress"]);
+    function collectUiEventBindings(node) {
+      if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name) && uiEventProps.has(node.name.text)) {
+        const position = loc(sourceFile, node);
+        const initializer = node.initializer;
+        const expression = initializer && ts.isJsxExpression(initializer) ? initializer.expression : null;
+        const item = { event_name: node.name.text, line: position.line, column: position.column,
+          binding_expression: expression ? expression.getText(sourceFile).slice(0, 240) : null,
+          resolution_status: "UNKNOWN", candidate_targets: [], confidence: "STATIC_INFERENCE",
+          verification_status: "NOT_VERIFIED" };
+        if (expression && (ts.isIdentifier(expression) || ts.isPropertyAccessExpression(expression))) {
+          const symbolNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
+          const resolved = symbolAfterAliases(checker.getSymbolAtLocation(symbolNode));
+          const targets = declarationTargets(resolved);
+          const unique = new Map(targets.map((target) => [target.id, target]));
+          if (unique.size === 1) {
+            const target = Array.from(unique.values())[0];
+            if (target.entry && !/\\.d\\.(?:ts|mts|cts)$/i.test(target.full)) {
+              item.resolution_status = "RESOLVED";
+              item.target = { id: "symbol:" + target.entry + "#" + target.name + ":" + target.line,
+                path: target.entry, name: target.name, line: target.line };
+              item.evidence_chain = [{ kind: "jsx_event_attribute", file: entry.rel, line: position.line },
+                { kind: "handler_definition", file: target.entry, line: target.line, name: target.name }];
+            } else item.resolution_status = "EXTERNAL";
+          } else if (unique.size > 1) {
+            item.resolution_status = "AMBIGUOUS";
+            item.candidate_targets = Array.from(unique.keys()).sort();
+          }
+        } else if (expression && (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression))) {
+          item.resolution_status = "INLINE_CALLBACK_NOT_SYMBOL_LINKED";
+        } else if (initializer && ts.isStringLiteral(initializer)) {
+          item.resolution_status = "NON_EXPRESSION_ATTRIBUTE";
+        }
+        row.ui_event_bindings.push(item);
+      }
+      ts.forEachChild(node, collectUiEventBindings);
+    }
+    collectUiEventBindings(sourceFile);
+
     const importBindings = new Map();
     for (const item of imports) for (const binding of item.bindings || []) importBindings.set(binding.local, { module: item.module, line: item.line, imported: binding.imported, kind: binding.kind });
 
