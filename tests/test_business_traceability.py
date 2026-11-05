@@ -514,6 +514,45 @@ class BusinessTraceabilityTests(unittest.TestCase):
             build_business_traceability(self.semantics, self.graph, self.mapping, evidence_matrix=evidence,
                 input_hashes=self.hashes)
 
+    def test_runtime_unknown_function_conflict_is_preserved_in_traceability_and_markdown(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "EVIDENCE_CONFLICT",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": [],
+            "correlations": [{"correlation_id": "corr-unknown", "business_function_ids": ["bf-missing"],
+                "observed_event_ids_by_timestamp": ["evt-unknown"]}],
+            "evidence_conflicts": [{"kind": "UNKNOWN_BUSINESS_FUNCTION", "event_id": "evt-unknown",
+                "business_function_id": "bf-missing"}],
+        }
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            input_hashes=self.hashes, runtime_evidence_validation=runtime)
+        self.assertEqual(result["runtime_evidence_conflict_count"], 1)
+        self.assertEqual(result["unknown_runtime_function_ids"], ["bf-missing"])
+        self.assertEqual(result["runtime_evidence_conflicts"][0]["event_id"], "evt-unknown")
+        self.assertEqual(result["runtime_evidence_conflicts"][0]["business_function_id"], "bf-missing")
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("UNKNOWN_BUSINESS_FUNCTION", markdown)
+        self.assertIn("evt-unknown", markdown)
+        self.assertIn("bf-missing", markdown)
+
+    def test_runtime_evidence_conflicts_default_to_empty_and_malformed_conflicts_rejected(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": ["bf-list"],
+            "correlations": [{"correlation_id": "corr-clean", "business_function_ids": ["bf-list"]}],
+        }
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            input_hashes=self.hashes, runtime_evidence_validation=runtime)
+        self.assertEqual(result["runtime_evidence_conflicts"], [])
+        self.assertEqual(result["runtime_evidence_conflict_count"], 0)
+        malformed = dict(runtime, evidence_conflicts=[{"kind": 7}])
+        with self.assertRaisesRegex(ValueError, "evidence_conflicts\\[0\\] is malformed"):
+            build_business_traceability(self.semantics, self.graph, self.mapping,
+                input_hashes=self.hashes, runtime_evidence_validation=malformed)
+
 
 if __name__ == "__main__":
     unittest.main()
