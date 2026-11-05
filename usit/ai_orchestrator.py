@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .ai_gateway import Agent2APIClient, DEFAULT_BASE_URL, DEFAULT_API_KEY_ENV
+from .safeio import read_bounded_no_follow
 
 SCHEMA = "usit-ai-model-registry-v1"
 MAX_CONFIG_BYTES = 1024 * 1024
@@ -22,14 +23,14 @@ TASK_ROLES = {
 
 def load_model_registry(path: str | Path) -> dict[str, Any]:
     source = Path(path).expanduser()
-    if source.is_symlink():
-        raise ValueError("model registry must not be a symbolic link")
-    resolved = source.resolve(strict=True)
-    if not resolved.is_file():
-        raise ValueError("model registry must be a regular file")
-    raw = resolved.read_bytes()
-    if len(raw) > MAX_CONFIG_BYTES:
-        raise ValueError("model registry exceeds 1 MiB")
+    try:
+        raw = read_bounded_no_follow(source, MAX_CONFIG_BYTES)
+    except ValueError as exc:
+        if "exceeds size limit" in str(exc):
+            raise ValueError("model registry exceeds 1 MiB") from None
+        raise ValueError("model registry must be a regular non-symbolic-link file") from None
+    except OSError:
+        raise ValueError("model registry must be a regular non-symbolic-link file") from None
     try:
         doc = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
