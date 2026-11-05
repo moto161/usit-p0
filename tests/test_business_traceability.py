@@ -463,6 +463,39 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertEqual(linked["stage_status"]["runtime_observation"], "EVIDENCE_CONFLICT")
         self.assertEqual(linked["traceability_status"], "EVIDENCE_CONFLICT")
 
+    def test_runtime_observed_function_ids_must_match_explicit_correlation_links(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": ["bf-list"],
+            "correlations": [{"correlation_id": "corr-no-function", "business_function_ids": []}],
+        }
+        with self.assertRaisesRegex(ValueError, "does not match.*correlations"):
+            build_business_traceability(
+                self.semantics, self.graph, self.mapping,
+                input_hashes=self.hashes, runtime_evidence_validation=runtime,
+            )
+
+    def test_runtime_observed_function_ids_reject_duplicates_and_unknown_ids(self):
+        base = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "correlations": [{"correlation_id": "corr-list", "business_function_ids": ["bf-list"]}],
+        }
+        for ids, message in (
+            (["bf-list", "bf-list"], "duplicate business_function_ids_observed"),
+            (["bf-missing"], "unknown graph function IDs"),
+        ):
+            runtime = dict(base, business_function_ids_observed=ids)
+            with self.subTest(ids=ids):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_business_traceability(
+                        self.semantics, self.graph, self.mapping,
+                        input_hashes=self.hashes, runtime_evidence_validation=runtime,
+                    )
+
     def test_runtime_evidence_graph_hash_mismatch_is_rejected(self):
         runtime = {
             "schema_version": "usit-runtime-evidence-validation-v1",
