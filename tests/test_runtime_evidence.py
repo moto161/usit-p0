@@ -57,6 +57,15 @@ class RuntimeEvidenceTests(unittest.TestCase):
         self.assertTrue(chain["has_http_exchange"])
         self.assertTrue(chain["has_backend_span"])
         self.assertFalse(chain["has_database_change"])
+        self.assertEqual(chain["observed_event_ids_by_timestamp"], ["e1", "e2", "e3", "e4"])
+        self.assertEqual(chain["explicit_parent_edges"], [
+            {"parent_event_id": "e1", "child_event_id": "e2"},
+            {"parent_event_id": "e2", "child_event_id": "e3"},
+            {"parent_event_id": "e3", "child_event_id": "e4"},
+        ])
+        self.assertEqual(chain["parent_linked_event_count"], 4)
+        self.assertEqual(chain["root_event_ids"], ["e1"])
+        self.assertEqual(chain["unlinked_event_ids"], [])
         self.assertTrue(any("不证明功能正确" in x for x in result["limitations"]))
 
     def test_graph_hash_and_unknown_function_are_conflicts(self):
