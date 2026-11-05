@@ -140,13 +140,49 @@ def build_business_traceability(
     if not isinstance(rows, list):
         raise ValueError("evidence_matrix.business_function_evidence must be a list")
     runtime_observed_ids = set(runtime_evidence_validation.get("business_function_ids_observed", [])) if runtime_evidence_validation else set()
-    runtime_correlations_by_function: dict[str, list[str]] = {}
+    runtime_correlations_by_function: dict[str, list[dict[str, Any]]] = {}
     if runtime_evidence_validation:
+        seen_correlation_ids: set[str] = set()
         for correlation in runtime_evidence_validation["correlations"]:
-            if not isinstance(correlation, dict) or not isinstance(correlation.get("correlation_id"), str):
+            if not isinstance(correlation, dict) or not isinstance(correlation.get("correlation_id"), str) or not correlation["correlation_id"]:
                 raise ValueError("runtime evidence validation contains malformed correlation")
-            for observed_id in correlation.get("business_function_ids", []):
-                runtime_correlations_by_function.setdefault(observed_id, []).append(correlation["correlation_id"])
+            correlation_id = correlation["correlation_id"]
+            if correlation_id in seen_correlation_ids:
+                raise ValueError("runtime evidence validation contains duplicate correlation_id")
+            seen_correlation_ids.add(correlation_id)
+            observed_ids = correlation.get("business_function_ids", [])
+            if not isinstance(observed_ids, list) or any(not isinstance(value, str) or not value for value in observed_ids):
+                raise ValueError("runtime evidence validation contains malformed business_function_ids")
+            parent_edges = correlation.get("explicit_parent_edges", [])
+            if not isinstance(parent_edges, list) or any(
+                not isinstance(edge, dict)
+                or not isinstance(edge.get("parent_event_id"), str)
+                or not isinstance(edge.get("child_event_id"), str)
+                for edge in parent_edges
+            ):
+                raise ValueError("runtime evidence validation contains malformed explicit_parent_edges")
+            event_ids = correlation.get("observed_event_ids_by_timestamp", [])
+            if not isinstance(event_ids, list) or any(not isinstance(value, str) for value in event_ids):
+                raise ValueError("runtime evidence validation contains malformed observed_event_ids_by_timestamp")
+            for observed_id in observed_ids:
+                runtime_correlations_by_function.setdefault(observed_id, []).append({
+                    "correlation_id": correlation_id,
+                    "event_count": correlation.get("event_count"),
+                    "observed_stages": correlation.get("observed_stages", []),
+                    "observed_event_ids_by_timestamp": list(event_ids),
+                    "explicit_parent_edges": [
+                        {"parent_event_id": edge["parent_event_id"], "child_event_id": edge["child_event_id"]}
+                        for edge in parent_edges
+                    ],
+                    "parent_topology_status": correlation.get("parent_topology_status", "NOT_PROVIDED"),
+                    "parent_link_coverage_ratio": correlation.get("parent_link_coverage_ratio"),
+                    "root_event_ids": correlation.get("root_event_ids", []),
+                    "leaf_event_ids": correlation.get("leaf_event_ids", []),
+                    "branching_parent_event_ids": correlation.get("branching_parent_event_ids", []),
+                    "isolated_event_ids": correlation.get("isolated_event_ids", []),
+                    "cycle_event_ids": correlation.get("cycle_event_ids", []),
+                    "interpretation": "仅复用同一 correlation 中显式 business_function_id；父子边来自采集端声明，时间排序不代表因果。",
+                })
     runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT")
     runtime_by_function: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -281,7 +317,13 @@ def build_business_traceability(
             "runtime_evidence": runtime,
             "runtime_observation": {
                 "status": runtime_observation_status,
-                "correlation_ids": sorted(set(runtime_correlations_by_function.get(fid, []))) if fid else [],
+                "correlation_ids": sorted(
+                    item["correlation_id"] for item in runtime_correlations_by_function.get(fid, [])
+                ) if fid else [],
+                "correlations": sorted(
+                    runtime_correlations_by_function.get(fid, []),
+                    key=lambda item: item["correlation_id"],
+                ) if fid else [],
             } if runtime_evidence_validation else None,
             "evidence_refs": refs,
             "review": {key: mapping.get(key) for key in ("reviewed_by", "reviewed_at", "rationale")} if mapping else None,
