@@ -63,6 +63,19 @@ class AIOrchestratorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symbolic link"):
                 load_model_registry(link)
 
+    def test_registry_rejects_oversized_input_before_unbounded_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "large-registry.json"
+            with path.open("wb") as stream:
+                stream.truncate(1024 * 1024 + 1)
+            with self.assertRaisesRegex(ValueError, "exceeds 1 MiB"):
+                load_model_registry(path)
+
+    def test_registry_rejects_directory_input(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(ValueError):
+                load_model_registry(Path(td))
+
     def test_ensemble_returns_partial_when_one_model_fails(self):
         class FakeClient:
             def __init__(self, *args, **kwargs):
