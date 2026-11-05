@@ -10,8 +10,6 @@ on:
   push:
     branches:
       - main
-      - feature/understanding-to-test-v1
-      - feature/business-function-graph-v1
   pull_request:
     branches:
       - main
