@@ -30,7 +30,7 @@ def load_model_registry(path: str | Path) -> dict[str, Any]:
             raise ValueError("model registry exceeds 1 MiB") from None
         raise ValueError("model registry must not be a symbolic link and must be a regular file") from None
     except OSError:
-        raise ValueError("model registry must be a regular non-symbolic-link file") from None
+        raise ValueError("model registry must not be a symbolic link and must be a regular file") from None
     try:
         doc = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
