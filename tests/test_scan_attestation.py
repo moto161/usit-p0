@@ -125,6 +125,35 @@ class ScanAttestationTests(unittest.TestCase):
         result = self.verify()
         self.assertNotIn("private_key", json.dumps(result))
 
+    def test_trusted_public_key_loader_rejects_symlink(self):
+        import tempfile
+        from pathlib import Path
+        from usit.scan_attestation import load_trusted_public_key
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "trusted.bin"
+            target.write_bytes(self.public)
+            link = root / "trusted-link.bin"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+            with self.assertRaises((OSError, ValueError)):
+                load_trusted_public_key(str(link))
+
+    def test_trusted_public_key_loader_rejects_oversized_file(self):
+        import tempfile
+        from pathlib import Path
+        from usit.scan_attestation import load_trusted_public_key
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized-key.bin"
+            with path.open("wb") as stream:
+                stream.truncate(16 * 1024 + 1)
+            with self.assertRaises((OSError, ValueError)):
+                load_trusted_public_key(str(path))
+
     def test_manifest_path_traversal_is_rejected_during_creation(self):
         with self.assertRaisesRegex(ValueError, "traversal"):
             create_scan_attestation(
