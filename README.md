@@ -498,7 +498,7 @@ python -m usit validate-runtime-evidence --events .\\runtime-events.json --graph
 python -m usit trace-business --semantics .\\business_semantics.json --graph .\\business_knowledge_graph.json --mapping .\\feature-function-mapping.json --test-plan .\\business_test_plan.json --evidence-matrix .\\business-evidence-verification.json --runtime-evidence .\\runtime-evidence-validation.json --out .\\business-traceability-matrix.json --out-md .\\business-traceability-report.md
 ```
 
-新增的 `runtime_observation` 阶段与 `test_execution` 分开记录：前者只表示事件已观察并通过显式业务功能 ID 关联；后者仍只来自已导入的测试执行报告。需求未获审阅映射时，即使运行事件存在，也不会把事件自动关联到该需求。图谱哈希不匹配会拒绝回填；事件验证报告内部存在冲突时，追溯行保留 `EVIDENCE_CONFLICT`，不把冲突事件标成可信观察。
+新增的 `runtime_observation` 阶段与 `test_execution` 分开记录：前者只表示事件已观察并通过显式业务功能 ID 关联；后者仍只来自已导入的测试执行报告。需求未获审阅映射时，即使运行事件存在，也不会把事件自动关联到该需求。图谱哈希不匹配会拒绝回填；事件验证报告内部存在冲突时，追溯行保留 `EVIDENCE_CONFLICT`，不把冲突事件标成可信观察。 追溯矩阵另行保留 `runtime_evidence_conflicts`、`runtime_evidence_conflict_count` 和 `unknown_runtime_function_ids`；冲突报告列出冲突类型、事件 ID、业务功能 ID 等原始字段，未知功能 ID 不会被静默丢弃，也不会被关联到图谱中的其他功能。若冲突没有可精确定位的业务功能 ID，则按全局冲突处理。`trace-business` 的所有 JSON 输入均通过有界 no-follow 文件描述符读取，拒绝符号链接、非普通文件和超出各输入上限的文件。
 
 
 ## S2.23 — Android 原生应用事件适配器（离线）
