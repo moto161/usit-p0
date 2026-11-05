@@ -251,14 +251,14 @@ def validate_runtime_evidence(
             topology_status = "CYCLE_DETECTED"
         elif branching:
             topology_status = "BRANCHED"
+        elif not edges:
+            topology_status = "NO_EXPLICIT_LINKS"
         elif len(roots) > 1:
             topology_status = "MULTI_ROOT"
-        elif edges and len(roots) == 1 and len(edges) == len(rows) - 1:
+        elif len(roots) == 1 and len(edges) == len(rows) - 1:
             topology_status = "LINEAR_CHAIN"
-        elif edges:
-            topology_status = "PARTIAL_LINKAGE"
         else:
-            topology_status = "NO_EXPLICIT_LINKS"
+            topology_status = "PARTIAL_LINKAGE"
         summaries[-1]["leaf_event_ids"] = leaves
         summaries[-1]["branching_parent_event_ids"] = branching
         summaries[-1]["isolated_event_ids"] = isolated
