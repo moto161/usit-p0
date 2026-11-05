@@ -385,8 +385,65 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertEqual(linked["stage_status"]["test_execution"], "NOT_MEASURED")
         self.assertEqual(linked["traceability_status"], "TRACEABLE_WITH_RUNTIME_OBSERVATION")
         self.assertEqual(linked["runtime_observation"]["correlation_ids"], ["corr-1"])
+        self.assertEqual(linked["runtime_observation"]["correlations"][0]["parent_topology_status"], "NOT_PROVIDED")
         self.assertEqual(unreviewed["stage_status"]["runtime_observation"], "NOT_OBSERVED")
         self.assertIsNone(unreviewed["business_function_id"])
+
+    def test_runtime_correlation_topology_is_carried_by_explicit_function_id_only(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash, "runtime_evidence_sha256": "b" * 64},
+            "business_function_ids_observed": ["bf-list"],
+            "correlations": [{
+                "correlation_id": "corr-chain",
+                "business_function_ids": ["bf-list"],
+                "event_count": 3,
+                "observed_stages": ["UI_ACTION", "HTTP_REQUEST", "HTTP_RESPONSE"],
+                "observed_event_ids_by_timestamp": ["evt-1", "evt-2", "evt-3"],
+                "explicit_parent_edges": [
+                    {"parent_event_id": "evt-1", "child_event_id": "evt-2"},
+                    {"parent_event_id": "evt-2", "child_event_id": "evt-3"},
+                ],
+                "parent_topology_status": "LINEAR_CHAIN",
+                "parent_link_coverage_ratio": 1.0,
+                "root_event_ids": ["evt-1"],
+                "leaf_event_ids": ["evt-3"],
+                "branching_parent_event_ids": [],
+                "isolated_event_ids": [],
+                "cycle_event_ids": [],
+            }],
+        }
+        result = build_business_traceability(
+            self.semantics, self.graph, self.mapping,
+            input_hashes=self.hashes, runtime_evidence_validation=runtime,
+        )
+        linked = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        chain = linked["runtime_observation"]["correlations"][0]
+        self.assertEqual(chain["correlation_id"], "corr-chain")
+        self.assertEqual(chain["parent_topology_status"], "LINEAR_CHAIN")
+        self.assertEqual(chain["explicit_parent_edges"][0],
+                         {"parent_event_id": "evt-1", "child_event_id": "evt-2"})
+        self.assertEqual(chain["observed_event_ids_by_timestamp"], ["evt-1", "evt-2", "evt-3"])
+        self.assertIn("时间排序不代表因果", chain["interpretation"])
+
+    def test_rejects_malformed_runtime_correlation_parent_edges(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": ["bf-list"],
+            "correlations": [{
+                "correlation_id": "corr-invalid",
+                "business_function_ids": ["bf-list"],
+                "explicit_parent_edges": [{"parent_event_id": "evt-1"}],
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "malformed explicit_parent_edges"):
+            build_business_traceability(
+                self.semantics, self.graph, self.mapping,
+                input_hashes=self.hashes, runtime_evidence_validation=runtime,
+            )
 
     def test_global_runtime_conflict_is_not_reported_as_no_observation(self):
         runtime = {
