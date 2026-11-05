@@ -167,9 +167,7 @@ def _load_authorization(path: str | os.PathLike[str], project: Path, evidence_pa
     if not auth_path.is_absolute() or auth_path.is_symlink():
         raise ValueError("authorization file must be an absolute regular file outside the project")
     resolved = auth_path.resolve(strict=True)
-    if not resolved.is_relative_to(project):
-        pass
-    else:
+    if resolved.is_relative_to(project):
         raise ValueError("authorization file must be outside the project")
     value = json.loads(read_bounded_no_follow(auth_path, 16 * 1024).decode("utf-8"))
     if not isinstance(value, dict) or value.get("schema_version") != AUTH_SCHEMA:
