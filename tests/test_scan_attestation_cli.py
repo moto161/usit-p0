@@ -75,6 +75,28 @@ class ScanAttestationCliTests(unittest.TestCase):
         report = json.loads(self.output.read_text(encoding="utf-8"))
         self.assertEqual(report["status"], "ATTESTATION_SIGNATURE_VALID_UNTRUSTED_KEY")
 
+    def test_cli_rejects_oversized_manifest_before_reading(self):
+        self.manifest.write_bytes(b"")
+        with self.manifest.open("wb") as stream:
+            stream.truncate(50 * 1024 * 1024 + 1)
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = main(self.command())
+        self.assertEqual(code, 2)
+        self.assertFalse(self.output.exists())
+
+    def test_cli_rejects_symlinked_attestation(self):
+        link = self.root / "attestation-link.json"
+        try:
+            link.symlink_to(self.sidecar)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        args = self.command()
+        args[args.index("--attestation") + 1] = str(link)
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = main(args)
+        self.assertEqual(code, 2)
+        self.assertFalse(self.output.exists())
+
     def test_cli_never_overwrites_existing_report(self):
         self.output.write_text("keep", encoding="utf-8")
         stderr = io.StringIO()
