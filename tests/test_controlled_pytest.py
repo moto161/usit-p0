@@ -133,6 +133,29 @@ class ControlledPytestTests(unittest.TestCase):
                 authorization_file=self.authorization,
             )
 
+    def test_execution_authorization_rejects_oversized_file(self):
+        with self.authorization.open("wb") as stream:
+            stream.truncate(16 * 1024 + 1)
+        with self.assertRaisesRegex(ValueError, "size limit"):
+            run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+            )
+        self.assertEqual(list(self.evidence.iterdir()), [])
+
+    def test_execution_authorization_rejects_symlink(self):
+        link = self.base / "authorization-link.json"
+        try:
+            link.symlink_to(self.authorization)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        with self.assertRaisesRegex(ValueError, "absolute regular file"):
+            run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=link,
+            )
+        self.assertEqual(list(self.evidence.iterdir()), [])
+
     def test_reserved_pytest_report_options_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "reserved by USIT"):
             run_controlled_pytest(
