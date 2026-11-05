@@ -38,6 +38,14 @@ class VerificationCaptureTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_verify_manifest_rejects_oversized_manifest_input(self):
+        manifest = self.evidence_parent / "evidence_manifest.json"
+        with manifest.open("wb") as stream:
+            stream.truncate(50 * 1024 * 1024 + 1)
+        result = capture.verify_manifest(self.evidence_parent)
+        self.assertFalse(result["valid"])
+        self.assertTrue(any("size limit" in error for error in result["errors"]))
+
     def test_success_captures_separate_streams_and_valid_manifest(self):
         result = self.run_capture(
             "import sys; print('only-out'); print('only-err', file=sys.stderr)"
