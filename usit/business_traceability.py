@@ -220,7 +220,7 @@ def build_business_traceability(
                 "runtime evidence business_function_ids_observed does not match "
                 "the known function IDs declared by correlations"
             )
-    runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT" and any(not item.get("business_function_id") for item in runtime_evidence_conflicts))
+    runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT" and (not runtime_evidence_conflicts or any(not item.get("business_function_id") for item in runtime_evidence_conflicts)))
     runtime_conflict_function_ids = {item["business_function_id"] for item in runtime_evidence_conflicts if isinstance(item.get("business_function_id"), str)}
     runtime_by_function: dict[str, dict[str, Any]] = {}
     for row in rows:
