@@ -572,6 +572,8 @@ USIT now supports explicit role-based parallel calls to local Agent2API models. 
 
 ### Initialize and configure a local model registry
 
+The registry JSON is read with a bounded no-follow file descriptor (1 MiB maximum). Symlink/reparse-point and non-regular-file inputs are rejected; this protects the final file component and does not claim to validate every parent directory component.
+
 ```powershell
 python -m usit ai-init-registry --out .\\usit-models.local.json
 ```
