@@ -60,6 +60,16 @@ def build_business_traceability(
             raise ValueError("runtime evidence validation is missing business_function_ids_observed")
         if not isinstance(runtime_evidence_validation.get("correlations"), list):
             raise ValueError("runtime evidence validation is missing correlations")
+        conflicts = runtime_evidence_validation.get("evidence_conflicts", [])
+        if not isinstance(conflicts, list):
+            raise ValueError("runtime evidence validation evidence_conflicts must be a list")
+        for index, conflict in enumerate(conflicts):
+            if not isinstance(conflict, dict) or not isinstance(conflict.get("kind"), str) or not conflict["kind"].strip():
+                raise ValueError(f"runtime evidence validation evidence_conflicts[{index}] is malformed")
+            for field in ("event_id", "business_function_id", "parent_event_id", "expected", "actual"):
+                value = conflict.get(field)
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"runtime evidence validation evidence_conflicts[{index}].{field} must be a string")
 
     features = [item for item in semantics["features"] if isinstance(item, dict) and isinstance(item.get("name"), str)]
     feature_index: dict[tuple[str, str, int | None], dict[str, Any]] = {}
@@ -140,6 +150,8 @@ def build_business_traceability(
     if not isinstance(rows, list):
         raise ValueError("evidence_matrix.business_function_evidence must be a list")
     runtime_observed_ids: set[str] = set()
+    runtime_unknown_function_ids: set[str] = set()
+    runtime_evidence_conflicts = list(runtime_evidence_validation.get("evidence_conflicts", [])) if runtime_evidence_validation else []
     runtime_correlations_by_function: dict[str, list[dict[str, Any]]] = {}
     if runtime_evidence_validation:
         observed_ids = runtime_evidence_validation["business_function_ids_observed"]
@@ -194,13 +206,22 @@ def build_business_traceability(
                     "cycle_event_ids": correlation.get("cycle_event_ids", []),
                     "interpretation": "仅复用同一 correlation 中显式 business_function_id；父子边来自采集端声明，时间排序不代表因果。",
                 })
-        correlation_observed_ids = set(runtime_correlations_by_function) & set(functions)
+        correlation_ids_all = set(runtime_correlations_by_function)
+        correlation_observed_ids = correlation_ids_all & set(functions)
+        runtime_unknown_function_ids = correlation_ids_all - set(functions)
+        declared_unknown_ids = {
+            item["business_function_id"] for item in runtime_evidence_conflicts
+            if item.get("kind") == "UNKNOWN_BUSINESS_FUNCTION" and isinstance(item.get("business_function_id"), str)
+        }
+        if runtime_unknown_function_ids - declared_unknown_ids:
+            raise ValueError("unknown correlation business_function_ids require UNKNOWN_BUSINESS_FUNCTION conflict details")
         if correlation_observed_ids != runtime_observed_ids:
             raise ValueError(
                 "runtime evidence business_function_ids_observed does not match "
                 "the known function IDs declared by correlations"
             )
-    runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT")
+    runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT" and any(not item.get("business_function_id") for item in runtime_evidence_conflicts))
+    runtime_conflict_function_ids = {item["business_function_id"] for item in runtime_evidence_conflicts if isinstance(item.get("business_function_id"), str)}
     runtime_by_function: dict[str, dict[str, Any]] = {}
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("business_function_id"), str):
@@ -241,7 +262,8 @@ def build_business_traceability(
         case_completeness = test_execution_detail.get("mapped_case_completeness", "NOT_PROVIDED")
         runtime_status = runtime.get("test_execution_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
         coverage_status = runtime.get("code_coverage_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
-        runtime_observation_status = "EVIDENCE_CONFLICT" if runtime_global_conflict else ("RUNTIME_OBSERVED" if fid in runtime_observed_ids else ("NOT_OBSERVED" if runtime_evidence_validation else "NOT_MEASURED"))
+        function_runtime_conflict = bool(fid and fid in runtime_conflict_function_ids)
+        runtime_observation_status = "EVIDENCE_CONFLICT" if runtime_global_conflict or function_runtime_conflict else ("RUNTIME_OBSERVED" if fid in runtime_observed_ids else ("NOT_OBSERVED" if runtime_evidence_validation else "NOT_MEASURED"))
         valid_runtime_statuses = {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"}
         valid_coverage_statuses = {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}
         if runtime_status not in valid_runtime_statuses:
@@ -268,7 +290,7 @@ def build_business_traceability(
             "code_coverage": coverage_status,
             "runtime_observation": runtime_observation_status,
         }
-        row_status = "EVIDENCE_CONFLICT" if view and (runtime_global_conflict or test_evidence_conflict) else (
+        row_status = "EVIDENCE_CONFLICT" if view and (runtime_global_conflict or function_runtime_conflict or test_evidence_conflict) else (
             "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} else (
             "TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE" if view and runtime and stages["test_execution"] == "UNKNOWN" else (
             "TRACEABLE_WITH_RUNTIME_OBSERVATION" if view and runtime_observation_status == "RUNTIME_OBSERVED" else (
@@ -357,6 +379,9 @@ def build_business_traceability(
         "business_function_view_count": len(functions),
         "reviewed_mapping_count": len(mapping_by_feature),
         "traceability_status_counts": dict(sorted(status_counts.items())),
+        "runtime_evidence_conflicts": runtime_evidence_conflicts,
+        "runtime_evidence_conflict_count": len(runtime_evidence_conflicts),
+        "unknown_runtime_function_ids": sorted(runtime_unknown_function_ids),
         "rows": result_rows,
         "unmapped_feature_count": sum(1 for row in result_rows if row["mapping_decision"] == "NOT_MAPPED"),
         "unlinked_runtime_function_ids": sorted(set(runtime_by_function) - set(functions)),
