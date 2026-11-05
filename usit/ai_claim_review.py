@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .safeio import read_bounded_no_follow
+
 LEDGER_SCHEMA = "usit-ai-claim-ledger-v1"
 REVIEW_SCHEMA = "usit-ai-claim-review-v1"
 MAX_INPUT_BYTES = 10 * 1024 * 1024
@@ -49,14 +51,7 @@ def _sha256(value: Any, label: str) -> str:
 
 def load_claim_ledger(path: str | Path) -> tuple[dict[str, Any], str]:
     source = Path(path).expanduser()
-    if source.is_symlink():
-        raise ValueError("claim ledger must not be a symbolic link")
-    resolved = source.resolve(strict=True)
-    if not resolved.is_file():
-        raise ValueError("claim ledger must be a regular file")
-    raw = resolved.read_bytes()
-    if len(raw) > MAX_INPUT_BYTES:
-        raise ValueError("claim ledger exceeds 10 MiB")
+    raw = read_bounded_no_follow(source, MAX_INPUT_BYTES)
     try:
         ledger = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
