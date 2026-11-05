@@ -139,9 +139,18 @@ def build_business_traceability(
     rows = evidence_matrix.get("business_function_evidence", []) if evidence_matrix else []
     if not isinstance(rows, list):
         raise ValueError("evidence_matrix.business_function_evidence must be a list")
-    runtime_observed_ids = set(runtime_evidence_validation.get("business_function_ids_observed", [])) if runtime_evidence_validation else set()
+    runtime_observed_ids: set[str] = set()
     runtime_correlations_by_function: dict[str, list[dict[str, Any]]] = {}
     if runtime_evidence_validation:
+        observed_ids = runtime_evidence_validation["business_function_ids_observed"]
+        if any(not isinstance(value, str) or not value for value in observed_ids):
+            raise ValueError("runtime evidence validation contains malformed business_function_ids_observed")
+        if len(observed_ids) != len(set(observed_ids)):
+            raise ValueError("runtime evidence validation contains duplicate business_function_ids_observed")
+        unknown_observed_ids = set(observed_ids) - set(functions)
+        if unknown_observed_ids:
+            raise ValueError("runtime evidence validation business_function_ids_observed contains unknown graph function IDs")
+        runtime_observed_ids = set(observed_ids)
         seen_correlation_ids: set[str] = set()
         for correlation in runtime_evidence_validation["correlations"]:
             if not isinstance(correlation, dict) or not isinstance(correlation.get("correlation_id"), str) or not correlation["correlation_id"]:
@@ -153,6 +162,8 @@ def build_business_traceability(
             observed_ids = correlation.get("business_function_ids", [])
             if not isinstance(observed_ids, list) or any(not isinstance(value, str) or not value for value in observed_ids):
                 raise ValueError("runtime evidence validation contains malformed business_function_ids")
+            if len(observed_ids) != len(set(observed_ids)):
+                raise ValueError("runtime evidence validation contains duplicate correlation business_function_ids")
             parent_edges = correlation.get("explicit_parent_edges", [])
             if not isinstance(parent_edges, list) or any(
                 not isinstance(edge, dict)
@@ -183,6 +194,12 @@ def build_business_traceability(
                     "cycle_event_ids": correlation.get("cycle_event_ids", []),
                     "interpretation": "仅复用同一 correlation 中显式 business_function_id；父子边来自采集端声明，时间排序不代表因果。",
                 })
+        correlation_observed_ids = set(runtime_correlations_by_function) & set(functions)
+        if correlation_observed_ids != runtime_observed_ids:
+            raise ValueError(
+                "runtime evidence business_function_ids_observed does not match "
+                "the known function IDs declared by correlations"
+            )
     runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT")
     runtime_by_function: dict[str, dict[str, Any]] = {}
     for row in rows:
