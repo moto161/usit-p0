@@ -33,9 +33,14 @@ from .controlled_pytest import run_controlled_pytest
 from .safeio import read_bounded_no_follow
 
 
+def _read_bounded_bytes(path, limit):
+    """Read a CLI artifact input through a bounded no-follow descriptor."""
+    return read_bounded_no_follow(Path(path).expanduser(), limit)
+
+
 def _read_bounded_json(path, limit):
     """Read a CLI artifact JSON input through a bounded no-follow descriptor."""
-    raw = read_bounded_no_follow(Path(path).expanduser(), limit)
+    raw = _read_bounded_bytes(path, limit)
     return raw, json.loads(raw)
 
 def selftest() -> int:
@@ -126,7 +131,7 @@ def _plan_business_tests(a) -> int:
             raise ValueError("graph input must be outside the target project")
         if graph_path.is_relative_to(out):
             raise ValueError("graph input must be outside the output directory")
-        source_graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        _, source_graph = _read_bounded_json(supplied_graph, 50 * 1024 * 1024)
         business_graph = project_business_graph(source_graph, semantics)
         security_plan = plan_security_tests(business_graph)
     plan = plan_business_tests(semantics, business_graph)
@@ -332,7 +337,9 @@ def main(argv=None):
             for key_path in a.trusted_public_key:
                 raw_key=load_trusted_public_key(key_path)
                 trust[public_key_id(raw_key)]=raw_key
-            result=verify_scan_attestation(manifest.read_bytes(),attestation.read_bytes(),trust,
+            manifest_bytes = _read_bounded_bytes(manifest_path, 50 * 1024 * 1024)
+            attestation_bytes = _read_bounded_bytes(attestation_path, 64 * 1024)
+            result=verify_scan_attestation(manifest_bytes,attestation_bytes,trust,
                 expected_snapshot_id=a.expected_snapshot_id)
             output=Path(a.out).expanduser()
             if output.is_symlink() or output.exists():
