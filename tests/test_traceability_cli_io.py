@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from usit.cli import _read_trace_json
+from usit.cli import _read_bounded_json
 
 
 class TraceabilityCliInputTests(unittest.TestCase):
@@ -13,7 +13,7 @@ class TraceabilityCliInputTests(unittest.TestCase):
             path = Path(td) / "input.json"
             raw = b'{"schema_version":"fixture","value":1}'
             path.write_bytes(raw)
-            returned, document = _read_trace_json(path, len(raw))
+            returned, document = _read_bounded_json(path, len(raw))
             self.assertEqual(returned, raw)
             self.assertEqual(document, {"schema_version": "fixture", "value": 1})
 
@@ -22,7 +22,7 @@ class TraceabilityCliInputTests(unittest.TestCase):
             path = Path(td) / "large.json"
             path.write_bytes(b'{"value":"' + b"x" * 128 + b'"}')
             with self.assertRaisesRegex(ValueError, "exceeds size limit"):
-                _read_trace_json(path, 32)
+                _read_bounded_json(path, 32)
 
     def test_rejects_symbolic_link_input(self):
         with tempfile.TemporaryDirectory(prefix="usit-trace-cli-") as td:
@@ -35,12 +35,12 @@ class TraceabilityCliInputTests(unittest.TestCase):
             except (OSError, NotImplementedError) as exc:
                 self.skipTest(f"symbolic link creation unavailable: {exc}")
             with self.assertRaises((OSError, ValueError)):
-                _read_trace_json(link, 1024)
+                _read_bounded_json(link, 1024)
 
     def test_rejects_directory_as_input(self):
         with tempfile.TemporaryDirectory(prefix="usit-trace-cli-") as td:
             with self.assertRaises((OSError, ValueError)):
-                _read_trace_json(Path(td), 1024)
+                _read_bounded_json(Path(td), 1024)
 
 
 if __name__ == "__main__":
