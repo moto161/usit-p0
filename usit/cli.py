@@ -30,6 +30,14 @@ from .ai_evidence_binding import verify_evidence_bindings_file
 from .scan_attestation import load_trusted_public_key, public_key_id, verify_scan_attestation
 from .controlled_pytest import run_controlled_pytest
 
+from .safeio import read_bounded_no_follow
+
+
+def _read_trace_json(path, limit):
+    """Read a trace-business JSON input through a bounded no-follow descriptor."""
+    raw = read_bounded_no_follow(Path(path).expanduser(), limit)
+    return raw, json.loads(raw)
+
 def selftest() -> int:
     from .scanner import discover_files, analyze_file
     checks=[]
@@ -497,21 +505,13 @@ def main(argv=None):
             return 0
         if a.cmd=='trace-business':
             import hashlib
-            def read_trace_json(path, limit):
-                source=Path(path).expanduser()
-                if source.is_symlink(): raise ValueError("input must not be a symbolic link")
-                resolved=source.resolve(strict=True)
-                if not resolved.is_file(): raise ValueError("input must be a regular file")
-                raw=resolved.read_bytes()
-                if len(raw)>limit: raise ValueError("business traceability input exceeds size limit")
-                return raw,json.loads(raw)
-            sem_bytes,sem_doc=read_trace_json(a.semantics,20*1024*1024)
-            graph_bytes,graph_doc=read_trace_json(a.graph,50*1024*1024)
-            mapping_bytes,mapping_doc=read_trace_json(a.mapping,10*1024*1024)
-            plan_pair=read_trace_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
-            matrix_pair=read_trace_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
-            runtime_pair=read_trace_json(a.runtime_evidence,50*1024*1024) if a.runtime_evidence else (None,None)
-            security_pair=read_trace_json(a.security_test_plan,20*1024*1024) if a.security_test_plan else (None,None)
+            sem_bytes,sem_doc=_read_trace_json(a.semantics,20*1024*1024)
+            graph_bytes,graph_doc=_read_trace_json(a.graph,50*1024*1024)
+            mapping_bytes,mapping_doc=_read_trace_json(a.mapping,10*1024*1024)
+            plan_pair=_read_trace_json(a.test_plan,20*1024*1024) if a.test_plan else (None,None)
+            matrix_pair=_read_trace_json(a.evidence_matrix,50*1024*1024) if a.evidence_matrix else (None,None)
+            runtime_pair=_read_trace_json(a.runtime_evidence,50*1024*1024) if a.runtime_evidence else (None,None)
+            security_pair=_read_trace_json(a.security_test_plan,20*1024*1024) if a.security_test_plan else (None,None)
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
