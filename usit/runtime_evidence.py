@@ -209,10 +209,24 @@ def validate_runtime_evidence(
         })
         # Parent links, rather than mere co-occurrence, are required even to
         # describe a linked chain. This is still observation, never correctness.
-        edges = {(a, b) for a, b in parent_edges if a in {r["event_id"] for r in rows} and b in {r["event_id"] for r in rows}}
+        row_ids = {r["event_id"] for r in rows}
+        edges = sorted((a, b) for a, b in parent_edges if a in row_ids and b in row_ids)
         linked = {x for edge in edges for x in edge}
         if len(types) >= 2 and linked:
             summaries[-1]["correlation_status"] = "PARENT_LINKED_EVENTS_OBSERVED"
+        # Expose only explicit parent references. Timestamp ordering is useful
+        # for review, but is deliberately not represented as a causal edge.
+        ordered_rows = sorted(rows, key=lambda row: (parsed_times[row["event_id"]], row["event_id"]))
+        summaries[-1]["observed_event_ids_by_timestamp"] = [row["event_id"] for row in ordered_rows]
+        summaries[-1]["explicit_parent_edges"] = [
+            {"parent_event_id": parent, "child_event_id": child} for parent, child in edges
+        ]
+        summaries[-1]["parent_linked_event_count"] = len(linked)
+        summaries[-1]["unlinked_event_ids"] = sorted(row_ids - linked)
+        summaries[-1]["root_event_ids"] = sorted(
+            row["event_id"] for row in rows
+            if row.get("parent_event_id") is None
+        )
 
     return {
         "schema_version": "usit-runtime-evidence-validation-v1",
