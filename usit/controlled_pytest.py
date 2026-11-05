@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 from xml.etree import ElementTree as ET
 
+from .safeio import read_bounded_no_follow
 from .test_execution_provenance import (
     SCHEMA_VERSION, canonical_json_bytes, sha256_hex, validate_execution_provenance,
 )
@@ -166,11 +167,11 @@ def _load_authorization(path: str | os.PathLike[str], project: Path, evidence_pa
     if not auth_path.is_absolute() or auth_path.is_symlink():
         raise ValueError("authorization file must be an absolute regular file outside the project")
     resolved = auth_path.resolve(strict=True)
-    if not resolved.is_file() or resolved.stat().st_size > 16 * 1024:
-        raise ValueError("authorization file is not a bounded regular file")
-    if resolved.is_relative_to(project):
+    if not resolved.is_relative_to(project):
+        pass
+    else:
         raise ValueError("authorization file must be outside the project")
-    value = json.loads(resolved.read_text(encoding="utf-8"))
+    value = json.loads(read_bounded_no_follow(auth_path, 16 * 1024).decode("utf-8"))
     if not isinstance(value, dict) or value.get("schema_version") != AUTH_SCHEMA:
         raise ValueError("unsupported test execution authorization schema")
     if Path(value.get("project_root", "")).resolve(strict=True) != project:
