@@ -164,6 +164,14 @@ class AIClaimReviewTests(unittest.TestCase):
                 load_claim_ledger(link)
 
 
+    def test_file_loader_rejects_oversized_input_before_reading(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "oversized-claims.json"
+            with source.open("wb") as stream:
+                stream.truncate(10 * 1024 * 1024 + 1)
+            with self.assertRaises((OSError, ValueError)):
+                load_claim_ledger(source)
+
     def test_support_decision_without_resolved_review_evidence_stays_unverified(self):
         ledger = json.loads(json.dumps(self.ledger))
         ledger["reviews"][0]["evidence_refs"] = []
