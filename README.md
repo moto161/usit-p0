@@ -82,6 +82,7 @@ python -m usit validate-graph "C:\USIT-Reports\project-001\knowledge_graph.json"
 - Python 使用标准库 AST，并仅将显式导入且唯一指向项目内定义的调用标为 `RESOLVED`；同名冲突、动态调用和无法证明的调用会标为 `AMBIGUOUS`、`DYNAMIC`、`UNRESOLVED` 或 `UNKNOWN`。循环导入只做静态索引，不执行模块。
 - 其他语言的符号/调用仍是启发式候选；调用状态为 `UNKNOWN`，不宣称与 Python 具备相同解析精度。
 - `validate-graph` 校验 `usit-graph-v1` 结构、端点、证据、路径和调用解析状态，输出 JSON/Markdown 诊断；不自动修复或删除关系。旧版无 edge ID 的图谱保持兼容，报告中使用数组序号定位关系。
+- `validate-graph` 的图谱输入通过 `safeio.read_bounded_no_follow` 读取，最大 256 MiB；拒绝最终文件组件为符号链接/reparse point、非普通文件或超限输入。该限制不宣称所有父目录组件均无符号链接。
 - 单独运行校验器时，默认在图谱旁生成报告；若提供 `--project-root`，报告路径必须在项目根目录之外。已有报告不会被覆盖，可通过 `--out-json` 和 `--out-md` 指定新路径。
 - 构建识别基于标记文件；不提供完整调用图或编译器语义。
 - 增量只分类新增/修改/未变/删除；P0仍全量轻量分析。
