@@ -168,7 +168,19 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
         else:
             lines.append("  - 无可用源码证据引用")
         lines.append("")
-    lines.extend(["## 未关联记录", "",
+    lines.extend(["## 运行时证据冲突", "",
+        f"- 冲突数量：{_cell(report.get('runtime_evidence_conflict_count', len(_items(report.get('runtime_evidence_conflicts')))))}",
+        f"- 未知运行时功能 ID：{_cell(', '.join(map(str, _items(report.get('unknown_runtime_function_ids')))) or '无')}",
+    ])
+    conflicts = _items(report.get("runtime_evidence_conflicts"))
+    if conflicts:
+        for conflict in conflicts:
+            if isinstance(conflict, dict):
+                details = [f"{key}={value}" for key, value in sorted(conflict.items())]
+                lines.append(f"- {_cell('; '.join(details))}")
+    else:
+        lines.append("- 无运行时证据冲突明细")
+    lines.extend(["", "## 未关联记录", "",
         f"- 未关联运行时证据功能 ID：{_cell(', '.join(map(str, _items(report.get('unlinked_runtime_function_ids')))) or '无')}",
         f"- 未关联测试设计功能 ID：{_cell(', '.join(map(str, _items(report.get('unlinked_test_design_function_ids')))) or '无')}",
         f"- 无效运行状态功能 ID：{_cell(', '.join(map(str, _items(report.get('invalid_runtime_status_function_ids')))) or '无')}",
