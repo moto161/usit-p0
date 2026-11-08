@@ -73,6 +73,11 @@ def parse_coverage_py_json(data: bytes) -> dict[str, dict[str, Any]]:
         lines = executed + missing
         if any(not isinstance(number, int) or isinstance(number, bool) or number < 1 for number in lines):
             raise ValueError(f"coverage entry for {path} contains invalid line number")
+        if len(executed) != len(set(executed)) or len(missing) != len(set(missing)):
+            raise ValueError(f"coverage entry for {path} contains duplicate line numbers")
+        overlap = set(executed).intersection(missing)
+        if overlap:
+            raise ValueError(f"coverage entry for {path} lists lines as both executed and missing")
         if path in result:
             raise ValueError(f"duplicate normalized coverage path: {path}")
         result[path] = {
