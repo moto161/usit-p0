@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .safeio import read_bounded_no_follow
+from .test_report_adapters import strict_json_loads
 from typing import Any
 
 MAX_INPUT_BYTES = 50 * 1024 * 1024
@@ -72,9 +73,10 @@ def adapt_android_jsonl(
             continue
         payload = line[len(PREFIX):]
         try:
-            record = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"malformed USIT Android event at line {line_number}: {exc.msg}") from exc
+            record = strict_json_loads(payload)
+        except (json.JSONDecodeError, ValueError) as exc:
+            detail = exc.msg if isinstance(exc, json.JSONDecodeError) else str(exc)
+            raise ValueError(f"malformed USIT Android event at line {line_number}: {detail}") from exc
         if not isinstance(record, dict):
             raise ValueError(f"USIT Android event at line {line_number} must be an object")
         unknown = set(record) - FIELDS
@@ -151,6 +153,9 @@ def adapt_android_jsonl_file(
 ) -> dict[str, Any]:
     raw = _read(input_path)
     graph_raw = read_bounded_no_follow(Path(graph_path).expanduser(), MAX_INPUT_BYTES)
-    graph = json.loads(graph_raw)
+    try:
+        graph = strict_json_loads(graph_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid business graph JSON: {exc}") from exc
     result = adapt_android_jsonl(raw, graph, hashlib.sha256(graph_raw).hexdigest(), session_id, captured_at)
     return result
