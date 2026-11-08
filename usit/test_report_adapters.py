@@ -168,7 +168,10 @@ def map_line_coverage_to_functions(coverage: dict[str, dict[str, Any]],
     for index, item in enumerate(mappings):
         if not isinstance(item, dict):
             raise ValueError(f"coverage mapping entry {index} must be an object")
-        fid, path = item.get("business_function_id"), _safe_relative_path(item.get("source_file"))
+        fid = item.get("business_function_id")
+        if not isinstance(fid, str) or not fid.strip():
+            raise ValueError(f"coverage mapping entry {index} has invalid business_function_id")
+        path = _safe_relative_path(item.get("source_file"))
         start, end = item.get("line_start"), item.get("line_end")
         if fid not in known:
             raise ValueError(f"coverage mapping entry {index} references unknown business_function_id")
