@@ -212,7 +212,7 @@ class CoverageImporterTests(unittest.TestCase):
             coverage = base / "coverage.json"
             coverage.write_text(json.dumps({"files":{"src/a.py":{"executed_lines":[1],"missing_lines":[]}}}),encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "duplicate JSON key: schema_version"):
-                ingest_coverage_results(coverage, mapping, graph, base / "project")
+                ingest_coverage_results(coverage, mapping, graph, "coverage-py-json", base / "project")
 
     def test_coverage_py_rejects_executed_missing_overlap(self):
         from usit.test_report_adapters import parse_coverage_py_json
