@@ -188,6 +188,32 @@ class CoverageImporterTests(unittest.TestCase):
                 ingest_coverage_results(report, mapping, graph, "coverage-py-json", alias)
 
 
+    def test_coverage_py_rejects_duplicate_json_keys(self):
+        from usit.test_report_adapters import parse_coverage_py_json
+
+        payload = b'{"files":{"src/a.py":{"executed_lines":[1],"executed_lines":[2],"missing_lines":[]}}}'
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key: executed_lines"):
+            parse_coverage_py_json(payload)
+
+    def test_coverage_import_rejects_duplicate_mapping_keys(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            mapping, graph = _write_graph_and_mapping(base, ["bf-upload"], [
+                {"source_file": "src/a.py", "line_start": 1, "line_end": 2, "business_function_id": "bf-upload"}
+            ])
+            doc = json.loads(mapping.read_text(encoding="utf-8"))
+            mapping.write_text(
+                '{"schema_version":"usit-coverage-mapping-v1",'
+                '"schema_version":"usit-coverage-mapping-v1",'
+                f'"source_graph_sha256":"{hashlib.sha256(graph.read_bytes()).hexdigest()}",'
+                '"mappings":[]}',
+                encoding="utf-8",
+            )
+            coverage = base / "coverage.json"
+            coverage.write_text(json.dumps({"files":{"src/a.py":{"executed_lines":[1],"missing_lines":[]}}}),encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key: schema_version"):
+                ingest_coverage_results(coverage, mapping, graph, base / "project")
+
     def test_coverage_py_rejects_executed_missing_overlap(self):
         from usit.test_report_adapters import parse_coverage_py_json
 
