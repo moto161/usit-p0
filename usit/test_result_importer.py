@@ -78,6 +78,18 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _reject_link_components(path: str | Path) -> Path:
+    """Reject symlink/reparse components before canonicalizing a supplied path."""
+    source = Path(path).expanduser()
+    absolute = Path(os.path.abspath(os.fspath(source)))
+    cursor = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        cursor = cursor / part
+        info = cursor.lstat()
+        if cursor.is_symlink() or is_reparse(info):
+            raise ValueError("path must not contain symbolic links or reparse points")
+    return absolute
+
 def _case_id(classname: str, name: str) -> str:
     return f"{classname}::{name}" if classname else name
 
@@ -389,7 +401,11 @@ def ingest_junit_results(
     if evidence_dir is not None:
         if provenance_record_path is None or source_manifest_path is None:
             raise ValueError("evidence_dir requires provenance_record_path and source_manifest_path")
-        evidence_root = Path(evidence_dir).expanduser().resolve(strict=True)
+        # Inspect the caller-supplied path before resolve(); resolving first
+        # would erase evidence that the evidence directory itself (or one of
+        # its ancestors) was reached through a symlink/reparse point.
+        supplied_evidence_root = _reject_link_components(evidence_dir)
+        evidence_root = supplied_evidence_root.resolve(strict=True)
         if not evidence_root.is_dir():
             raise ValueError("evidence_dir must be a directory")
         expected_inputs = {

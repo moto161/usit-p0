@@ -557,6 +557,26 @@ def test_delete():
                     source_manifest_path=manifest_path,
                 )
 
+    def test_evidence_bundle_rejects_symlinked_evidence_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            real_root = base / "real-evidence"
+            real_root.mkdir()
+            linked_root = base / "linked-evidence"
+            try:
+                linked_root.symlink_to(real_root, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks are unavailable on this platform")
+            with self.assertRaisesRegex(ValueError, "symbolic links or reparse points"):
+                ingest_junit_results(
+                    linked_root / "junit.xml",
+                    base / "mapping.json",
+                    base / "graph.json",
+                    provenance_record_path=base / "execution-provenance.json",
+                    source_manifest_path=base / "source-manifest.json",
+                    evidence_dir=linked_root,
+                )
+
     def test_execution_provenance_inputs_must_be_paired(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
