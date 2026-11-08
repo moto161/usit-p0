@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from usit.runtime_evidence import validate_runtime_evidence
+from usit.runtime_evidence import validate_runtime_evidence, validate_runtime_evidence_files
 
 
 class RuntimeEvidenceTests(unittest.TestCase):
@@ -44,6 +44,33 @@ class RuntimeEvidenceTests(unittest.TestCase):
                  "parent_event_id": "e3"},
             ],
         }
+
+    def test_file_validator_rejects_duplicate_json_keys_in_runtime_events(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            event_path = base / "events.json"
+            graph_path = base / "graph.json"
+            event_doc = json.dumps(self.doc, separators=(",", ":"))
+            event_doc = event_doc.replace('"event_type":"UI_ACTION"',
+                                          '"event_type":"UI_ACTION","event_type":"DATABASE_CHANGE"', 1)
+            event_path.write_text(event_doc, encoding="utf-8")
+            graph_path.write_bytes(self.graph_bytes)
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key: event_type"):
+                validate_runtime_evidence_files(event_path, graph_path)
+
+    def test_file_validator_rejects_duplicate_json_keys_in_business_graph(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            event_path = base / "events.json"
+            graph_path = base / "graph.json"
+            event_path.write_text(json.dumps(self.doc), encoding="utf-8")
+            graph_path.write_text(
+                '{"schema_version":"usit-graph-v1","schema_version":"other",'
+                '"business_understanding":{"business_function_views":[]}}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key: schema_version"):
+                validate_runtime_evidence_files(event_path, graph_path)
 
     def test_validates_explicit_runtime_observations_without_claiming_correctness(self):
         result = validate_runtime_evidence(self.doc, self.graph, self.graph_hash, "a" * 64)
