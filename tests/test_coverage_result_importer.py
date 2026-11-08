@@ -45,6 +45,26 @@ class CoverageImporterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate business_function_id in graph"):
                 ingest_coverage_results(report, mapping, graph, "coverage-py-json")
 
+    def test_coverage_mapping_rejects_non_string_business_function_ids(self):
+        invalid_ids = [None, 7, [], {}, True, ""]
+        for invalid_id in invalid_ids:
+            with self.subTest(invalid_id=invalid_id):
+                with tempfile.TemporaryDirectory() as td:
+                    base = Path(td)
+                    report = base / "coverage.json"
+                    report.write_text(json.dumps({"files": {"src/a.py": {
+                        "executed_lines": [1], "missing_lines": []
+                    }} }), encoding="utf-8")
+                    mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [
+                        {"business_function_id": "bf-a", "source_file": "src/a.py",
+                         "line_start": 1, "line_end": 1}
+                    ])
+                    doc = json.loads(mapping.read_text(encoding="utf-8"))
+                    doc["mappings"][0]["business_function_id"] = invalid_id
+                    mapping.write_text(json.dumps(doc), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid business_function_id"):
+                        ingest_coverage_results(report, mapping, graph, "coverage-py-json")
+
     def test_coverage_py_json_imports_with_explicit_mapping_and_hashes(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
