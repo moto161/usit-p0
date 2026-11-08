@@ -152,7 +152,16 @@ def map_line_coverage_to_functions(coverage: dict[str, dict[str, Any]],
     views = understanding.get("business_function_views") if isinstance(understanding, dict) else None
     if not isinstance(views, list):
         raise ValueError("business graph is missing business_function_views")
-    known = {view.get("business_function_id") for view in views if isinstance(view, dict)}
+    known = set()
+    for index, view in enumerate(views):
+        if not isinstance(view, dict):
+            raise ValueError(f"business function view {index} must be an object")
+        function_id = view.get("business_function_id")
+        if not isinstance(function_id, str) or not function_id.strip():
+            raise ValueError(f"business function view {index} has invalid business_function_id")
+        if function_id in known:
+            raise ValueError(f"duplicate business_function_id in graph: {function_id}")
+        known.add(function_id)
     if not known:
         raise ValueError("business graph contains no business function views")
     linked, seen = {}, set()
