@@ -5,19 +5,19 @@
   "policy": "The original PRE_SHA256.json is immutable and every watched file retains its historical PRE SHA-256. All watched files are pinned by canonical Git blob IDs so checkout line-ending conversion cannot create false drift. Files unchanged since PRE retain their historical content; maintained files carry an explicit reason and successor blob ID. The test suite verifies each historical SHA against PRE before comparing the canonical current blob.",
   "files": {
     "usit/graph.py": {
-      "git_blob_sha1": "31aeced110fb7ba6c9390c29764f84d9a838d597",
+      "git_blob_sha1": "f7423a3e8dd3bfe4aaf169d2ea147ec38418f04f",
       "historical_sha256": "eeda9ae8e22a60b0dcd9e15b6bd261cef296afb312749c53bcac8feeb9b23fb4",
-      "reason": "Maintained graph-v1 validation to enforce structured argument-to-parameter evidence and preserve business-relationship metadata without promoting static evidence to runtime verification."
+      "reason": "Maintained graph-v1 validation to enforce structured argument-to-parameter evidence and preserve business-relationship metadata without promoting static evidence to runtime verification; successor blob is pinned while historical PRE SHA-256 remains unchanged."
     },
     "usit/scanner.py": {
-      "git_blob_sha1": "a621c8dc537f4a2c28f81a5a07fe4746256c9a8a",
+      "git_blob_sha1": "caf38ceccecde60213f50e06fdc7a4d63e9e0553",
       "historical_sha256": "c70a1a4baf3a6a17cb7ec0ed4748db7194d70e3008ab32f0ac05e3e55f797912",
-      "reason": "Maintained scanner pipeline for route-handler, UI-event and API-client relationships, plus stronger discovery-to-open identity checks and explicit evidence propagation."
+      "reason": "Maintained scanner pipeline for route-handler, UI-event and API-client relationships, stronger discovery-to-open identity checks, explicit evidence propagation, and bounded no-follow previous-manifest loading; historical PRE SHA-256 remains unchanged."
     },
     "tests/test_graph_validation.py": {
-      "git_blob_sha1": "19d992c72b2edaad6221d0d3b74c9dc056dded4d",
+      "git_blob_sha1": "a7cc5b0feb38971e6d0301e11909bcdd7e474917",
       "historical_sha256": "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0",
-      "reason": "The current main-branch graph validation fixture differs from the historical PRE bytes. The historical digest is retained; new argument-binding cases are isolated in tests/test_graph_argument_bindings.py."
+      "reason": "Maintained graph-v1 validation regression fixture; its historical PRE digest is retained while the exact successor Git blob is pinned. Additional argument-binding behavior remains covered in tests/test_graph_argument_bindings.py."
     },
     "tests/test_p0710z_snapshot_trust.py": {
       "git_blob_sha1": "24e8f2755e02ab40a5df10f443689674ceef35a4",
@@ -30,9 +30,9 @@
       "reason": "Corrected the LF fixture fallback for the same-size rewrite test and migrated graph-fixture integrity checks to the reviewed successor baseline; historical PRE hashes remain recorded."
     },
     "usit/safeio.py": {
-      "git_blob_sha1": "d1a45c017b768911de960a8684fbd224d1be5a77",
+      "git_blob_sha1": "1a0eb0c1c28b99a8ea58634eb201ff96169d64d8",
       "historical_sha256": "d8d8a42e6cb72dcfe2dedb66f80af80acb793a6a777d69d9e9d5411e1233ad7c",
-      "reason": "Unmodified historical safety I/O implementation; its original PRE digest is retained and the canonical Git blob is pinned so Windows CRLF checkout cannot create a false drift report."
+      "reason": "Maintained safety I/O implementation after the historical PRE snapshot: descriptor-bound no-follow opens and bounded streaming reads are now enforced; the original PRE SHA-256 remains preserved separately."
     },
     "tests/test_p073_budget_race.py": {
       "git_blob_sha1": "5f897498548d6ec7942a6a4e751b34f6eb8a167d",
