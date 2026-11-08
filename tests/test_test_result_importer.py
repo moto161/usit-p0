@@ -98,6 +98,32 @@ class TestResultImporterTests(unittest.TestCase):
             self.assertEqual(verified_upload["verification_conclusion"], "TEST_EVIDENCE_INCONCLUSIVE")
             self.assertFalse(verified_upload["evidence_conflict"])
 
+    def test_importer_rejects_duplicate_json_keys_in_mapping_and_graph(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase name="test_upload"/></testsuite>'
+            )
+            mapping.write_text(
+                '{"schema_version":"usit-test-result-mapping-v1",'
+                '"schema_version":"usit-test-result-mapping-v1",'
+                '"source_graph_sha256":"' + hashlib.sha256(graph.read_bytes()).hexdigest() + '",'
+                '"mappings":[]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key: schema_version"):
+                ingest_junit_results(report, mapping, graph)
+            report, mapping, graph = self._inputs(
+                base, '<testsuite><testcase name="test_upload"/></testsuite>'
+            )
+            graph.write_text(
+                '{"schema_version":"usit-graph-v1","schema_version":"usit-graph-v1",'
+                '"business_understanding":{"business_function_views":[]}}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key: schema_version"):
+                ingest_junit_results(report, mapping, graph)
+
     def test_duplicate_case_ids_and_duplicate_mapping_are_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
