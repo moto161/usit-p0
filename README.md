@@ -527,7 +527,7 @@ python -m usit adapt-android-events --input .\\android-events.jsonl --graph .\\b
 python -m usit validate-runtime-evidence --events .\\runtime-events.json --graph .\\business_knowledge_graph.json --out .\\runtime-evidence-validation.json
 ```
 
-适配器只接受白名单字段；未知字段（包括 token、密码、请求正文、Cookie 等）直接拒绝。业务功能 ID 必须已存在于输入图谱；不按 Activity、页面名或控件名猜测业务归属。事件 ID 必须唯一，时间戳必须带时区。输入和输出不得为符号链接，输出不得覆盖已有文件。
+适配器只接受白名单字段；未知字段（包括 token、密码、请求正文、Cookie 等）直接拒绝。Android 事件 JSONL 与业务图谱 JSON 均使用严格解析器，任意嵌套层级出现重复 JSON 键都会拒绝，避免同一字段被静默覆盖。业务功能 ID 必须已存在于输入图谱；不按 Activity、页面名或控件名猜测业务归属。事件 ID 必须唯一，时间戳必须带时区。输入和输出不得为符号链接，输出不得覆盖已有文件。
 
 文件输入通过 `safeio.read_bounded_no_follow` 使用 no-follow 文件描述符读取：在读取前检查常规文件类型和大小上限，流式读取时再次强制字节上限，并在读取后复核文件身份、大小及时间戳。Android JSONL、业务图谱和运行时事件 JSON 不再先执行无上限 `read_bytes()` 再检查大小。该机制约束最终文件组件；不应将其描述为操作系统沙箱或来源认证。
 
