@@ -10,6 +10,20 @@ from pathlib import PurePosixPath
 from typing import Any
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def strict_json_loads(data: bytes | str) -> Any:
+    """Parse JSON while rejecting duplicate object keys at every nesting level."""
+    return json.loads(data, object_pairs_hook=_unique_json_object)
+
+
 def _safe_relative_path(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("source_file must be a non-empty relative path")
@@ -24,7 +38,7 @@ def _safe_relative_path(value: Any) -> str:
 
 def parse_pytest_json(data: bytes) -> list[dict[str, Any]]:
     try:
-        doc = json.loads(data)
+        doc = strict_json_loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid pytest JSON report: {exc}") from exc
     if not isinstance(doc, dict) or not isinstance(doc.get("tests"), list):
