@@ -188,5 +188,32 @@ class CoverageImporterTests(unittest.TestCase):
                 ingest_coverage_results(report, mapping, graph, "coverage-py-json", alias)
 
 
+    def test_coverage_py_rejects_executed_missing_overlap(self):
+        from usit.test_report_adapters import parse_coverage_py_json
+
+        payload = json.dumps({"files": {"src/a.py": {
+            "executed_lines": [1, 2], "missing_lines": [2, 3]
+        }}}).encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "both executed and missing"):
+            parse_coverage_py_json(payload)
+
+    def test_coverage_py_rejects_duplicate_line_entries(self):
+        from usit.test_report_adapters import parse_coverage_py_json
+
+        payload = json.dumps({"files": {"src/a.py": {
+            "executed_lines": [1, 1], "missing_lines": [2]
+        }}}).encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "duplicate line numbers"):
+            parse_coverage_py_json(payload)
+
+    def test_coverage_py_rejects_duplicates_in_missing_lines(self):
+        from usit.test_report_adapters import parse_coverage_py_json
+
+        payload = json.dumps({"files": {"src/a.py": {
+            "executed_lines": [1], "missing_lines": [2, 2]
+        }}}).encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "duplicate line numbers"):
+            parse_coverage_py_json(payload)
+
 if __name__ == "__main__":
     unittest.main()
