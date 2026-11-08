@@ -64,7 +64,7 @@ jobs:
       - name: Run USIT self-test on Windows
         run: python -m usit selftest
       - name: Run Windows security trust-boundary tests
-        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_execution_provenance tests.test_controlled_pytest tests.test_verification_capture tests.test_runtime_evidence tests.test_android_event_adapter tests.test_test_result_importer tests.test_traceability_cli_io tests.test_graph_validation tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_p0710zrf12_content_verification -v
+        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_execution_provenance tests.test_controlled_pytest tests.test_verification_capture tests.test_runtime_evidence tests.test_android_event_adapter tests.test_test_result_importer tests.test_traceability_cli_io tests.test_graph_validation tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_business_evidence_verifier tests.test_p0710zrf12_content_verification -v
       - name: Diagnostic full repository regression suite on Windows (non-gating; see step summary)
         id: full_repository_regression
         continue-on-error: true
