@@ -21,7 +21,7 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def strict_json_loads(data: bytes | str) -> Any:
     """Parse JSON while rejecting duplicate object keys at every nesting level."""
-    return strict_json_loads(data, object_pairs_hook=_unique_json_object)
+    return json.loads(data, object_pairs_hook=_unique_json_object)
 
 
 def _safe_relative_path(value: Any) -> str:
