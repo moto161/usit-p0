@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from .test_report_adapters import parse_pytest_json
+from .test_report_adapters import parse_pytest_json, strict_json_loads
 from .safeio import is_reparse, open_no_follow
 from .test_execution_provenance import (
     MAX_MANIFEST_BYTES, MAX_RECORD_BYTES, validate_execution_provenance,
@@ -421,7 +421,7 @@ def ingest_junit_results(
         bundle_check = verify_manifest(evidence_root)
         if not bundle_check.get("valid"):
             raise ValueError("evidence bundle manifest validation failed: " + "; ".join(bundle_check.get("errors", [])))
-        bundle_manifest = json.loads(_read_regular(evidence_root / "evidence_manifest.json", MAX_MANIFEST_BYTES).decode("utf-8"))
+        bundle_manifest = strict_json_loads(_read_regular(evidence_root / "evidence_manifest.json", MAX_MANIFEST_BYTES).decode("utf-8"))
         artifact_index = {
             item.get("path"): item for item in bundle_manifest.get("artifacts", [])
             if isinstance(item, dict) and isinstance(item.get("path"), str)
