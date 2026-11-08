@@ -80,6 +80,29 @@ class AndroidEventAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires timezone"):
             adapt_android_jsonl(raw, self.graph, self.graph_hash, "s1", "2026-11-01T12:00:00+08:00")
 
+    def test_rejects_duplicate_json_keys_in_android_event_records(self):
+        raw = (b'USIT_ANDROID_EVENT {"event_id":"dup-1","timestamp":"2026-11-01T12:00:01+08:00",'
+               b'"event":"screen_opened","event":"database_change"}')
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key: event"):
+            adapt_android_jsonl(raw, self.graph, self.graph_hash, "s1",
+                                "2026-11-01T12:00:00+08:00")
+
+    def test_file_adapter_rejects_duplicate_json_keys_in_business_graph(self):
+        from usit.android_event_adapter import adapt_android_jsonl_file
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            event_path = base / "events.jsonl"
+            event_path.write_bytes(self._raw())
+            graph_path = base / "graph.json"
+            graph_path.write_text(
+                '{"schema_version":"usit-graph-v1","schema_version":"other",'
+                '"business_understanding":{"business_function_views":[]}}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key: schema_version"):
+                adapt_android_jsonl_file(event_path, graph_path, "s1",
+                                         "2026-11-01T12:00:00+08:00")
+
     def test_cli_writes_schema_file_and_never_overwrites(self):
         from usit.cli import main
         with tempfile.TemporaryDirectory() as td:
