@@ -429,7 +429,7 @@ def ingest_junit_results(
         required_bundle_artifacts = {"junit.xml", "execution-provenance.json", "source-manifest.json"}
         if not required_bundle_artifacts.issubset(artifact_index):
             raise ValueError("evidence manifest omits a required report/provenance/source-manifest artifact")
-        source_doc = json.loads(_read_regular(Path(source_manifest_path), MAX_MANIFEST_BYTES).decode("utf-8"))
+        source_doc = strict_json_loads(_read_regular(Path(source_manifest_path), MAX_MANIFEST_BYTES).decode("utf-8"))
         source_entries = source_doc.get("files") if isinstance(source_doc, dict) else None
         if not isinstance(source_entries, list):
             raise ValueError("source manifest files must be a list")
@@ -447,7 +447,7 @@ def ingest_junit_results(
         }
         if actual_snapshot_artifacts != expected_snapshot_artifacts:
             raise ValueError("evidence bundle source_snapshot artifact set differs from source manifest")
-        provenance_doc_for_bundle = json.loads(_read_regular(Path(provenance_record_path), MAX_RECORD_BYTES).decode("utf-8"))
+        provenance_doc_for_bundle = strict_json_loads(_read_regular(Path(provenance_record_path), MAX_RECORD_BYTES).decode("utf-8"))
         runtime_import_validation = {"status": "RUNTIME_IMPORTS_NOT_PROVIDED"}
         runtime_meta = provenance_doc_for_bundle.get("runtime_imports")
         if runtime_meta is not None:
@@ -461,7 +461,7 @@ def ingest_junit_results(
             runtime_digest = _sha256(runtime_bytes)
             if runtime_digest != runtime_meta.get("sha256") or runtime_artifact.get("sha256") != runtime_digest:
                 raise ValueError("runtime imports digest does not match provenance/evidence manifest")
-            runtime_doc = json.loads(runtime_bytes.decode("utf-8"))
+            runtime_doc = strict_json_loads(runtime_bytes.decode("utf-8"))
             if not isinstance(runtime_doc, dict) or runtime_doc.get("schema_version") != "usit-runtime-imports-v1":
                 raise ValueError("runtime imports manifest schema is invalid")
             runtime_modules = runtime_doc.get("modules")
@@ -538,7 +538,7 @@ def ingest_junit_results(
         )
         expected_format = {"junit-xml": "JUNIT_XML", "pytest-json": "PYTEST_JSON"}.get(report_format)
         try:
-            provenance_doc = json.loads(provenance_bytes)
+            provenance_doc = strict_json_loads(provenance_bytes)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid execution provenance record: {exc}") from exc
         if expected_format is None or provenance_doc.get("report_format") != expected_format:
@@ -548,8 +548,8 @@ def ingest_junit_results(
         execution_provenance["execution_source_binding_status"] = "NOT_ESTABLISHED"
         execution_provenance["evidence_bundle_validation"] = evidence_bundle_validation or {"status": "NOT_CHECKED"}
     try:
-        mapping_doc = json.loads(mapping_bytes)
-        graph_doc = json.loads(graph_bytes)
+        mapping_doc = strict_json_loads(mapping_bytes)
+        graph_doc = strict_json_loads(graph_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid JSON input: {exc}") from exc
     if not isinstance(graph_doc, dict) or graph_doc.get("schema_version") != "usit-graph-v1":
