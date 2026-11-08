@@ -520,12 +520,27 @@ def analyze_file(root: Path, path: Path, *, raw_bytes: bytes | None = None) -> d
     row['analysis_degradation']=_degradation_metadata(row, lang)
     return row
 
+MAX_PREVIOUS_MANIFEST_BYTES = 50 * 1024 * 1024
+
+
 def load_previous(out: Path) -> dict[str,str]:
+    """Load the optional incremental baseline as bounded, no-follow input.
+
+    A missing, malformed, oversized, linked or otherwise unsafe prior manifest
+    is not trusted as an incremental baseline; the scan safely falls back to a
+    full classification instead of following or allocating an unbounded file.
+    """
     p=out/'scan_manifest.json'
     try:
-        data=json.loads(p.read_text('utf-8'))
-        return {x['path']:x['sha256'] for x in data.get('files',[]) if 'path' in x and 'sha256' in x}
-    except (OSError,ValueError,TypeError): return {}
+        raw=safeio.read_bounded_no_follow(p, MAX_PREVIOUS_MANIFEST_BYTES)
+        data=json.loads(raw)
+        if not isinstance(data, dict) or not isinstance(data.get('files', []), list):
+            return {}
+        return {x['path']:x['sha256'] for x in data.get('files', [])
+                if isinstance(x, dict) and isinstance(x.get('path'), str)
+                and isinstance(x.get('sha256'), str)}
+    except (OSError,ValueError,TypeError,json.JSONDecodeError):
+        return {}
 
 def _edge(source: str, target: str, etype: str, ev: dict, **extra: Any) -> dict[str,Any]:
     e={'source':source,'target':target,'type':etype,'evidence':ev}
