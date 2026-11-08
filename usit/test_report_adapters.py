@@ -21,7 +21,7 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def strict_json_loads(data: bytes | str) -> Any:
     """Parse JSON while rejecting duplicate object keys at every nesting level."""
-    return json.loads(data, object_pairs_hook=_unique_json_object)
+    return strict_json_loads(data, object_pairs_hook=_unique_json_object)
 
 
 def _safe_relative_path(value: Any) -> str:
@@ -70,7 +70,7 @@ def parse_pytest_json(data: bytes) -> list[dict[str, Any]]:
 
 def parse_coverage_py_json(data: bytes) -> dict[str, dict[str, Any]]:
     try:
-        doc = json.loads(data)
+        doc = strict_json_loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid coverage.py JSON: {exc}") from exc
     files = doc.get("files") if isinstance(doc, dict) else None
