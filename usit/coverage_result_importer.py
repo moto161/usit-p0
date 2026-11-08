@@ -137,7 +137,7 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
     mapping_bytes = _read(mapping_path, MAX_MAPPING_BYTES)
     graph_bytes = _read(graph_path, MAX_GRAPH_BYTES)
     try:
-        mapping, graph = strict_json_loads(mapping_bytes), json.loads(graph_bytes)
+        mapping, graph = strict_json_loads(mapping_bytes), strict_json_loads(graph_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid JSON input: {exc}") from exc
     if not isinstance(graph, dict) or graph.get("schema_version") != "usit-graph-v1":
