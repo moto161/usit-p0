@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .safeio import read_bounded_no_follow
+from .test_report_adapters import strict_json_loads
 from typing import Any
 
 SCHEMA_VERSION = "usit-runtime-evidence-v1"
@@ -297,9 +298,9 @@ def validate_runtime_evidence_files(event_path: str | Path, graph_path: str | Pa
     event_bytes = _read_regular(event_path, MAX_EVENT_BYTES)
     graph_bytes = _read_regular(graph_path, 50 * 1024 * 1024)
     try:
-        document = json.loads(event_bytes)
-        graph = json.loads(graph_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = strict_json_loads(event_bytes)
+        graph = strict_json_loads(graph_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid JSON input: {exc}") from exc
     return validate_runtime_evidence(
         document, graph, hashlib.sha256(graph_bytes).hexdigest(),
