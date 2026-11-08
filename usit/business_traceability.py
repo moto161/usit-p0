@@ -281,6 +281,9 @@ def build_business_traceability(
             "identity_resource_evidence": (view.get("stage_status", {}).get("identity_resource", "UNKNOWN") if view else "NOT_AVAILABLE"),
             "test_design": "CANDIDATE_LINKED" if candidate_items else ("NO_LINKED_TEST_CANDIDATE" if view else "NOT_AVAILABLE"),
             "test_execution": runtime_status,
+            "test_source_binding": runtime.get("test_source_binding_status", "NOT_PROVIDED") if runtime else "NOT_MEASURED",
+            "test_source_snapshot_binding": runtime.get("test_source_snapshot_binding_status", "NOT_PROVIDED") if runtime else "NOT_MEASURED",
+            "test_source_report_locator": runtime.get("test_source_report_locator_status", "NOT_PROVIDED") if runtime else "NOT_MEASURED",
             "test_evidence_integrity": (
                 "EVIDENCE_CONFLICT" if test_evidence_conflict else
                 case_completeness if case_completeness in {

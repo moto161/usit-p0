@@ -301,6 +301,47 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertIn("tests.PhotoTests::test_upload", markdown)
         self.assertIn("tests.PhotoTests::test_upload_permissions", markdown)
 
+    def test_test_source_binding_and_runner_locator_stages_reach_traceability(self):
+        evidence = {
+            "schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{
+                "business_function_id": "bf-list",
+                "test_execution_status": "PASSED",
+                "code_coverage_status": "NOT_MEASURED",
+                "test_source_binding_status": "SOURCE_BINDING_NOT_VERIFIED",
+                "test_source_snapshot_binding_status": "ALL_SNAPSHOT_ENTRIES_MATCHED_UNAUTHENTICATED",
+                "test_source_report_locator_status": "ALL_REPORT_LOCATORS_MATCHED_UNAUTHENTICATED",
+                "test_execution_detail": {
+                    "mapped_case_completeness": "COMPLETE",
+                    "mapped_test_cases": [{
+                        "test_case_id": "tests/test_photos.py::test_list",
+                        "status": "PASSED",
+                        "test_source_binding_status": "TEST_SOURCE_BINDING_NOT_CHECKED",
+                        "test_source_snapshot_binding_status": "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED",
+                        "test_source_report_locator_status": "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED",
+                    }],
+                },
+            }],
+        }
+        report = build_business_traceability(
+            self.semantics, self.graph, self.mapping,
+            evidence_matrix=evidence, input_hashes=self.hashes,
+        )
+        linked = next(row for row in report["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(linked["stage_status"]["test_execution"], "PASSED")
+        self.assertEqual(linked["stage_status"]["test_source_binding"], "SOURCE_BINDING_NOT_VERIFIED")
+        self.assertEqual(
+            linked["stage_status"]["test_source_snapshot_binding"],
+            "ALL_SNAPSHOT_ENTRIES_MATCHED_UNAUTHENTICATED",
+        )
+        self.assertEqual(
+            linked["stage_status"]["test_source_report_locator"],
+            "ALL_REPORT_LOCATORS_MATCHED_UNAUTHENTICATED",
+        )
+        markdown = render_business_traceability_markdown(report)
+        self.assertIn("test_source_binding", markdown)
+        self.assertIn("SOURCE_BINDING_NOT_VERIFIED", markdown)
+
     def test_testcase_evidence_and_integrity_conflicts_reach_traceability_report(self):
         evidence = {
             "schema_version": "usit-business-evidence-verification-v1",

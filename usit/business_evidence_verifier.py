@@ -422,6 +422,82 @@ def verify_business_function_evidence(
                                     "test_case_id": item["test_case_id"],
                                 })
                                 symbol_status = "TEST_SOURCE_SYMBOL_INVALID"
+                        raw_snapshot = item.get("test_source_snapshot_binding_evidence")
+                        snapshot_status = item.get(
+                            "test_source_snapshot_binding_status", "TEST_SOURCE_SNAPSHOT_NOT_CHECKED"
+                        )
+                        allowed_snapshot_statuses = {
+                            "TEST_SOURCE_SNAPSHOT_NOT_CHECKED",
+                            "TEST_SOURCE_SNAPSHOT_LOCATOR_NOT_PROVIDED",
+                            "TEST_SOURCE_SNAPSHOT_LOCATOR_INVALID",
+                            "TEST_SOURCE_NOT_IN_EXECUTION_SNAPSHOT",
+                            "TEST_SOURCE_SNAPSHOT_HASH_MISMATCH",
+                            "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED",
+                        }
+                        if snapshot_status not in allowed_snapshot_statuses:
+                            conflicts.append({
+                                "kind": "INVALID_TEST_SOURCE_SNAPSHOT_BINDING_STATUS",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            snapshot_status = "TEST_SOURCE_SNAPSHOT_LOCATOR_INVALID"
+                        if raw_snapshot is not None and (
+                            not isinstance(raw_snapshot, dict)
+                            or raw_snapshot.get("status") != snapshot_status
+                        ):
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_SNAPSHOT_BINDING_EVIDENCE_STATUS_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            snapshot_status = "TEST_SOURCE_SNAPSHOT_LOCATOR_INVALID"
+                        if snapshot_status == "TEST_SOURCE_SNAPSHOT_HASH_MISMATCH":
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_SNAPSHOT_BINDING_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+
+                        raw_report_locator = item.get("test_source_report_locator_evidence")
+                        report_locator_status = item.get(
+                            "test_source_report_locator_status", "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED"
+                        )
+                        allowed_report_locator_statuses = {
+                            "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED",
+                            "RUNNER_SOURCE_LOCATOR_DUPLICATE_PROPERTY",
+                            "RUNNER_SOURCE_LOCATOR_INVALID_PROPERTY",
+                            "RUNNER_SOURCE_LOCATOR_INCOMPLETE",
+                            "RUNNER_SOURCE_LOCATOR_INVALID_PATH",
+                            "RUNNER_SOURCE_LOCATOR_INVALID_LINE",
+                            "RUNNER_SOURCE_LOCATOR_INVALID_VALUE",
+                            "RUNNER_SOURCE_LOCATOR_DECLARED_UNAUTHENTICATED",
+                            "REPORT_SOURCE_LOCATOR_MAPPING_INCOMPLETE",
+                            "REPORT_SOURCE_LOCATOR_MISMATCH",
+                            "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED",
+                        }
+                        if report_locator_status not in allowed_report_locator_statuses:
+                            conflicts.append({
+                                "kind": "INVALID_TEST_SOURCE_REPORT_LOCATOR_STATUS",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            report_locator_status = "RUNNER_SOURCE_LOCATOR_INVALID_PROPERTY"
+                        if raw_report_locator is not None and (
+                            not isinstance(raw_report_locator, dict)
+                            or raw_report_locator.get("status") != report_locator_status
+                        ):
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_REPORT_LOCATOR_EVIDENCE_STATUS_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            report_locator_status = "RUNNER_SOURCE_LOCATOR_INVALID_PROPERTY"
+                        if report_locator_status == "REPORT_SOURCE_LOCATOR_MISMATCH":
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_REPORT_LOCATOR_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
                         test_source_binding_evidence.append({
                             "test_case_id": item["test_case_id"],
                             "status": binding_status,
@@ -435,6 +511,10 @@ def verify_business_function_evidence(
                             "test_source_binding_status": binding_status,
                             "test_source_symbol_status": symbol_status,
                             "test_source_symbol_evidence": raw_symbol if isinstance(raw_symbol, dict) else None,
+                            "test_source_snapshot_binding_status": snapshot_status,
+                            "test_source_snapshot_binding_evidence": raw_snapshot if isinstance(raw_snapshot, dict) else None,
+                            "test_source_report_locator_status": report_locator_status,
+                            "test_source_report_locator_evidence": raw_report_locator if isinstance(raw_report_locator, dict) else None,
                         })
             expected_count = test.get("expected_mapped_test_case_count")
             reported_count = test.get("reported_mapped_test_case_count")
@@ -549,6 +629,28 @@ def verify_business_function_evidence(
             test_source_binding_status = "PARTIALLY_SOURCE_BYTES_MATCHED_AT_IMPORT"
         else:
             test_source_binding_status = "SOURCE_BINDING_NOT_VERIFIED"
+        snapshot_states = [item.get("test_source_snapshot_binding_status") for item in test_case_evidence]
+        if not snapshot_states:
+            test_source_snapshot_binding_status = "NOT_PROVIDED"
+        elif "TEST_SOURCE_SNAPSHOT_HASH_MISMATCH" in snapshot_states:
+            test_source_snapshot_binding_status = "EVIDENCE_CONFLICT"
+        elif all(status == "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED" for status in snapshot_states):
+            test_source_snapshot_binding_status = "ALL_SNAPSHOT_ENTRIES_MATCHED_UNAUTHENTICATED"
+        elif all(status == "TEST_SOURCE_SNAPSHOT_LOCATOR_NOT_PROVIDED" for status in snapshot_states):
+            test_source_snapshot_binding_status = "NOT_PROVIDED"
+        else:
+            test_source_snapshot_binding_status = "SOURCE_SNAPSHOT_NOT_VERIFIED"
+        report_locator_states = [item.get("test_source_report_locator_status") for item in test_case_evidence]
+        if not report_locator_states:
+            test_source_report_locator_status = "NOT_PROVIDED"
+        elif "REPORT_SOURCE_LOCATOR_MISMATCH" in report_locator_states:
+            test_source_report_locator_status = "EVIDENCE_CONFLICT"
+        elif all(status == "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED" for status in report_locator_states):
+            test_source_report_locator_status = "ALL_REPORT_LOCATORS_MATCHED_UNAUTHENTICATED"
+        elif all(status == "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED" for status in report_locator_states):
+            test_source_report_locator_status = "NOT_PROVIDED"
+        else:
+            test_source_report_locator_status = "REPORT_LOCATOR_NOT_VERIFIED"
         if ts=="FAILED": conclusion="TEST_FAILURE_OBSERVED"
         elif ts=="PASSED" and cs=="COVERED": conclusion="TEST_PASS_AND_CODE_LINES_COVERED"
         elif ts=="PASSED" and cs in {"PARTIAL","NOT_COVERED"}: conclusion="TEST_PASS_WITH_COVERAGE_GAP"
@@ -563,6 +665,8 @@ def verify_business_function_evidence(
             "reported_test_execution_status":reported_test_status,
             "test_source_binding_status": test_source_binding_status,
             "test_source_binding_evidence": test_source_binding_evidence,
+            "test_source_snapshot_binding_status": test_source_snapshot_binding_status,
+            "test_source_report_locator_status": test_source_report_locator_status,
             "test_case_count":test.get("mapped_test_case_count",0) if test else 0,
             "failed_test_count":test.get("failed",0) if test else 0,
             "skipped_test_count":test.get("skipped",0) if test else 0,
@@ -576,6 +680,8 @@ def verify_business_function_evidence(
                 "mapped_test_cases": test_case_evidence,
                 "test_source_binding_evidence": test_source_binding_evidence,
                 "test_source_binding_status": test_source_binding_status,
+                "test_source_snapshot_binding_status": test_source_snapshot_binding_status,
+                "test_source_report_locator_status": test_source_report_locator_status,
             } if test else None,
             "code_coverage_status":cs,
             "line_coverage_percent": (percent if cov and percent_valid else None),

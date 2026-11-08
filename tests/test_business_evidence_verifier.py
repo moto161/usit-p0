@@ -467,6 +467,81 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
             {item["kind"] for item in invalid["evidence_conflicts"]},
         )
 
+    def test_snapshot_and_report_locator_evidence_survive_verification(self):
+        snapshot = {
+            "status": "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED",
+            "test_source_file": "tests/test_upload.py",
+            "sha256": "a" * 64,
+        }
+        locator = {
+            "status": "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED",
+            "runner_locator": {
+                "test_source_file": "tests/test_upload.py",
+                "test_source_line": 4,
+                "test_source_symbol": "test_upload",
+                "pytest_nodeid": "tests/test_upload.py::test_upload",
+            },
+        }
+        tests = {
+            "schema_version": "usit-test-execution-results-v1",
+            "source_hashes": {
+                "test_report_sha256": "1" * 64,
+                "mapping_json_sha256": "2" * 64,
+                "business_graph_sha256": self.graph_hash,
+            },
+            "business_function_results": [{
+                "business_function_id": "bf-upload",
+                "execution_status": "PASSED",
+                "mapped_test_case_count": 1,
+                "failed": 0,
+                "skipped": 0,
+                "expected_mapped_test_case_count": 1,
+                "reported_mapped_test_case_count": 1,
+                "mapped_case_completeness": "COMPLETE",
+                "mapped_test_cases": [{
+                    "test_case_id": "tests/test_upload.py::test_upload",
+                    "status": "PASSED",
+                    "test_source_snapshot_binding_status": snapshot["status"],
+                    "test_source_snapshot_binding_evidence": snapshot,
+                    "test_source_report_locator_status": locator["status"],
+                    "test_source_report_locator_evidence": locator,
+                }],
+            }],
+        }
+        result = verify_business_function_evidence(
+            self.graph, tests, business_graph_sha256=self.graph_hash
+        )
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        testcase = upload["test_execution_detail"]["mapped_test_cases"][0]
+        self.assertEqual(testcase["test_source_snapshot_binding_status"], snapshot["status"])
+        self.assertEqual(testcase["test_source_report_locator_status"], locator["status"])
+        self.assertEqual(
+            upload["test_source_snapshot_binding_status"],
+            "ALL_SNAPSHOT_ENTRIES_MATCHED_UNAUTHENTICATED",
+        )
+        self.assertEqual(
+            upload["test_source_report_locator_status"],
+            "ALL_REPORT_LOCATORS_MATCHED_UNAUTHENTICATED",
+        )
+        self.assertEqual(result["evidence_conflict_count"], 0)
+
+        tampered = json.loads(json.dumps(tests))
+        bad_case = tampered["business_function_results"][0]["mapped_test_cases"][0]
+        bad_case["test_source_report_locator_status"] = "REPORT_SOURCE_LOCATOR_MISMATCH"
+        bad_case["test_source_report_locator_evidence"]["status"] = "REPORT_SOURCE_LOCATOR_MISMATCH"
+        invalid = verify_business_function_evidence(
+            self.graph, tampered, business_graph_sha256=self.graph_hash
+        )
+        self.assertIn(
+            "TEST_SOURCE_REPORT_LOCATOR_MISMATCH",
+            {item["kind"] for item in invalid["evidence_conflicts"]},
+        )
+        invalid_upload = next(x for x in invalid["business_function_evidence"]
+                              if x["business_function_id"] == "bf-upload")
+        self.assertEqual(invalid_upload["test_source_report_locator_status"], "EVIDENCE_CONFLICT")
+        self.assertTrue(invalid_upload["evidence_conflict"])
+
     def test_missing_inputs_remain_not_measured(self):
         result=verify_business_function_evidence(self.graph)
         self.assertTrue(all(x["test_execution_status"]=="NOT_MEASURED" for x in result["business_function_evidence"]))
