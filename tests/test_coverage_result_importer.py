@@ -152,5 +152,41 @@ class CoverageImporterTests(unittest.TestCase):
                 ingest_coverage_results(link, mapping, graph, "coverage-py-json")
 
 
+    def test_source_file_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {"src/a.py": {"executed_lines": [1], "missing_lines": []}}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [
+                {"business_function_id": "bf-a", "source_file": "src/a.py", "line_start": 1, "line_end": 1}
+            ])
+            source = base / "project" / "src" / "a.py"
+            outside = base / "outside.py"
+            outside.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            source.unlink()
+            try:
+                source.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"platform does not permit symlink creation: {exc}")
+            with self.assertRaisesRegex(ValueError, "symbolic links or reparse points"):
+                ingest_coverage_results(report, mapping, graph, "coverage-py-json", base / "project")
+
+    def test_project_root_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {"src/a.py": {"executed_lines": [1], "missing_lines": []}}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [
+                {"business_function_id": "bf-a", "source_file": "src/a.py", "line_start": 1, "line_end": 1}
+            ])
+            alias = base / "project-alias"
+            try:
+                alias.symlink_to(base / "project", target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"platform does not permit directory symlink creation: {exc}")
+            with self.assertRaisesRegex(ValueError, "project_root must not contain symbolic links or reparse points"):
+                ingest_coverage_results(report, mapping, graph, "coverage-py-json", alias)
+
+
 if __name__ == "__main__":
     unittest.main()
