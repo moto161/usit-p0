@@ -280,7 +280,7 @@ python -m usit ingest-test-results --junit junit.xml --mapping reviewed-test-map
 
 - `ingest-test-results` accepts completed JUnit XML (including compatible Android instrumentation reports) and pytest-json-report JSON. Testcase IDs must match the reviewed exact mapping; no fuzzy matching or inferred function linkage. Mapping JSON must include `source_graph_sha256`, the SHA-256 of the exact raw business-graph file bytes.
 - `ingest-coverage` accepts coverage.py JSON and JaCoCo XML. Function-level coverage is linked only by a reviewed `source_file + line_start + line_end → business_function_id` mapping. Coverage mapping JSON must also bind to the exact graph bytes through `source_graph_sha256`.
-- Missing report files/ranges remain `UNKNOWN`; no coverage is not treated as 0%. Coverage is separate from test pass/fail and does not establish requirement completeness or correctness.
+- Missing report files/ranges remain `UNKNOWN`; no coverage is not treated as 0%. Coverage is separate from test pass/fail and does not establish requirement completeness or correctness. The importer also rejects duplicate or invalid `business_function_id` entries in the source graph instead of silently collapsing them into a set.
 - These commands import existing reports only. They do not install plugins, run tests, invoke Gradle/ADB, or execute project code. Report files are size-bounded and read through no-follow file descriptors; JaCoCo DTD/entity declarations are rejected.
 
 Example mapping:
