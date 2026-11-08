@@ -36,6 +36,15 @@ def _write_graph_and_mapping(base: Path, function_ids: list[str], mappings: list
 
 
 class CoverageImporterTests(unittest.TestCase):
+    def test_coverage_mapping_rejects_duplicate_business_function_ids_in_graph(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-duplicate", "bf-duplicate"], [])
+            with self.assertRaisesRegex(ValueError, "duplicate business_function_id in graph"):
+                ingest_coverage_results(report, mapping, graph, "coverage-py-json")
+
     def test_coverage_py_json_imports_with_explicit_mapping_and_hashes(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
