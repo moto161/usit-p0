@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .safeio import is_reparse, open_no_follow
-from .test_report_adapters import parse_coverage_py_json, parse_jacoco_xml, map_line_coverage_to_functions
+from .test_report_adapters import parse_coverage_py_json, parse_jacoco_xml, map_line_coverage_to_functions, strict_json_loads
 
 MAX_COVERAGE_BYTES = 50 * 1024 * 1024
 MAX_MAPPING_BYTES = 2 * 1024 * 1024
@@ -137,7 +137,7 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
     mapping_bytes = _read(mapping_path, MAX_MAPPING_BYTES)
     graph_bytes = _read(graph_path, MAX_GRAPH_BYTES)
     try:
-        mapping, graph = json.loads(mapping_bytes), json.loads(graph_bytes)
+        mapping, graph = strict_json_loads(mapping_bytes), json.loads(graph_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid JSON input: {exc}") from exc
     if not isinstance(graph, dict) or graph.get("schema_version") != "usit-graph-v1":
