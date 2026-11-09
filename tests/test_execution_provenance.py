@@ -147,5 +147,20 @@ class TestExecutionProvenanceTests(unittest.TestCase):
                     )
 
 
+    def test_malformed_enum_fields_raise_value_error_not_type_error(self):
+        for field, value in (("report_format", []), ("report_format", {})):
+            with self.subTest(field=field, value=value):
+                self.record[field] = value
+                with self.assertRaisesRegex(ValueError, "report_format"):
+                    self.validate()
+        self.record["report_format"] = "PYTEST_JSON"
+        for field, value in (("state", []), ("state", {}), ("untracked_files", []), ("untracked_files", {})):
+            with self.subTest(field=field, value=value):
+                self.record["working_tree_state"] = {"state": "CLEAN", "untracked_files": "INCLUDED"}
+                self.record["working_tree_state"][field] = value
+                with self.assertRaisesRegex(ValueError, "working_tree_state"):
+                    self.validate()
+
+
 if __name__ == "__main__":
     unittest.main()
