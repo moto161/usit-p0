@@ -47,6 +47,13 @@ def adapt_android_jsonl(
     session_id: str,
     captured_at: str,
 ) -> dict[str, Any]:
+    if not isinstance(raw, bytes):
+        raise ValueError("Android event input must be bytes")
+    if not isinstance(graph, dict) or graph.get("schema_version") != "usit-graph-v1":
+        raise ValueError("business graph must use usit-graph-v1")
+    understanding = graph.get("business_understanding")
+    if not isinstance(understanding, dict) or not isinstance(understanding.get("business_function_views"), list):
+        raise ValueError("business graph is missing business_function_views")
     if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 128:
         raise ValueError("session_id must be a non-empty string of at most 128 characters")
     try:
@@ -59,7 +66,7 @@ def adapt_android_jsonl(
         raise ValueError("graph_sha256 must be a lowercase SHA-256 digest")
     known = {
         row.get("business_function_id")
-        for row in graph.get("business_understanding", {}).get("business_function_views", [])
+        for row in understanding.get("business_function_views", [])
         if isinstance(row, dict) and isinstance(row.get("business_function_id"), str)
     }
     events = []
@@ -83,7 +90,7 @@ def adapt_android_jsonl(
         if unknown:
             raise ValueError(f"USIT Android event at line {line_number} has unsupported fields: {', '.join(sorted(unknown)[:8])}")
         event_name = record.get("event")
-        if event_name not in ANDROID_TYPES:
+        if not isinstance(event_name, str) or event_name not in ANDROID_TYPES:
             raise ValueError(f"USIT Android event at line {line_number} has unsupported event type")
         event_id = record.get("event_id")
         if not isinstance(event_id, str) or not event_id.strip() or event_id in seen_ids:
@@ -99,7 +106,9 @@ def adapt_android_jsonl(
         if event_time.tzinfo is None or event_time.utcoffset() is None:
             raise ValueError(f"USIT Android event at line {line_number} timestamp requires timezone")
         function_id = record.get("business_function_id")
-        if function_id is not None and function_id not in known:
+        if function_id is not None and (
+            not isinstance(function_id, str) or not function_id or function_id not in known
+        ):
             raise ValueError(f"USIT Android event at line {line_number} references unknown business_function_id")
         mapped = {
             "event_id": event_id,
