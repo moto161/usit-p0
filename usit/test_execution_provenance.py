@@ -15,6 +15,7 @@ from typing import Any
 
 SCHEMA_VERSION = "usit-test-execution-provenance-v1"
 MAX_RECORD_BYTES = 1024 * 1024
+MAX_REPORT_BYTES = 50 * 1024 * 1024
 MAX_MANIFEST_BYTES = 50 * 1024 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -97,6 +98,10 @@ def validate_execution_provenance(
     cannot prove who created the record or which files the test process loaded.
     """
     record = _json_object(record_bytes, "execution provenance record", MAX_RECORD_BYTES)
+    if not isinstance(report_bytes, bytes):
+        raise ValueError("test report must be bytes")
+    if len(report_bytes) > MAX_REPORT_BYTES:
+        raise ValueError(f"test report exceeds size limit ({MAX_REPORT_BYTES} bytes)")
     if record.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {SCHEMA_VERSION}")
 
