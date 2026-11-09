@@ -116,7 +116,7 @@ def validate_execution_provenance(
         raise ValueError("runner must contain non-empty name and version")
 
     report_format = record.get("report_format")
-    if report_format not in {"PYTEST_JSON", "JUNIT_XML"}:
+    if not isinstance(report_format, str) or report_format not in {"PYTEST_JSON", "JUNIT_XML"}:
         raise ValueError("report_format must be PYTEST_JSON or JUNIT_XML")
     report_path = _safe_relative_path(record.get("report_relative_path"), "report_relative_path")
     declared_report_hash = _require_hash(record.get("report_sha256"), "report_sha256")
@@ -166,9 +166,12 @@ def validate_execution_provenance(
         raise ValueError("source_snapshot.capture_method is required")
 
     tree = record.get("working_tree_state")
-    if not isinstance(tree, dict) or tree.get("state") not in {"CLEAN", "DIRTY", "UNKNOWN"}:
+    if (not isinstance(tree, dict)
+            or not isinstance(tree.get("state"), str)
+            or tree.get("state") not in {"CLEAN", "DIRTY", "UNKNOWN"}):
         raise ValueError("working_tree_state.state must be CLEAN, DIRTY, or UNKNOWN")
-    if tree.get("untracked_files") not in {"INCLUDED", "EXCLUDED", "UNKNOWN"}:
+    if (not isinstance(tree.get("untracked_files"), str)
+            or tree.get("untracked_files") not in {"INCLUDED", "EXCLUDED", "UNKNOWN"}):
         raise ValueError("working_tree_state.untracked_files must be INCLUDED, EXCLUDED, or UNKNOWN")
 
     for field in ("command_fingerprint", "environment_fingerprint"):
