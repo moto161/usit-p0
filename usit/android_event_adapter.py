@@ -64,11 +64,16 @@ def adapt_android_jsonl(
         raise ValueError("captured_at must include a timezone offset")
     if not isinstance(graph_sha256, str) or len(graph_sha256) != 64 or any(c not in "0123456789abcdef" for c in graph_sha256):
         raise ValueError("graph_sha256 must be a lowercase SHA-256 digest")
-    known = {
-        row.get("business_function_id")
-        for row in understanding.get("business_function_views", [])
-        if isinstance(row, dict) and isinstance(row.get("business_function_id"), str)
-    }
+    known = set()
+    for index, row in enumerate(understanding["business_function_views"]):
+        if not isinstance(row, dict):
+            raise ValueError(f"business function view {index} must be an object")
+        identity = row.get("business_function_id")
+        if not isinstance(identity, str) or not identity.strip():
+            raise ValueError(f"business function view {index} has invalid business_function_id")
+        if identity in known:
+            raise ValueError(f"duplicate business_function_id in graph: {identity}")
+        known.add(identity)
     events = []
     seen_ids = set()
     try:
@@ -93,8 +98,8 @@ def adapt_android_jsonl(
         if not isinstance(event_name, str) or event_name not in ANDROID_TYPES:
             raise ValueError(f"USIT Android event at line {line_number} has unsupported event type")
         event_id = record.get("event_id")
-        if not isinstance(event_id, str) or not event_id.strip() or event_id in seen_ids:
-            raise ValueError(f"USIT Android event at line {line_number} has missing or duplicate event_id")
+        if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 256 or event_id in seen_ids:
+            raise ValueError(f"USIT Android event at line {line_number} has missing, oversized, or duplicate event_id")
         seen_ids.add(event_id)
         timestamp = record.get("timestamp")
         if not isinstance(timestamp, str):
@@ -137,21 +142,32 @@ def adapt_android_jsonl(
         }
         for source, target in field_map.items():
             if source in record:
-                if target == "component" and "component" in mapped:
-                    mapped[target] = mapped[target] + "/" + str(record[source])
+                value = record[source]
+                if target == "component":
+                    if not isinstance(value, str) or len(value) > 512:
+                        raise ValueError(f"USIT Android event at line {line_number} has invalid {source}")
+                    if "component" in mapped:
+                        mapped[target] = mapped[target] + "/" + value
+                    else:
+                        mapped[target] = value
                 else:
-                    mapped[target] = record[source]
+                    mapped[target] = value
         events.append(mapped)
         if len(events) > MAX_RECORDS:
             raise ValueError(f"Android event count exceeds limit ({MAX_RECORDS})")
     if not events:
         raise ValueError("no prefixed USIT Android event records were found")
-    return {
+    result = {
         "schema_version": "usit-runtime-evidence-v1",
         "source_graph_sha256": graph_sha256,
         "session": {"session_id": session_id, "platform": "ANDROID", "captured_at": captured_at},
         "events": events,
     }
+    # Keep the adapter contract aligned with the canonical runtime-evidence
+    # validator so malformed optional fields cannot be emitted as valid output.
+    from .runtime_evidence import validate_runtime_evidence
+    validate_runtime_evidence(result, graph, graph_sha256)
+    return result
 
 
 def adapt_android_jsonl_file(
