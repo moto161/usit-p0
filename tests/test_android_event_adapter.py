@@ -68,6 +68,25 @@ class AndroidEventAdapterTests(unittest.TestCase):
             adapt_android_jsonl(b"ordinary logcat only\n", self.graph, self.graph_hash,
                                 "s1", "2026-11-01T12:00:00+08:00")
 
+    def test_rejects_unhashable_event_and_business_function_ids(self):
+        for field, value, message in (
+            ("event", [], "unsupported event type"),
+            ("business_function_id", {}, "unknown business_function_id"),
+        ):
+            record = dict(self.records[0])
+            record[field] = value
+            raw = ("USIT_ANDROID_EVENT " + json.dumps(record)).encode()
+            with self.assertRaisesRegex(ValueError, message):
+                adapt_android_jsonl(raw, self.graph, self.graph_hash, "s1", "2026-11-01T12:00:00+08:00")
+
+    def test_rejects_invalid_graph_shape_and_non_bytes_input(self):
+        with self.assertRaisesRegex(ValueError, "usit-graph-v1"):
+            adapt_android_jsonl(self._raw(), {"schema_version": "wrong"}, self.graph_hash,
+                                "s1", "2026-11-01T12:00:00+08:00")
+        with self.assertRaisesRegex(ValueError, "must be bytes"):
+            adapt_android_jsonl("not-bytes", self.graph, self.graph_hash,
+                                "s1", "2026-11-01T12:00:00+08:00")
+
     def test_rejects_duplicate_ids_and_timezone_less_timestamps(self):
         records = [dict(row) for row in self.records[:2]]
         records[1]["event_id"] = records[0]["event_id"]
