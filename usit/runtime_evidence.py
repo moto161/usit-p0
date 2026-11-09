@@ -156,7 +156,7 @@ def validate_runtime_evidence(
         duration = event.get("duration_ms")
         if duration is not None and (
             isinstance(duration, bool) or not isinstance(duration, (int, float))
-            or not math.isfinite(duration) or duration < 0
+            or (isinstance(duration, float) and not math.isfinite(duration)) or duration < 0
         ):
             raise ValueError(f"events[{index}].duration_ms must be a non-negative number")
         status_code = event.get("status_code")
