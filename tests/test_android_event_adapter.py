@@ -79,6 +79,38 @@ class AndroidEventAdapterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, message):
                 adapt_android_jsonl(raw, self.graph, self.graph_hash, "s1", "2026-11-01T12:00:00+08:00")
 
+    def test_rejects_malformed_runtime_fields_instead_of_emitting_invalid_schema(self):
+        cases = (
+            ("screen_id", [], "invalid screen_id"),
+            ("result", {}, "result must be a string"),
+            ("duration_ms", True, "duration_ms must be a non-negative number"),
+            ("correlation_id", [], "correlation_id must be a non-empty string"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                record = dict(self.records[0])
+                record[field] = value
+                raw = ("USIT_ANDROID_EVENT " + json.dumps(record)).encode()
+                with self.assertRaisesRegex(ValueError, message):
+                    adapt_android_jsonl(raw, self.graph, self.graph_hash, "s1",
+                                        "2026-11-01T12:00:00+08:00")
+
+    def test_rejects_duplicate_or_malformed_business_function_views(self):
+        duplicate_graph = json.loads(json.dumps(self.graph))
+        duplicate_graph["business_understanding"]["business_function_views"].append(
+            {"business_function_id": "bf-photo-view"}
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate business_function_id"):
+            adapt_android_jsonl(self._raw(), duplicate_graph, self.graph_hash, "s1",
+                                "2026-11-01T12:00:00+08:00")
+        malformed_graph = json.loads(json.dumps(self.graph))
+        malformed_graph["business_understanding"]["business_function_views"][0][
+            "business_function_id"
+        ] = []
+        with self.assertRaisesRegex(ValueError, "invalid business_function_id"):
+            adapt_android_jsonl(self._raw(), malformed_graph, self.graph_hash, "s1",
+                                "2026-11-01T12:00:00+08:00")
+
     def test_rejects_invalid_graph_shape_and_non_bytes_input(self):
         with self.assertRaisesRegex(ValueError, "usit-graph-v1"):
             adapt_android_jsonl(self._raw(), {"schema_version": "wrong"}, self.graph_hash,
