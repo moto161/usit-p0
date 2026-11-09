@@ -139,6 +139,23 @@ class RuntimeEvidenceTests(unittest.TestCase):
         self.assertEqual({x["kind"] for x in result["evidence_conflicts"]},
                          {"GRAPH_HASH_MISMATCH", "UNKNOWN_BUSINESS_FUNCTION"})
 
+    def test_rejects_unhashable_platform_and_event_type_without_type_error(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["session"]["platform"] = []
+        with self.assertRaisesRegex(ValueError, "session.platform is invalid"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][0]["event_type"] = {}
+        with self.assertRaisesRegex(ValueError, "event_type is invalid"):
+            validate_runtime_evidence(doc, self.graph, self.graph_hash)
+
+    def test_rejects_non_finite_runtime_durations(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            doc = json.loads(json.dumps(self.doc))
+            doc["events"][0]["duration_ms"] = value
+            with self.assertRaisesRegex(ValueError, "duration_ms"):
+                validate_runtime_evidence(doc, self.graph, self.graph_hash)
+
     def test_rejects_sensitive_fields_and_unrecognised_metadata(self):
         doc = json.loads(json.dumps(self.doc))
         doc["events"][0]["request_body"] = "private payload"
