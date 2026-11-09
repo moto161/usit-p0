@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -98,7 +99,7 @@ def validate_runtime_evidence(
     platform = metadata.get("platform")
     if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 128:
         raise ValueError("session.session_id must be a non-empty string of at most 128 characters")
-    if platform not in {"ANDROID", "IOS", "WEB", "DESKTOP", "BACKEND"}:
+    if not isinstance(platform, str) or platform not in {"ANDROID", "IOS", "WEB", "DESKTOP", "BACKEND"}:
         raise ValueError("session.platform is invalid")
     _aware_timestamp(metadata.get("captured_at"), "session.captured_at")
     if runtime_evidence_sha256 is not None and (
@@ -134,7 +135,7 @@ def validate_runtime_evidence(
         if event_id in indexed:
             raise ValueError(f"duplicate runtime event_id: {event_id}")
         event_type = event.get("event_type")
-        if event_type not in EVENT_TYPES:
+        if not isinstance(event_type, str) or event_type not in EVENT_TYPES:
             raise ValueError(f"events[{index}].event_type is invalid")
         correlation_id = event.get("correlation_id")
         if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > MAX_ID_LENGTH:
@@ -153,7 +154,10 @@ def validate_runtime_evidence(
         if function_id and function_id not in known:
             conflicts.append({"kind": "UNKNOWN_BUSINESS_FUNCTION", "event_id": event_id, "business_function_id": function_id})
         duration = event.get("duration_ms")
-        if duration is not None and (isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0):
+        if duration is not None and (
+            isinstance(duration, bool) or not isinstance(duration, (int, float))
+            or not math.isfinite(duration) or duration < 0
+        ):
             raise ValueError(f"events[{index}].duration_ms must be a non-negative number")
         status_code = event.get("status_code")
         if status_code is not None and (isinstance(status_code, bool) or not isinstance(status_code, int) or not 100 <= status_code <= 599):
