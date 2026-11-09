@@ -50,6 +50,18 @@ class TestExecutionProvenanceTests(unittest.TestCase):
         self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
         self.assertEqual(result["execution_reproducibility_status"], "CANDIDATE_ONLY")
 
+    def test_report_input_must_be_bounded_bytes(self):
+        from unittest.mock import patch
+        for invalid in ("not-bytes", bytearray(self.report)):
+            with self.subTest(value_type=type(invalid).__name__):
+                with self.assertRaisesRegex(ValueError, "test report must be bytes"):
+                    validate_execution_provenance(
+                        json.dumps(self.record).encode(), invalid, self.manifest_bytes
+                    )
+        with patch("usit.test_execution_provenance.MAX_REPORT_BYTES", len(self.report) - 1):
+            with self.assertRaisesRegex(ValueError, "test report exceeds size limit"):
+                self.validate()
+
     def test_report_tampering_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "report_sha256"):
             validate_execution_provenance(
