@@ -34,6 +34,10 @@ class BusinessTestPlannerTests(unittest.TestCase):
         result = plan_business_tests(self.source)
         self.assertEqual(result["candidate_count"], 4)
         self.assertEqual(result["execution_status"], "NOT_EXECUTED")
+        # B2 G4: the generator never writes confirmation records, so the
+        # generation-time count is always 0 confirmed / all awaiting.
+        self.assertEqual(result["expected_result_confirmation_counts"],
+                         {"confirmed": 0, "awaiting_confirmation": 4})
         self.assertEqual(
             result["category_counts"],
             {

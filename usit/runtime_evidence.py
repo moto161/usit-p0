@@ -81,7 +81,7 @@ def validate_runtime_evidence(
         raise ValueError("runtime evidence document must be JSON-serializable") from exc
     if encoded_size > MAX_EVENT_BYTES:
         raise ValueError(f"runtime evidence exceeds size limit ({MAX_EVENT_BYTES} bytes)")
-    extra_top = set(document) - {"schema_version", "source_graph_sha256", "session", "events"}
+    extra_top = set(document) - {"schema_version", "source_graph_sha256", "session", "events", "correlation_function_declarations"}
     if extra_top:
         raise ValueError("runtime evidence contains unsupported top-level fields: " + ", ".join(sorted(extra_top)[:8]))
     if not isinstance(business_graph, dict) or business_graph.get("schema_version") != "usit-graph-v1":
@@ -123,6 +123,35 @@ def validate_runtime_evidence(
     if graph_hash != business_graph_sha256:
         conflicts.append({"kind": "GRAPH_HASH_MISMATCH", "expected": business_graph_sha256, "actual": graph_hash})
 
+    # B2 G3(a): optional collector declarations of which business
+    # functions each correlation covers. Without an independent
+    # declaration there is nothing to check an event's claimed function
+    # against -- the correlation summary's function list is derived from
+    # the same events -- so the per-event check below only runs for
+    # declared correlations. Old documents without this field validate
+    # exactly as before.
+    declarations = document.get("correlation_function_declarations")
+    if declarations is not None:
+        if not isinstance(declarations, dict):
+            raise ValueError("correlation_function_declarations must be an object mapping correlation IDs to business function ID lists")
+        parsed_declarations = {}
+        for correlation_id, function_ids in declarations.items():
+            if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > MAX_ID_LENGTH:
+                raise ValueError("correlation_function_declarations keys must be non-empty correlation IDs of at most 256 characters")
+            if not isinstance(function_ids, list) or not function_ids or any(
+                not isinstance(value, str) or not value or len(value) > MAX_ID_LENGTH for value in function_ids
+            ):
+                raise ValueError(f"correlation_function_declarations[{correlation_id}] must be a non-empty list of business function IDs")
+            parsed_declarations[correlation_id] = sorted(set(function_ids))
+        declarations = parsed_declarations
+        for correlation_id, function_ids in declarations.items():
+            for function_id in function_ids:
+                if function_id not in known:
+                    conflicts.append({"kind": "UNKNOWN_BUSINESS_FUNCTION", "source": "correlation_function_declarations",
+                                      "correlation_id": correlation_id, "business_function_id": function_id})
+    else:
+        declarations = {}
+
     events = document.get("events")
     if not isinstance(events, list):
         raise ValueError("events must be a list")
@@ -163,6 +192,16 @@ def validate_runtime_evidence(
             raise ValueError(f"events[{index}].business_function_id must be a non-empty string of at most {MAX_ID_LENGTH} characters")
         if function_id and function_id not in known:
             conflicts.append({"kind": "UNKNOWN_BUSINESS_FUNCTION", "event_id": event_id, "business_function_id": function_id})
+        # B2 G3(a): when the collector declared which functions this
+        # correlation covers, each event's claimed function must fall
+        # inside that declaration. A claim outside it is a collector
+        # inconsistency, not proof of misattribution -- the declaration
+        # and the field are both collector self-report.
+        declared = declarations.get(correlation_id)
+        if declared is not None and function_id and function_id not in declared:
+            conflicts.append({"kind": "EVENT_FUNCTION_NOT_IN_CORRELATION_DECLARATION",
+                              "event_id": event_id, "correlation_id": correlation_id,
+                              "business_function_id": function_id, "declared_function_ids": declared})
         duration = event.get("duration_ms")
         if duration is not None and (
             isinstance(duration, bool) or not isinstance(duration, (int, float))
@@ -183,6 +222,13 @@ def validate_runtime_evidence(
         copied = dict(event)
         indexed[event_id] = copied
         correlations.setdefault(correlation_id, []).append(copied)
+
+    # B2 G3(a): a declaration naming a correlation no event belongs to
+    # is a collector/document error worth flagging, not a silent no-op.
+    for correlation_id, function_ids in sorted(declarations.items()):
+        if correlation_id not in correlations:
+            conflicts.append({"kind": "CORRELATION_DECLARATION_WITHOUT_EVENTS",
+                              "correlation_id": correlation_id, "declared_function_ids": function_ids})
 
     parent_edges = []
     for event in events:
@@ -216,11 +262,33 @@ def validate_runtime_evidence(
     for correlation_id, rows in sorted(correlations.items()):
         types = {row["event_type"] for row in rows}
         function_ids = sorted({row["business_function_id"] for row in rows if row.get("business_function_id")})
+        # B2 G3(a): per-event attribution for this correlation, taken
+        # from the events' own claimed function IDs. The attribution is
+        # collector-declared, never independently verified: agreement
+        # between declaration and events only proves the collector's
+        # self-report is internally consistent.
+        declared = declarations.get(correlation_id)
+        attributed = sorted(
+            [{"event_id": row["event_id"], "business_function_id": row["business_function_id"],
+              "stage": STAGE_BY_TYPE[row["event_type"]]}
+             for row in rows if row.get("business_function_id")],
+            key=lambda item: item["event_id"])
+        unattributed_event_count = len(rows) - len(attributed)
+        if declared is None:
+            attribution_status = "NO_DECLARATION"
+        elif unattributed_event_count == 0:
+            attribution_status = "PER_EVENT_COLLECTOR_DECLARED"
+        else:
+            attribution_status = "PARTIAL_COLLECTOR_DECLARED"
         summaries.append({
             "correlation_id": correlation_id,
             "event_count": len(rows),
             "observed_stages": sorted({STAGE_BY_TYPE[row["event_type"]] for row in rows}),
             "business_function_ids": function_ids,
+            "declared_function_ids": declared,
+            "event_function_attribution": attributed,
+            "unattributed_event_count": unattributed_event_count,
+            "attribution_status": attribution_status,
             "runtime_observation_status": "RUNTIME_OBSERVED",
             "has_ui_action": "UI_ACTION" in types,
             "has_http_exchange": "HTTP_REQUEST" in types and "HTTP_RESPONSE" in types,
@@ -303,6 +371,7 @@ def validate_runtime_evidence(
             "业务功能关联只接受事件中显式提供且存在于当前图谱的 business_function_id；不按页面名、路由名或时间邻近推断。",
             "parent_event_id 可支持事件关联，但不证明分布式调用链因果真实；需要可信采集器和独立证据。",
             "仅接受白名单字段；禁止提交请求/响应正文、凭证、Cookie、个人身份信息或原始数据库值。",
+            "逐事件功能归属取自采集端声明与事件自带字段，未经独立验证；声明与事件一致只证明自述无矛盾，不证明事件真实属于该功能。",
             "完整阶段链不是所有业务功能的固定要求；缺失阶段标记为未观察，不自动认定为缺陷。",
         ],
     }

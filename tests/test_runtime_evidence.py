@@ -266,6 +266,83 @@ class RuntimeEvidenceTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertFalse(out_path.exists())
 
+    # B2 G3(a): per-event check against the collector's correlation
+    # declarations. The base fixture has one correlation (c1) with four
+    # events all attributed to bf-photo-view.
+    def test_declaration_matching_events_produces_per_event_attribution(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["correlation_function_declarations"] = {"c1": ["bf-photo-view"]}
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        self.assertEqual(result["evidence_conflicts"], [])
+        self.assertEqual(result["assessment_status"], "VALIDATED_EVENT_STRUCTURE")
+        summary = result["correlations"][0]
+        self.assertEqual(summary["declared_function_ids"], ["bf-photo-view"])
+        self.assertEqual(summary["attribution_status"], "PER_EVENT_COLLECTOR_DECLARED")
+        self.assertEqual(summary["unattributed_event_count"], 0)
+        self.assertEqual(summary["event_function_attribution"], [
+            {"event_id": "e1", "business_function_id": "bf-photo-view", "stage": "ui"},
+            {"event_id": "e2", "business_function_id": "bf-photo-view", "stage": "http_request"},
+            {"event_id": "e3", "business_function_id": "bf-photo-view", "stage": "http_response"},
+            {"event_id": "e4", "business_function_id": "bf-photo-view", "stage": "backend"},
+        ])
+
+    def test_event_outside_declaration_is_a_conflict(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["correlation_function_declarations"] = {"c1": ["bf-photo-delete"]}
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        self.assertEqual(result["assessment_status"], "EVIDENCE_CONFLICT")
+        kinds = {x["kind"] for x in result["evidence_conflicts"]}
+        self.assertEqual(kinds, {"EVENT_FUNCTION_NOT_IN_CORRELATION_DECLARATION"})
+        conflict = result["evidence_conflicts"][0]
+        self.assertEqual(conflict["event_id"], "e1")
+        self.assertEqual(conflict["business_function_id"], "bf-photo-view")
+        self.assertEqual(conflict["declared_function_ids"], ["bf-photo-delete"])
+
+    def test_declaration_unknown_function_and_declaration_without_events(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["correlation_function_declarations"] = {
+            "c1": ["bf-photo-view", "bf-not-in-graph"],
+            "c-ghost": ["bf-photo-view"],
+        }
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        kinds = {x["kind"] for x in result["evidence_conflicts"]}
+        self.assertEqual(kinds, {"UNKNOWN_BUSINESS_FUNCTION", "CORRELATION_DECLARATION_WITHOUT_EVENTS"})
+        unknown = next(x for x in result["evidence_conflicts"] if x["kind"] == "UNKNOWN_BUSINESS_FUNCTION")
+        self.assertEqual(unknown["source"], "correlation_function_declarations")
+        self.assertEqual(unknown["business_function_id"], "bf-not-in-graph")
+        ghost = next(x for x in result["evidence_conflicts"] if x["kind"] == "CORRELATION_DECLARATION_WITHOUT_EVENTS")
+        self.assertEqual(ghost["correlation_id"], "c-ghost")
+
+    def test_partial_attribution_and_undeclared_document(self):
+        doc = json.loads(json.dumps(self.doc))
+        doc["events"][3].pop("business_function_id")
+        doc["correlation_function_declarations"] = {"c1": ["bf-photo-view"]}
+        result = validate_runtime_evidence(doc, self.graph, self.graph_hash)
+        summary = result["correlations"][0]
+        self.assertEqual(summary["attribution_status"], "PARTIAL_COLLECTOR_DECLARED")
+        self.assertEqual(summary["unattributed_event_count"], 1)
+        self.assertEqual(len(summary["event_function_attribution"]), 3)
+        # A B1-era document without declarations validates as before.
+        legacy = validate_runtime_evidence(self.doc, self.graph, self.graph_hash)
+        self.assertEqual(legacy["correlations"][0]["attribution_status"], "NO_DECLARATION")
+        self.assertIsNone(legacy["correlations"][0]["declared_function_ids"])
+        self.assertEqual(legacy["correlations"][0]["event_function_attribution"], [
+            {"event_id": "e1", "business_function_id": "bf-photo-view", "stage": "ui"},
+            {"event_id": "e2", "business_function_id": "bf-photo-view", "stage": "http_request"},
+            {"event_id": "e3", "business_function_id": "bf-photo-view", "stage": "http_response"},
+            {"event_id": "e4", "business_function_id": "bf-photo-view", "stage": "backend"},
+        ])
+
+    def test_malformed_declarations_are_rejected(self):
+        for declarations in (["c1"], {"c1": "bf-photo-view"}, {"c1": []},
+                             {"c1": [123]}, {"": ["bf-photo-view"]},
+                             {"c1": ["bf-photo-view", "bf-photo-view", ""]},
+                             {"c1": ["x" * 257]}):
+            doc = json.loads(json.dumps(self.doc))
+            doc["correlation_function_declarations"] = declarations
+            with self.assertRaises(ValueError):
+                validate_runtime_evidence(doc, self.graph, self.graph_hash)
+
     def test_cli_rejects_final_component_symlink_without_following_it(self):
         from usit.cli import main
         with tempfile.TemporaryDirectory() as td:

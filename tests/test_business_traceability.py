@@ -42,7 +42,12 @@ class BusinessTraceabilityTests(unittest.TestCase):
 
     def test_only_approved_exact_mapping_builds_cross_layer_traceability(self):
         plan = {"schema_version": "usit-business-test-plan-v1", "candidates": [
-            {"test_id": "test-photo-list", "business_function_id": "bf-list"}]}
+            {"test_id": "test-photo-list", "business_function_id": "bf-list",
+             # B2 G4: the candidate's expected result is confirmed by the
+             # business owner, so its PASSED evidence may support the row.
+             "expected_result_confirmation": {"reviewed_by": "业务负责人",
+                                              "reviewed_at": "2026-11-11T10:00:00+08:00",
+                                              "rationale": "验收标准已批准，预期结果已确认。"}}]}
         evidence = {"schema_version": "usit-business-evidence-verification-v1",
             "business_function_evidence": [{"business_function_id": "bf-list",
                 "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL"}]}
@@ -771,6 +776,173 @@ class BusinessTraceabilityTests(unittest.TestCase):
             for code in codes:
                 self.assertIn(code, PARSER_SCOPE_LIMITATION_TEXT,
                               f"stage {stage} code {code} has no limitation text mapping")
+
+
+    # ---- B2: G4 expected-result confirmation gate ----
+    def _confirmed(self):
+        return {"reviewed_by": "业务负责人",
+                "reviewed_at": "2026-11-11T10:00:00+08:00",
+                "rationale": "验收标准已批准，预期结果已确认。"}
+
+    def test_unconfirmed_candidate_caps_passed_evidence_at_unknown(self):
+        plan = {"schema_version": "usit-business-test-plan-v1", "candidates": [
+            {"test_id": "test-photo-list", "business_function_id": "bf-list"}]}
+        evidence = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{"business_function_id": "bf-list",
+                "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL"}]}
+        result = build_business_traceability(self.semantics, self.graph, self.mapping, plan, evidence, self.hashes)
+        first = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        second = next(row for row in result["rows"] if row["feature_name"] == "删除照片")
+        self.assertEqual(first["expected_result_confirmation_status"], "UNCONFIRMED")
+        self.assertEqual(first["stage_status"]["test_execution"], "UNKNOWN")
+        self.assertEqual(first["traceability_status"], "TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE")
+        self.assertNotEqual(first["traceability_status"], "TRACEABLE_WITH_RUNTIME_EVIDENCE")
+        self.assertEqual(second["expected_result_confirmation_status"], "NOT_APPLICABLE")
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("预期结果确认（业务负责人）：UNCONFIRMED", markdown)
+
+    def test_confirmed_candidate_lets_passed_evidence_support_the_row(self):
+        plan = {"schema_version": "usit-business-test-plan-v1", "candidates": [
+            {"test_id": "test-photo-list", "business_function_id": "bf-list",
+             "expected_result_confirmation": self._confirmed()}]}
+        evidence = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{"business_function_id": "bf-list",
+                "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL"}]}
+        result = build_business_traceability(self.semantics, self.graph, self.mapping, plan, evidence, self.hashes)
+        first = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(first["expected_result_confirmation_status"], "CONFIRMED")
+        self.assertEqual(first["stage_status"]["test_execution"], "PASSED")
+        self.assertEqual(first["traceability_status"], "TRACEABLE_WITH_RUNTIME_EVIDENCE")
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("预期结果确认（业务负责人）：CONFIRMED", markdown)
+        self.assertIn("业务负责人", markdown)
+
+    def test_unconfirmed_gate_does_not_hide_an_observed_failure(self):
+        plan = {"schema_version": "usit-business-test-plan-v1", "candidates": [
+            {"test_id": "test-photo-list", "business_function_id": "bf-list"}]}
+        evidence = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{"business_function_id": "bf-list",
+                "test_execution_status": "FAILED", "code_coverage_status": "PARTIAL"}]}
+        result = build_business_traceability(self.semantics, self.graph, self.mapping, plan, evidence, self.hashes)
+        first = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(first["stage_status"]["test_execution"], "FAILED")
+        self.assertEqual(first["expected_result_confirmation_status"], "UNCONFIRMED")
+
+    def test_malformed_confirmation_record_is_rejected(self):
+        for confirmation in ({"reviewed_by": "业务负责人"},
+                             {"reviewed_by": "业务负责人", "reviewed_at": "not-a-date",
+                              "rationale": "已确认"},
+                             {"reviewed_by": "", "reviewed_at": "2026-11-11T10:00:00+08:00",
+                              "rationale": "已确认"},
+                             {"reviewed_by": "业务负责人", "reviewed_at": "2026-11-11T10:00:00+08:00",
+                              "rationale": "  "},
+                             "not-an-object"):
+            plan = {"schema_version": "usit-business-test-plan-v1", "candidates": [
+                {"test_id": "test-photo-list", "business_function_id": "bf-list",
+                 "expected_result_confirmation": confirmation}]}
+            with self.assertRaises(ValueError):
+                build_business_traceability(self.semantics, self.graph, self.mapping,
+                                            test_plan=plan, input_hashes=self.hashes)
+
+    # ---- B2: G3(a) per-event attribution of a shared correlation ----
+    def test_attributed_shared_correlation_assigns_only_declared_events(self):
+        graph = {
+            **self.graph,
+            "business_understanding": {
+                **self.graph["business_understanding"],
+                "business_function_views": [
+                    *self.graph["business_understanding"]["business_function_views"],
+                    {"business_function_id": "bf-delete"},
+                ],
+            },
+        }
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": ["bf-list", "bf-delete"],
+            "correlations": [{
+                "correlation_id": "corr-shared",
+                "business_function_ids": ["bf-list", "bf-delete"],
+                "declared_function_ids": ["bf-delete", "bf-list"],
+                "event_function_attribution": [
+                    {"event_id": "evt-1", "business_function_id": "bf-list", "stage": "ui"},
+                    {"event_id": "evt-2", "business_function_id": "bf-list", "stage": "http_request"},
+                    {"event_id": "evt-3", "business_function_id": "bf-delete", "stage": "database"},
+                ],
+                "unattributed_event_count": 0,
+                "attribution_status": "PER_EVENT_COLLECTOR_DECLARED",
+                "event_count": 3,
+                "observed_stages": ["ui", "http_request", "database"],
+                "observed_event_ids_by_timestamp": ["evt-1", "evt-2", "evt-3"],
+                "explicit_parent_edges": [
+                    {"parent_event_id": "evt-1", "child_event_id": "evt-2"},
+                    {"parent_event_id": "evt-2", "child_event_id": "evt-3"},
+                ],
+                "parent_topology_status": "LINEAR_CHAIN",
+                "parent_link_coverage_ratio": 1.0,
+                "root_event_ids": ["evt-1"],
+                "leaf_event_ids": ["evt-3"],
+                "branching_parent_event_ids": [],
+                "isolated_event_ids": [],
+                "cycle_event_ids": [],
+            }],
+        }
+        plan = {"schema_version": "usit-business-test-plan-v1", "candidates": [
+            {"test_id": "test-photo-list", "business_function_id": "bf-list",
+             "expected_result_confirmation": self._confirmed()},
+            {"test_id": "test-photo-delete", "business_function_id": "bf-delete",
+             "expected_result_confirmation": self._confirmed()}]}
+        evidence = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [
+                {"business_function_id": "bf-list",
+                 "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL"},
+                {"business_function_id": "bf-delete",
+                 "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL"}]}
+        result = build_business_traceability(
+            self.semantics, graph, self.mapping, plan, evidence, self.hashes,
+            runtime_evidence_validation=runtime)
+        rows = {row["feature_name"]: row for row in result["rows"]}
+        view_row = rows["查看照片"]
+        self.assertEqual(view_row["traceability_status"], "TRACEABLE_WITH_RUNTIME_EVIDENCE")
+        self.assertEqual(view_row["stage_status"]["runtime_observation"], "RUNTIME_OBSERVED")
+        view_corr = view_row["runtime_observation"]["correlations"][0]
+        self.assertEqual(view_corr["function_attribution_status"], "PER_EVENT_COLLECTOR_DECLARED")
+        self.assertEqual(view_corr["observed_stages"], ["http_request", "ui"])
+        self.assertEqual(view_corr["observed_event_ids_by_timestamp"], ["evt-1", "evt-2"])
+        self.assertEqual(view_corr["explicit_parent_edges"],
+                         [{"parent_event_id": "evt-1", "child_event_id": "evt-2"}])
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("PER_EVENT_COLLECTOR_DECLARED", markdown)
+
+    def test_declaration_without_events_does_not_poison_other_rows(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "EVIDENCE_CONFLICT",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": ["bf-list"],
+            "evidence_conflicts": [
+                {"kind": "CORRELATION_DECLARATION_WITHOUT_EVENTS",
+                 "correlation_id": "corr-ghost", "declared_function_ids": ["bf-list"]}],
+            "correlations": [{"correlation_id": "corr-1", "business_function_ids": ["bf-list"],
+                "runtime_observation_status": "RUNTIME_OBSERVED"}],
+        }
+        plan = {"schema_version": "usit-business-test-plan-v1", "candidates": [
+            {"test_id": "test-photo-list", "business_function_id": "bf-list",
+             "expected_result_confirmation": self._confirmed()}]}
+        evidence = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{"business_function_id": "bf-list",
+                "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL"}]}
+        result = build_business_traceability(
+            self.semantics, self.graph, self.mapping, plan, evidence, self.hashes,
+            runtime_evidence_validation=runtime)
+        first = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        # The stray declaration is attributable to its correlation, not to
+        # the whole validation, so it must not downgrade this row.
+        self.assertEqual(first["traceability_status"], "TRACEABLE_WITH_RUNTIME_EVIDENCE")
+        self.assertEqual(first["stage_status"]["runtime_observation"], "RUNTIME_OBSERVED")
+        self.assertEqual(result["runtime_evidence_conflicts"][0]["kind"],
+                         "CORRELATION_DECLARATION_WITHOUT_EVENTS")
 
 
 if __name__ == "__main__":

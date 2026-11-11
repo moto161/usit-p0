@@ -83,8 +83,18 @@ def build_verification_gap_backlog(
         trace_rows = traceability_matrix.get("rows")
         if not isinstance(trace_rows, list):
             raise ValueError("traceability matrix rows must be a list")
+        # B2 G3(a): runtime evidence conflicts carried by the traceability
+        # matrix (per-event attribution mismatches, declarations without
+        # events). Validated fail-closed; absent means a B1-era matrix.
+        trace_runtime_conflicts = traceability_matrix.get("runtime_evidence_conflicts", [])
+        if not isinstance(trace_runtime_conflicts, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("kind"), str)
+            for item in trace_runtime_conflicts
+        ):
+            raise ValueError("traceability matrix runtime_evidence_conflicts must be a list of conflict objects")
     else:
         trace_rows = []
+        trace_runtime_conflicts = []
 
     gaps=[]
     def add(kind:str,scope:str,target:str,severity:str,reason:str,action:str,evidence:list[dict[str,Any]],function_id:str|None=None):
@@ -119,6 +129,37 @@ def build_verification_gap_backlog(
         if key in reviewed_feature_links:
             raise ValueError(f"duplicate approved traceability row for feature identity: {key}")
         reviewed_feature_links[key]=row
+
+    # B2 G4: trace rows keyed by business function, for the
+    # expected-result confirmation gate signal.
+    trace_row_by_function: dict[str, dict[str, Any]] = {}
+    for row in reviewed_feature_links.values():
+        function_id = row.get("business_function_id")
+        if isinstance(function_id, str) and function_id:
+            trace_row_by_function.setdefault(function_id, row)
+
+    # B2 G3(a): per-event attribution conflicts carried by the
+    # traceability matrix's runtime evidence conflicts.
+    for conflict in trace_runtime_conflicts:
+        kind = conflict.get("kind")
+        if kind == "EVENT_FUNCTION_NOT_IN_CORRELATION_DECLARATION":
+            function_id = conflict.get("business_function_id")
+            if not isinstance(function_id, str) or not function_id:
+                continue
+            view_source = view_by_id.get(function_id, {}).get("source")
+            refs = [{"path": view_source.get("path"), "line": view_source.get("line"), "kind": "business_function_source"}] if isinstance(view_source, dict) and view_source.get("path") else []
+            add("EVENT_FUNCTION_NOT_IN_CORRELATION_DECLARATION","BUSINESS_FUNCTION",function_id,"P1",
+                f"运行时事件 {conflict.get('event_id')} 自带的业务功能归属不在其 correlation 的采集端声明内；声明与事件自述不一致。",
+                "核对采集端 correlation 声明与事件归属字段，确认哪一边过期或错误后重新采集或修正声明。",
+                refs,function_id)
+        elif kind == "CORRELATION_DECLARATION_WITHOUT_EVENTS":
+            correlation_id = conflict.get("correlation_id")
+            if not isinstance(correlation_id, str) or not correlation_id:
+                continue
+            add("CORRELATION_DECLARATION_WITHOUT_EVENTS","RUNTIME_EVIDENCE",correlation_id,"P1",
+                "采集端声明了该 correlation 覆盖的功能，但文档中没有任何事件属于此 correlation；声明可能过期或写错。",
+                "核对采集端 correlation 声明与事件采集范围，修正声明或补齐事件后重新验证运行时证据。",
+                [])
 
     # Legacy graph-level reviewed links remain supported for backward compatibility.
     documented_links=understanding.get("documented_feature_linkage",[])
@@ -240,6 +281,15 @@ def build_verification_gap_backlog(
             add("CODE_COVERAGE_GAP","BUSINESS_FUNCTION",fid,"P2",
                 "显式映射的可执行代码行存在未覆盖部分；这不是业务功能缺陷结论。",
                 "评估缺失行是否属于业务关键路径，并设计有效断言和分支场景后重新执行覆盖采集。",
+                refs,fid)
+        # B2 G4: no linked candidate's expected result was confirmed by
+        # the business owner, so even a PASSED execution cannot support
+        # this function as business evidence.
+        trace_row = trace_row_by_function.get(fid)
+        if isinstance(trace_row, dict) and trace_row.get("expected_result_confirmation_status") == "UNCONFIRMED":
+            add("EXPECTED_RESULT_UNCONFIRMED","BUSINESS_FUNCTION",fid,"P1",
+                "该业务功能已链接的测试候选预期结果均未被业务负责人确认；即使测试通过，也不能作为业务正确证据。",
+                "由业务负责人依据已批准的验收标准确认候选预期结果，并在测试计划中记录确认人、时间与理由后重新生成追溯矩阵。",
                 refs,fid)
 
     gaps.sort(key=lambda x:({"P0":0,"P1":1,"P2":2}.get(x["priority"],9),x["gap_kind"],x["target"],x["gap_id"]))

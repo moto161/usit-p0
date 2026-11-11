@@ -59,6 +59,10 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             f"- 运行时事件观察：{_cell(observation.get('status') or (stages.get('runtime_observation') if isinstance(stages, dict) else 'NOT_MEASURED'))}",
             f"- 运行时关联 ID：{_cell(', '.join(map(str, correlation_ids)) if correlation_ids else '无')}",
             f"- 代码覆盖：{_cell(stages.get('code_coverage') if isinstance(stages, dict) else 'UNKNOWN')}"])
+        confirmation_status = row.get("expected_result_confirmation_status")
+        if confirmation_status:
+            note = "；预期结果未经业务负责人确认，测试通过不证明业务正确" if confirmation_status == "UNCONFIRMED" else ""
+            lines.append(f"- 预期结果确认（业务负责人）：{_cell(confirmation_status)}{note}")
         runtime_evidence = row.get("runtime_evidence")
         runtime_evidence = runtime_evidence if isinstance(runtime_evidence, dict) else {}
         source_version = runtime_evidence.get("source_version_binding_status")
@@ -98,6 +102,14 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                 lines.append(
                     f"  - 业务功能归属：{_cell(attribution)}；"
                     f"关联功能：{_cell(', '.join(map(str, function_ids)) if function_ids else '未提供')}"
+                )
+            attribution_status = correlation.get("attribution_status")
+            if attribution_status and attribution_status != "NO_DECLARATION":
+                declared = _items(correlation.get("declared_function_ids"))
+                lines.append(
+                    f"  - 逐事件归属：{_cell(attribution_status)}；"
+                    f"声明功能：{_cell(', '.join(map(str, declared)) if declared else '未提供')}；"
+                    f"归属事件数：{_cell(correlation.get('event_count') if correlation.get('event_count') is not None else '未提供')}"
                 )
             event_ids = _items(correlation.get("observed_event_ids_by_timestamp"))
             if event_ids:
@@ -152,6 +164,12 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                     f"执行状态：{_cell(candidate.get('execution_status'))}；"
                     f"预期结果：{_cell(candidate.get('expected_results_status'))}"
                 )
+                confirmation = candidate.get("expected_result_confirmation")
+                if isinstance(confirmation, dict):
+                    lines.append(
+                        f"    - 预期确认：{_cell(confirmation.get('reviewed_by'))} 于 {_cell(confirmation.get('reviewed_at'))}；"
+                        f"理由：{_cell(confirmation.get('rationale'))}"
+                    )
                 for precondition in _items(candidate.get("preconditions")):
                     lines.append(f"    - 前置条件：{_cell(precondition)}")
                 for action in _items(candidate.get("actions")):

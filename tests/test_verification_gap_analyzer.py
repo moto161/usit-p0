@@ -277,5 +277,61 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
         self.assertEqual(divergence["business_function_id"], "bf-upload")
 
 
+    # B2: per-event attribution conflicts and the G4 gate are P1 gaps.
+    def test_attribution_conflicts_are_p1_gaps_not_defects(self):
+        graph_hash = "a" * 64
+        traceability = {"schema_version": "usit-business-traceability-matrix-v1",
+            "source_graph_sha256": graph_hash, "rows": [],
+            "runtime_evidence_conflicts": [
+                {"kind": "EVENT_FUNCTION_NOT_IN_CORRELATION_DECLARATION",
+                 "event_id": "evt-9", "correlation_id": "corr-1",
+                 "business_function_id": "bf-upload",
+                 "declared_function_ids": ["bf-delete"]},
+                {"kind": "CORRELATION_DECLARATION_WITHOUT_EVENTS",
+                 "correlation_id": "corr-ghost", "declared_function_ids": ["bf-upload"]}]}
+        result = build_verification_gap_backlog(
+            {"features": [], "endpoint_contract_alignment": []},
+            {"schema_version": "usit-graph-v1", "business_understanding": {
+                "business_function_views": [
+                    {"business_function_id": "bf-upload"},
+                    {"business_function_id": "bf-delete"}]}},
+            None, None, {"business_graph_sha256": graph_hash}, traceability)
+        mismatch = next(x for x in result["gaps"]
+                        if x["gap_kind"] == "EVENT_FUNCTION_NOT_IN_CORRELATION_DECLARATION")
+        self.assertEqual(mismatch["priority"], "P1")
+        self.assertFalse(mismatch["defect_confirmed"])
+        self.assertEqual(mismatch["business_function_id"], "bf-upload")
+        ghost = next(x for x in result["gaps"]
+                     if x["gap_kind"] == "CORRELATION_DECLARATION_WITHOUT_EVENTS")
+        self.assertEqual(ghost["priority"], "P1")
+        self.assertFalse(ghost["defect_confirmed"])
+        self.assertEqual(ghost["target"], "corr-ghost")
+
+    def test_unconfirmed_expected_result_is_a_p1_gap_not_a_defect(self):
+        graph_hash = "a" * 64
+        traceability = {"schema_version": "usit-business-traceability-matrix-v1",
+            "source_graph_sha256": graph_hash,
+            "rows": [{"feature_name": "照片上传", "source": "docs/PRD.md", "line": 8,
+                      "mapping_decision": "APPROVED_LINK",
+                      "business_function_id": "bf-upload",
+                      "expected_result_confirmation_status": "UNCONFIRMED"}]}
+        result = build_verification_gap_backlog(
+            {"features": [{"name": "照片上传", "source": "docs/PRD.md", "line": 8}],
+             "endpoint_contract_alignment": []},
+            {"schema_version": "usit-graph-v1", "business_understanding": {
+                "business_function_views": [{"business_function_id": "bf-upload"}]}},
+            {"schema_version": "usit-business-test-plan-v1", "candidates": [
+                {"test_id": "t-upload", "business_function_id": "bf-upload"}]},
+            {"schema_version": "usit-business-evidence-verification-v1",
+             "business_function_evidence": [
+                 {"business_function_id": "bf-upload", "test_execution_status": "PASSED",
+                  "code_coverage_status": "COVERED"}]},
+            {"business_graph_sha256": graph_hash}, traceability)
+        gap = next(x for x in result["gaps"] if x["gap_kind"] == "EXPECTED_RESULT_UNCONFIRMED")
+        self.assertEqual(gap["priority"], "P1")
+        self.assertFalse(gap["defect_confirmed"])
+        self.assertEqual(gap["business_function_id"], "bf-upload")
+
+
 if __name__=="__main__":
     unittest.main()

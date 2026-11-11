@@ -65,6 +65,11 @@ def _candidate(kind: str, target: str, purpose: str, evidence: list[dict[str, An
             for index, action in enumerate(steps, start=1)
         ],
         "expected_result": expected_placeholder,
+        # B2 G4: confirmation is a human act, recorded on the candidate
+        # after generation as {"reviewed_by", "reviewed_at", "rationale"}.
+        # The confirmer must be the business owner; traceability validates
+        # the record's shape on consumption and gates unconfirmed
+        # candidates. This generator never writes the record.
         "expected_results_status": "OWNER_CONFIRMATION_REQUIRED",
         "evidence_requirements": [
             {"evidence_type": item.get("evidence_kind", "SOURCE_REFERENCE"),
@@ -508,6 +513,15 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
             "function_views_with_test_design_candidate": len({item.get("business_function_id") for item in candidates if item.get("business_function_id")}),
             "test_execution_coverage": "NOT_MEASURED",
             "note": "候选测试关联仅表示已生成测试设计，不表示测试执行或代码覆盖率。",
+        },
+        # B2 G4: generation-time baseline. The planner never writes
+        # confirmation records (confirmation is a human act); every
+        # generated candidate starts awaiting confirmation, so confirmed
+        # is always 0 here. The live count is computed by traceability
+        # when the plan is consumed.
+        "expected_result_confirmation_counts": {
+            "confirmed": 0,
+            "awaiting_confirmation": len(candidates),
         },
         "execution_status": "NOT_EXECUTED",
         "design_note": "候选测试需经需求确认和用户授权后才能执行；本模块不执行命令。",

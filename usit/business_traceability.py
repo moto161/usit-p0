@@ -50,6 +50,28 @@ PARSER_SCOPE_LIMITATION_TEXT: dict[str, tuple[str, ...]] = {
 }
 
 
+def _validate_expected_result_confirmation(candidate: dict[str, Any]) -> None:
+    """B2 G4: a confirmation record, when present, must name a reviewer,
+    a parseable timestamp, and a rationale. Absent means unconfirmed;
+    malformed means fail-closed. This checks the record's shape only --
+    it cannot verify the reviewer is the business owner (no identity
+    system; reviewed_by is a free string)."""
+    confirmation = candidate.get("expected_result_confirmation")
+    if confirmation is None:
+        return
+    label = f"candidate {candidate.get('test_id') or '?'}"
+    if not isinstance(confirmation, dict):
+        raise ValueError(f"{label} expected_result_confirmation must be an object")
+    if not isinstance(confirmation.get("reviewed_by"), str) or not confirmation["reviewed_by"].strip():
+        raise ValueError(f"{label} expected_result_confirmation requires a non-empty reviewed_by")
+    try:
+        datetime.fromisoformat(str(confirmation.get("reviewed_at")).replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{label} expected_result_confirmation reviewed_at must be an ISO-8601 timestamp") from exc
+    if not isinstance(confirmation.get("rationale"), str) or not confirmation["rationale"].strip():
+        raise ValueError(f"{label} expected_result_confirmation requires a non-empty rationale")
+
+
 def build_business_traceability(
     semantics: dict[str, Any],
     graph: dict[str, Any],
@@ -172,6 +194,7 @@ def build_business_traceability(
     candidates_by_function: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
         if isinstance(candidate, dict) and isinstance(candidate.get("business_function_id"), str):
+            _validate_expected_result_confirmation(candidate)
             candidates_by_function.setdefault(candidate["business_function_id"], []).append(candidate)
     security_candidates = security_test_plan.get("candidates", []) if security_test_plan else []
     unlinked_security_candidate_ids: list[str] = []
@@ -180,6 +203,7 @@ def build_business_traceability(
             raise ValueError("security test plan contains a malformed candidate")
         function_id = candidate.get("business_function_id")
         if isinstance(function_id, str) and function_id and function_id in functions:
+            _validate_expected_result_confirmation(candidate)
             candidates_by_function.setdefault(function_id, []).append(candidate)
         elif candidate.get("test_id") is not None:
             # A non-empty but unknown function ID is not a valid linkage.
@@ -227,40 +251,116 @@ def build_business_traceability(
             event_ids = correlation.get("observed_event_ids_by_timestamp", [])
             if not isinstance(event_ids, list) or any(not isinstance(value, str) for value in event_ids):
                 raise ValueError("runtime evidence validation contains malformed observed_event_ids_by_timestamp")
+            # B2 G3(a): optional per-event attribution, supplied by the
+            # runtime evidence validator. Validate shape fail-closed;
+            # absent fields mean a B1-era validation document.
+            declared_ids = correlation.get("declared_function_ids")
+            if declared_ids is not None:
+                if (not isinstance(declared_ids, list)
+                        or any(not isinstance(value, str) or not value for value in declared_ids)
+                        or len(declared_ids) != len(set(declared_ids))):
+                    raise ValueError("runtime evidence validation contains malformed declared_function_ids")
+            attribution = correlation.get("event_function_attribution")
+            if attribution is None:
+                attribution = []
+            if not isinstance(attribution, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("event_id"), str) or not item["event_id"]
+                or item["event_id"] not in event_ids
+                or not isinstance(item.get("business_function_id"), str) or not item["business_function_id"]
+                or item["business_function_id"] not in observed_ids
+                or not isinstance(item.get("stage"), str) or not item["stage"]
+                for item in attribution
+            ):
+                raise ValueError("runtime evidence validation contains malformed event_function_attribution")
+            attribution_status = correlation.get("attribution_status", "NO_DECLARATION")
+            if attribution_status not in {"PER_EVENT_COLLECTOR_DECLARED", "PARTIAL_COLLECTOR_DECLARED", "NO_DECLARATION"}:
+                raise ValueError("runtime evidence validation contains malformed attribution_status")
+            unattributed_event_count = correlation.get("unattributed_event_count", 0)
+            if not isinstance(unattributed_event_count, int) or isinstance(unattributed_event_count, bool) or unattributed_event_count < 0:
+                raise ValueError("runtime evidence validation contains malformed unattributed_event_count")
             multi_function_correlation = len(observed_ids) > 1
             for observed_id in observed_ids:
+                # B2 G3(a): when the validator attributed individual
+                # events to this function (collector-declared), only
+                # those events' stages and IDs belong to this function.
+                # Parent topology stays correlation-level, never re-derived.
+                own_attributed = [item for item in attribution if item.get("business_function_id") == observed_id]
+                own_event_ids = {item["event_id"] for item in own_attributed}
+                has_attribution = attribution_status != "NO_DECLARATION" and bool(own_attributed)
+                if multi_function_correlation and has_attribution:
+                    attribution_status_value = "PER_EVENT_COLLECTOR_DECLARED"
+                    entry_event_count = len(own_attributed)
+                    entry_stages = sorted({item["stage"] for item in own_attributed})
+                    entry_event_ids = [event_id for event_id in event_ids if event_id in own_event_ids]
+                    entry_edges = [
+                        {"parent_event_id": edge["parent_event_id"], "child_event_id": edge["child_event_id"]}
+                        for edge in parent_edges
+                        if edge["parent_event_id"] in own_event_ids and edge["child_event_id"] in own_event_ids
+                    ]
+                    entry_topology = correlation.get("parent_topology_status", "NOT_PROVIDED")
+                    entry_ratio = correlation.get("parent_link_coverage_ratio")
+                    entry_roots = correlation.get("root_event_ids", [])
+                    entry_leaves = correlation.get("leaf_event_ids", [])
+                    entry_branching = correlation.get("branching_parent_event_ids", [])
+                    entry_isolated = correlation.get("isolated_event_ids", [])
+                    entry_cycles = correlation.get("cycle_event_ids", [])
+                    interpretation = (
+                        "该 correlation 的逐事件归属来自采集端声明与事件自带字段（未经独立验证）；"
+                        "本功能只归属其声明事件的阶段与事件，父子拓扑仍为 correlation 层级，不按功能重算。"
+                    )
+                elif multi_function_correlation:
+                    attribution_status_value = "SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED"
+                    entry_event_count = None
+                    entry_stages = []
+                    entry_event_ids = []
+                    entry_edges = []
+                    entry_topology = "NOT_ATTRIBUTABLE_ACROSS_FUNCTIONS"
+                    entry_ratio = None
+                    entry_roots = []
+                    entry_leaves = []
+                    entry_branching = []
+                    entry_isolated = []
+                    entry_cycles = []
+                    interpretation = "该 correlation 显式关联多个业务功能，但当前摘要没有逐事件功能归属；不将阶段、事件或父子拓扑归属到单个功能。"
+                else:
+                    attribution_status_value = "SINGLE_FUNCTION_CORRELATION"
+                    entry_event_count = correlation.get("event_count")
+                    entry_stages = correlation.get("observed_stages", [])
+                    entry_event_ids = list(event_ids)
+                    entry_edges = [
+                        {"parent_event_id": edge["parent_event_id"], "child_event_id": edge["child_event_id"]}
+                        for edge in parent_edges
+                    ]
+                    entry_topology = correlation.get("parent_topology_status", "NOT_PROVIDED")
+                    entry_ratio = correlation.get("parent_link_coverage_ratio")
+                    entry_roots = correlation.get("root_event_ids", [])
+                    entry_leaves = correlation.get("leaf_event_ids", [])
+                    entry_branching = correlation.get("branching_parent_event_ids", [])
+                    entry_isolated = correlation.get("isolated_event_ids", [])
+                    entry_cycles = correlation.get("cycle_event_ids", [])
+                    interpretation = "仅复用同一 correlation 中显式 business_function_id；父子边来自采集端声明，时间排序不代表因果。"
                 runtime_correlations_by_function.setdefault(observed_id, []).append({
                     "correlation_id": correlation_id,
                     # A shared correlation can contain events owned by different
-                    # business functions. The summary has no per-event ownership
-                    # map, so never copy its full stages/topology onto each function.
+                    # business functions. Without per-event attribution, never
+                    # copy its full stages/topology onto each function.
                     "function_ids_in_correlation": list(observed_ids),
-                    "function_attribution_status": (
-                        "SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED"
-                        if multi_function_correlation else "SINGLE_FUNCTION_CORRELATION"
-                    ),
-                    "event_count": None if multi_function_correlation else correlation.get("event_count"),
-                    "observed_stages": [] if multi_function_correlation else correlation.get("observed_stages", []),
-                    "observed_event_ids_by_timestamp": [] if multi_function_correlation else list(event_ids),
-                    "explicit_parent_edges": [] if multi_function_correlation else [
-                        {"parent_event_id": edge["parent_event_id"], "child_event_id": edge["child_event_id"]}
-                        for edge in parent_edges
-                    ],
-                    "parent_topology_status": (
-                        "NOT_ATTRIBUTABLE_ACROSS_FUNCTIONS" if multi_function_correlation
-                        else correlation.get("parent_topology_status", "NOT_PROVIDED")
-                    ),
-                    "parent_link_coverage_ratio": None if multi_function_correlation else correlation.get("parent_link_coverage_ratio"),
-                    "root_event_ids": [] if multi_function_correlation else correlation.get("root_event_ids", []),
-                    "leaf_event_ids": [] if multi_function_correlation else correlation.get("leaf_event_ids", []),
-                    "branching_parent_event_ids": [] if multi_function_correlation else correlation.get("branching_parent_event_ids", []),
-                    "isolated_event_ids": [] if multi_function_correlation else correlation.get("isolated_event_ids", []),
-                    "cycle_event_ids": [] if multi_function_correlation else correlation.get("cycle_event_ids", []),
-                    "interpretation": (
-                        "该 correlation 显式关联多个业务功能，但当前摘要没有逐事件功能归属；不将阶段、事件或父子拓扑归属到单个功能。"
-                        if multi_function_correlation else
-                        "仅复用同一 correlation 中显式 business_function_id；父子边来自采集端声明，时间排序不代表因果。"
-                    ),
+                    "function_attribution_status": attribution_status_value,
+                    "attribution_status": attribution_status,
+                    "declared_function_ids": list(declared_ids) if declared_ids is not None else None,
+                    "event_count": entry_event_count,
+                    "observed_stages": entry_stages,
+                    "observed_event_ids_by_timestamp": entry_event_ids,
+                    "explicit_parent_edges": entry_edges,
+                    "parent_topology_status": entry_topology,
+                    "parent_link_coverage_ratio": entry_ratio,
+                    "root_event_ids": entry_roots,
+                    "leaf_event_ids": entry_leaves,
+                    "branching_parent_event_ids": entry_branching,
+                    "isolated_event_ids": entry_isolated,
+                    "cycle_event_ids": entry_cycles,
+                    "interpretation": interpretation,
                 })
         correlation_ids_all = set(runtime_correlations_by_function)
         correlation_observed_ids = correlation_ids_all & set(functions)
@@ -276,7 +376,11 @@ def build_business_traceability(
                 "runtime evidence business_function_ids_observed does not match "
                 "the known function IDs declared by correlations"
             )
-    runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT" and (not runtime_evidence_conflicts or any(not item.get("business_function_id") for item in runtime_evidence_conflicts)))
+    # B2: a conflict naming a business_function_id or a correlation_id
+    # is attributable to that function/correlation, not to the whole
+    # validation. Only conflicts attributable to neither (e.g.
+    # GRAPH_HASH_MISMATCH) taint every row's runtime observation.
+    runtime_global_conflict = bool(runtime_evidence_validation and runtime_evidence_validation.get("assessment_status") == "EVIDENCE_CONFLICT" and (not runtime_evidence_conflicts or any(not item.get("business_function_id") and not item.get("correlation_id") for item in runtime_evidence_conflicts)))
     runtime_conflict_function_ids = {item["business_function_id"] for item in runtime_evidence_conflicts if isinstance(item.get("business_function_id"), str)}
     runtime_by_function: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -340,6 +444,21 @@ def build_business_traceability(
             runtime_status = "INVALID"
         if coverage_status not in valid_coverage_statuses:
             coverage_status = "INVALID"
+        # B2 G4: the expected-result confirmation gate, per function
+        # (not per test case: executed test_case_ids and candidate
+        # test_ids live in different ID spaces with no link, so the gate
+        # can only say whether this function has any confirmed oracle).
+        # A PASSED execution behind an unconfirmed oracle cannot support
+        # the row: its test_execution stage becomes UNKNOWN. FAILED stays
+        # FAILED -- a failure is observed regardless of oracle status.
+        if not candidate_items:
+            expected_result_confirmation_status = "NOT_APPLICABLE"
+        elif any(isinstance(item, dict) and isinstance(item.get("expected_result_confirmation"), dict) for item in candidate_items):
+            expected_result_confirmation_status = "CONFIRMED"
+        else:
+            expected_result_confirmation_status = "UNCONFIRMED"
+        if expected_result_confirmation_status == "UNCONFIRMED" and runtime_status == "PASSED":
+            runtime_status = "UNKNOWN"
         stages = {
             "requirement_to_business_function": linkage,
             "business_function_to_frontend_entrypoint": "LINKED" if view and view.get("frontend_entrypoint_count", len(view.get("frontend_entrypoints", []))) else "NOT_LINKED_OR_UNKNOWN",
@@ -368,7 +487,7 @@ def build_business_traceability(
         # the runtime observation cannot be attributed to it alone. It
         # caps at TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE.
         row_status = "EVIDENCE_CONFLICT" if view and (runtime_global_conflict or function_runtime_conflict or test_evidence_conflict) else (
-            "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} and not shared_correlation else (
+            "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} and not shared_correlation and expected_result_confirmation_status != "UNCONFIRMED" else (
             "TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE" if view and runtime and (stages["test_execution"] == "UNKNOWN" or (shared_correlation and stages["test_execution"] in {"PASSED", "FAILED"})) else (
             "TRACEABLE_WITH_RUNTIME_OBSERVATION" if view and runtime_observation_status == "RUNTIME_OBSERVED" else (
             "TRACEABLE_TO_STATIC_FUNCTION_VIEW" if view else linkage))))
@@ -409,6 +528,9 @@ def build_business_traceability(
             # central table above. Stage status values are unchanged;
             # this only annotates the aperture each status was reached in.
             "stage_parser_scope": {stage: list(codes) for stage, codes in STAGE_PARSER_SCOPE.items()},
+            # B2 G4: whether any linked candidate's expected result was
+            # confirmed (CONFIRMED / UNCONFIRMED / NOT_APPLICABLE).
+            "expected_result_confirmation_status": expected_result_confirmation_status,
             "endpoint": {"method": view.get("method"), "path": view.get("endpoint")} if view else None,
             "test_candidate_ids": sorted(str(item.get("test_id")) for item in candidate_items if item.get("test_id") is not None),
             "test_candidates": [
@@ -423,6 +545,7 @@ def build_business_traceability(
                     "actions": item.get("actions", []),
                     "expected_result": item.get("expected_result"),
                     "expected_results_status": item.get("expected_results_status", "OWNER_CONFIRMATION_REQUIRED"),
+                    "expected_result_confirmation": item.get("expected_result_confirmation"),
                     "evidence_requirements": item.get("evidence_requirements", []),
                     "evidence_refs": item.get("evidence_refs", []),
                     "limitations": item.get("limitations", []),
@@ -482,6 +605,9 @@ def build_business_traceability(
             "代码覆盖和权限/身份阶段状态仅表示输入工件中的证据状态，不证明安全性或业务正确性。",
             "映射 manifest 绑定精确 graph SHA-256；图谱变化后必须重新审阅或重新生成映射，旧映射不会自动迁移。",
             "共享 correlation 的运行时观察不归属到单个功能；该功能的行状态不升为 TRACEABLE_WITH_RUNTIME_EVIDENCE，观察阶段记 SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED。",
+            "共享 correlation 有逐事件归属时，归属来自采集端声明与事件自带字段，未经独立验证；声明与事件一致只证明自述无矛盾，不证明事件真实属于该功能；父子拓扑仍为 correlation 层级。",
+            "预期结果确认门禁按功能判定，不按用例判定；已执行测试 ID 与候选 ID 无链接，不能证明通过的用例恰好是已确认的候选。",
+            "预期结果确认记录（reviewed_by/reviewed_at/rationale）只校验存在与格式合法，不验证确认人确为业务负责人；业务负责人身份由流程保证。",
             "运行时一致性只比对事件显式字段与静态视图；UI 组件名与静态入口文件无可靠等值关系时记 NOT_CHECKED，不判冲突。",
             "reviewed_by/reviewed_at/rationale 是审阅者提供的审计元数据，不构成身份认证或电子签名。",
         ],
