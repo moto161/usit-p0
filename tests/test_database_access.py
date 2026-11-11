@@ -51,6 +51,163 @@ class DatabaseAccessExtractionTests(unittest.TestCase):
         self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
         self.assertEqual(rows[0]["tables"], [])
 
+    def test_python_implicit_concatenation_across_lines(self):
+        source = (
+            "def load():\n"
+            "    cursor.execute(\"SELECT id, \"\n"
+            "                     \"owner_id FROM photos WHERE id = 1\")\n"
+        )
+        rows = extract_database_accesses({"repo/photo_repo.py": source})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["line"], 2)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id", "owner_id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+        self.assertFalse(rows[0]["has_dynamic_parts"])
+
+    def test_python_plus_chain_across_lines(self):
+        source = (
+            "def load():\n"
+            "    cursor.execute(\"SELECT id, owner_id \"\n"
+            "                   + \"FROM photos \"\n"
+            "                   + \"WHERE id = 1\")\n"
+        )
+        rows = extract_database_accesses({"repo/photo_repo.py": source})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["line"], 2)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id", "owner_id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+        self.assertFalse(rows[0]["has_dynamic_parts"])
+
+    def test_python_triple_quoted_multiline_sql(self):
+        source = (
+            "def load():\n"
+            "    cursor.execute(\"\"\"SELECT id, owner_id\n"
+            "                    FROM photos\n"
+            "                    WHERE id = 1\"\"\")\n"
+        )
+        rows = extract_database_accesses({"repo/photo_repo.py": source})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["line"], 2)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id", "owner_id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_python_fstring_static_skeleton_with_dynamic_value(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'def load(user_id):\n    cursor.execute(f"SELECT id, owner_id FROM photos WHERE id = {user_id}")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id", "owner_id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+        self.assertTrue(rows[0]["has_dynamic_parts"])
+        self.assertEqual(rows[0]["parser"], "python-ast-literal-expression-dynamic")
+
+    def test_js_template_literal_multiline_with_interpolation(self):
+        source = (
+            "async function load(userId) {\n"
+            "  const rows = await pool.query(`SELECT id, owner_id\n"
+            "    FROM photos\n"
+            "    WHERE id = ${userId}`);\n"
+            "}\n"
+        )
+        rows = extract_database_accesses({"repo/photoRepo.ts": source})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["line"], 2)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id", "owner_id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+        self.assertTrue(rows[0]["has_dynamic_parts"])
+        self.assertEqual(rows[0]["parser"], "js-ts-literal-expression-dynamic")
+
+    def test_js_plus_chain_across_lines(self):
+        source = (
+            "async function load() {\n"
+            "  const rows = await pool.query(\"SELECT id, owner_id \" +\n"
+            "    `FROM photos ` +\n"
+            "    \"WHERE id = 1\");\n"
+            "}\n"
+        )
+        rows = extract_database_accesses({"repo/photoRepo.js": source})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["line"], 2)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id", "owner_id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+        self.assertFalse(rows[0]["has_dynamic_parts"])
+
+    def test_python_plus_chain_with_variable_is_unknown(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'def load(prefix):\n    cursor.execute("SELECT id FROM photos WHERE id = 1" + prefix)\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+
+    def test_python_format_call_is_unknown(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'def load(user_id):\n    cursor.execute("SELECT id FROM photos WHERE id = {}".format(user_id))\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'def load(user_id):\n    cursor.execute("SELECT id FROM photos WHERE id = %s" % user_id)\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_js_table_name_inside_interpolation_is_unknown(self):
+        rows = extract_database_accesses({
+            "repo/photoRepo.js": "async function load(table) {\n  const rows = await pool.query(`SELECT * FROM ${table}`);\n}\n"
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertTrue(rows[0]["has_dynamic_parts"])
+
+    def test_js_identifier_argument_is_unknown(self):
+        rows = extract_database_accesses({
+            "repo/photoRepo.js": "db.query(sql);\n"
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+
+    def test_python_syntax_error_elsewhere_falls_back_to_per_line(self):
+        source = (
+            "def broken(:\n"
+            "    pass\n"
+            "cursor.execute(\"SELECT id FROM photos WHERE id = 1\")\n"
+        )
+        rows = extract_database_accesses({"repo/photo_repo.py": source})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["line"], 3)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+        self.assertEqual(rows[0]["parser"], "python-ast-single-line")
+
+    def test_js_backslash_line_continuation_in_quoted_string(self):
+        source = (
+            'const rows = await pool.query("SELECT id, owner_id \\\n'
+            '  FROM photos WHERE id = 1");\n'
+        )
+        rows = extract_database_accesses({"repo/photoRepo.js": source})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id", "owner_id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_python_empty_string_sql_is_unknown(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

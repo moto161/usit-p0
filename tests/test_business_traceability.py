@@ -751,7 +751,7 @@ class BusinessTraceabilityTests(unittest.TestCase):
             self.assertEqual(scope["business_function_to_api_endpoint"], ["CALL_GRAPH_DEPTH_8"])
             self.assertEqual(scope["api_to_backend_handler"], ["HANDLER_UNIQUE_SYMBOL_ONLY"])
             self.assertEqual(scope["backend_call_chain"], ["CALL_GRAPH_DEPTH_8"])
-            self.assertEqual(scope["backend_to_database"], ["SQL_SINGLE_LINE_LITERAL_ONLY"])
+            self.assertEqual(scope["backend_to_database"], ["SQL_LITERAL_EXPRESSION_ONLY"])
             self.assertEqual(scope["authorization_evidence"], ["AUTHORIZATION_LIMITED_PATTERNS_ONLY"])
             self.assertEqual(scope["identity_resource_evidence"], ["SAME_LINE_IDENTITY_ONLY"])
         markdown = render_business_traceability_markdown(result)

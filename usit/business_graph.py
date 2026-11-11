@@ -589,6 +589,7 @@ def project_business_graph(graph: Mapping[str, Any],
                 "owner_resolution_status": "RESOLVED" if owner_id else "UNKNOWN",
                 "parse_status": raw.get("parse_status") or "UNKNOWN",
                 "parser": raw.get("parser") or "UNKNOWN",
+                "has_dynamic_parts": bool(raw.get("has_dynamic_parts", False)),
             }
         if access_id not in existing_ids:
             nodes.append({
@@ -1240,7 +1241,7 @@ def project_business_graph(graph: Mapping[str, Any],
             "前端交互目前仅识别 JSX/TSX 的有限事件属性与唯一命名 handler；尚未连接前端 handler 到 API client 和后端 endpoint，也未覆盖 Vue、Angular、XML 或 Jetpack Compose UI 模型。",
             "candidate/verified=false 表示未验证，不代表运行时可达或功能已实现。",
             "调用链仅沿唯一 RESOLVED 的图谱符号边进行有界静态展开；循环会标记，深度/数量上限会截断，不证明运行时执行。",
-            "数据库访问只识别单行直接 SQL 字符串字面量；owner 必须由同路径同调用行的 caller_symbol_id 唯一绑定。动态/拼接/多行 SQL 不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
+            "数据库访问只识别字面量表达式（隐式拼接、`+` 链、多行与模板字面量；动态插值以 `?` 占位，仅静态骨架参与解析）；变量/调用/`.format()`/`%`/ORM/跨行变量传播仍不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
             "权限证据仅识别有限的 route middleware 名称、显式权限调用名和简单 role/owner 条件；函数权限调用只有在同文件同调用行的唯一 caller_symbol_id 存在时才归属函数。未检测到权限线索不证明缺少授权，检测到线索也不证明运行时执行或检查正确。",
             "身份/资源数据流仅识别有限同一源码行模式；只有身份线索与数据库调用位于同文件同一行时才附着到数据库访问，再经已解析 endpoint 调用链关联。未做跨行变量/参数/返回值传播、别名解析、ORM 映射或控制流分析；同一行模式不证明运行时身份可信或资源授权正确。",
         ],

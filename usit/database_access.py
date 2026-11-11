@@ -1,8 +1,12 @@
-"""Conservative, line-bounded database access evidence extraction.
+"""Conservative database access evidence extraction.
 
-This module never executes SQL or target code. It recognizes only direct SQL
-string literals passed to common execute/query/raw methods on a single source
-line. Dynamic, concatenated and multiline statements remain UNKNOWN.
+This module never executes SQL or target code. It recognizes SQL passed as a
+literal expression to common execute/query/raw methods: single string
+literals, implicit concatenation, ``+`` chains of literals, multiline
+(triple-quoted / template) literals, and f-string / template literals whose
+static skeleton survives with ``?`` placeholders for interpolations. Any
+operand that is not a literal (a variable, a call, ``.format()``, ``%``)
+leaves the statement UNKNOWN -- the static skeleton is never guessed.
 """
 from __future__ import annotations
 
@@ -15,6 +19,9 @@ _SQL_TABLE = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_$]*
 _SQL_SELECT = re.compile(r"^\s*SELECT\s+(.*?)\s+FROM\s+", re.I | re.S)
 _SQL_INSERT = re.compile(r"^\s*INSERT\s+INTO\s+[A-Za-z_][A-Za-z0-9_$]*\s*\(([^)]*)\)", re.I | re.S)
 _SQL_UPDATE = re.compile(r"^\s*UPDATE\s+[A-Za-z_][A-Za-z0-9_$]*\s+SET\s+(.*?)(?:\s+WHERE\s+|$)", re.I | re.S)
+_JS_CALL = re.compile(
+    r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(execute|query|raw)\s*\("
+)
 
 
 def _simple_columns(value: str) -> list[str]:
@@ -59,48 +66,287 @@ def _parse_sql(sql: str) -> dict[str, Any]:
             "parse_status": status}
 
 
+def _resolve_python_sql(node: ast.AST) -> tuple[str, bool] | None:
+    """Resolve a Python SQL string expression to (text, has_dynamic).
+
+    Returns None when the expression is not a literal expression: a plain
+    variable, a call, ``.format()``, ``%`` formatting and anything else is
+    left UNKNOWN rather than guessed. Interpolations in f-strings become
+    ``?`` placeholders; ``?`` is not an identifier character, so a table or
+    column position filled by an interpolation can never be misread as a
+    name.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value, False
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        dynamic = False
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                parts.append("?")
+                dynamic = True
+            else:
+                return None
+        return "".join(parts), dynamic
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _resolve_python_sql(node.left)
+        right = _resolve_python_sql(node.right)
+        if left is None or right is None:
+            return None
+        return left[0] + right[0], left[1] or right[1]
+    return None
+
+
+def _extract_python(source: str) -> list[tuple[int, str, str | None, str, bool]]:
+    """Extract (line, callee, sql, parser, has_dynamic) from one Python file."""
+    found: list[tuple[int, str, str | None, str, bool]] = []
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        tree = None
+    if tree is not None:
+        class Visitor(ast.NodeVisitor):
+            def visit_Call(self, node: ast.Call) -> None:
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr in _DB_METHODS:
+                    receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
+                    resolved = _resolve_python_sql(node.args[0]) if node.args else None
+                    if resolved is None:
+                        sql, dynamic = None, False
+                    else:
+                        sql, dynamic = resolved
+                    parser = ("python-ast-literal-expression-dynamic" if dynamic
+                              else "python-ast-literal-expression")
+                    found.append((node.lineno, receiver + "." + func.attr, sql, parser, dynamic))
+                self.generic_visit(node)
+        Visitor().visit(tree)
+        return found
+    # The file does not parse as a whole: fall back to the old per-line
+    # scan so single-line calls in an otherwise broken file still produce
+    # records with the previous parser label.
+    for line_no, line in enumerate(source.splitlines(), 1):
+        try:
+            line_tree = ast.parse(line.lstrip())
+        except (SyntaxError, ValueError):
+            continue
+        if line_tree is None:
+            continue
+        class LineVisitor(ast.NodeVisitor):
+            def visit_Call(self, node: ast.Call) -> None:
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr in _DB_METHODS:
+                    receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
+                    sql = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str) else None
+                    found.append((line_no, receiver + "." + func.attr, sql, "python-ast-single-line", False))
+                self.generic_visit(node)
+        LineVisitor().visit(line_tree)
+    return found
+
+
+def _skip_ws(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in " \t\r\n":
+        pos += 1
+    return pos
+
+
+def _skip_js_string(text: str, pos: int) -> int | None:
+    """Skip one JS string literal starting at pos; return the end index or None."""
+    if pos >= len(text):
+        return None
+    quote = text[pos]
+    if quote in ("'", '"'):
+        i = pos + 1
+        while i < len(text):
+            ch = text[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                return i + 1
+            if ch == "\n":
+                return None
+            i += 1
+        return None
+    if quote == "`":
+        i = pos + 1
+        while i < len(text):
+            ch = text[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "`":
+                return i + 1
+            if ch == "$" and i + 1 < len(text) and text[i + 1] == "{":
+                depth = 1
+                j = i + 2
+                while j < len(text) and depth > 0:
+                    c = text[j]
+                    if c in ("'", '"', "`"):
+                        nxt = _skip_js_string(text, j)
+                        if nxt is None:
+                            return None
+                        j = nxt
+                        continue
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                    j += 1
+                if depth != 0:
+                    return None
+                i = j
+                continue
+            i += 1
+        return None
+    return None
+
+
+def _parse_js_quoted(text: str, pos: int) -> tuple[str, bool, int] | None:
+    """Parse a single/double-quoted JS string at pos; return (text, False, end)."""
+    quote = text[pos]
+    end = _skip_js_string(text, pos)
+    if end is None:
+        return None
+    raw = text[pos + 1:end - 1]
+    # A backslash-newline is a JS line continuation; drop both characters.
+    raw = raw.replace("\\\r\n", "").replace("\\\n", "")
+    try:
+        value = ast.literal_eval(quote + raw + quote)
+    except (SyntaxError, ValueError):
+        return None
+    if not isinstance(value, str):
+        return None
+    # In '...'/"..." there is no interpolation: '${' is literal text.
+    return value, False, end
+
+
+def _parse_js_template(text: str, pos: int) -> tuple[str, bool, int] | None:
+    """Parse a template literal at pos; interpolations become '?' placeholders."""
+    parts: list[str] = []
+    buf: list[str] = []
+    dynamic = False
+    i = pos + 1
+    while i < len(text):
+        ch = text[i]
+        if ch == "`":
+            parts.append("".join(buf))
+            return "".join(parts), dynamic, i + 1
+        if ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == "`":
+                buf.append("`")
+            elif nxt == "$":
+                buf.append("$")
+            elif nxt == "\\":
+                buf.append("\\")
+            elif nxt == "n":
+                buf.append("\n")
+            elif nxt == "r":
+                buf.append("\r")
+            elif nxt == "t":
+                buf.append("\t")
+            else:
+                # Any other escape is left verbatim; it can only land in a
+                # position where the SQL parse fails closed to UNKNOWN.
+                buf.append(ch)
+                buf.append(nxt)
+            i += 2
+            continue
+        if ch == "$" and i + 1 < len(text) and text[i + 1] == "{":
+            depth = 1
+            j = i + 2
+            while j < len(text) and depth > 0:
+                c = text[j]
+                if c in ("'", '"', "`"):
+                    nxt = _skip_js_string(text, j)
+                    if nxt is None:
+                        return None
+                    j = nxt
+                    continue
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                j += 1
+            if depth != 0:
+                return None
+            parts.append("".join(buf))
+            buf = []
+            parts.append("?")
+            dynamic = True
+            i = j
+            continue
+        buf.append(ch)
+        i += 1
+    return None
+
+
+def _parse_js_string_term(text: str, pos: int) -> tuple[str, bool, int] | None:
+    if pos >= len(text):
+        return None
+    if text[pos] in ("'", '"'):
+        return _parse_js_quoted(text, pos)
+    if text[pos] == "`":
+        return _parse_js_template(text, pos)
+    return None
+
+
+def _parse_js_string_expr(text: str, pos: int) -> tuple[str, bool, int] | None:
+    """Parse a JS string expression (terms joined by '+') at pos."""
+    parts: list[str] = []
+    dynamic = False
+    pos = _skip_ws(text, pos)
+    while True:
+        term = _parse_js_string_term(text, pos)
+        if term is None:
+            return None
+        term_text, term_dynamic, pos = term
+        parts.append(term_text)
+        dynamic = dynamic or term_dynamic
+        pos = _skip_ws(text, pos)
+        if pos < len(text) and text[pos] == "+":
+            pos = _skip_ws(text, pos + 1)
+            continue
+        return "".join(parts), dynamic, pos
+
+
+def _extract_js(source: str) -> list[tuple[int, str, str | None, str, bool]]:
+    """Extract (line, callee, sql, parser, has_dynamic) from one JS/TS file."""
+    found: list[tuple[int, str, str | None, str, bool]] = []
+    for match in _JS_CALL.finditer(source):
+        receiver, method = match.group(1), match.group(2)
+        line_no = source.count("\n", 0, match.start()) + 1
+        parsed = _parse_js_string_expr(source, match.end())
+        if parsed is None:
+            found.append((line_no, receiver + "." + method, None,
+                          "js-ts-literal-expression", False))
+        else:
+            sql, dynamic, _end = parsed
+            parser = ("js-ts-literal-expression-dynamic" if dynamic
+                      else "js-ts-literal-expression")
+            found.append((line_no, receiver + "." + method, sql, parser, dynamic))
+    return found
+
+
 def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, Any]]:
-    """Extract single-line direct-literal SQL calls; preserve UNKNOWN otherwise."""
+    """Extract SQL calls whose statement is a literal expression; preserve UNKNOWN otherwise."""
     records: list[dict[str, Any]] = []
     for path, source in sorted(code_by_file.items()):
-        for line_no, line in enumerate(source.splitlines(), 1):
-            found: list[tuple[str, str | None, str]] = []
-            if path.lower().endswith(".py"):
-                try:
-                    tree = ast.parse(line.lstrip())
-                except (SyntaxError, ValueError):
-                    tree = None
-                if tree is not None:
-                    class Visitor(ast.NodeVisitor):
-                        def visit_Call(self, node: ast.Call) -> None:
-                            func = node.func
-                            if isinstance(func, ast.Attribute) and func.attr in _DB_METHODS:
-                                receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
-                                sql = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str) else None
-                                found.append((receiver + "." + func.attr, sql, "python-ast-single-line"))
-                            self.generic_visit(node)
-                    Visitor().visit(tree)
-                # A recognized execution call split across lines is deliberately
-                # not reconstructed; it will be reported as NOT_ANALYZED by limits.
-            else:
-                pattern = re.compile(r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(execute|query|raw)\s*\(\s*(?:(['\"])(.*?)\3)?")
-                for match in pattern.finditer(line):
-                    receiver, method, quote, literal = match.groups()
-                    sql = None
-                    if quote and literal is not None and "${" not in literal and "\n" not in literal and "\r" not in literal:
-                        try:
-                            sql = ast.literal_eval(quote + literal + quote)
-                        except (SyntaxError, ValueError):
-                            sql = None
-                    found.append((receiver + "." + method, sql, "js-ts-single-line-literal-or-dynamic"))
-            for callee, sql, parser in found:
-                parsed = _parse_sql(sql) if isinstance(sql, str) else {
-                    "operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"
-                }
-                records.append({
-                    "source": path, "line": line_no, "callee": callee,
-                    "access_method": callee.rsplit(".", 1)[-1],
-                    **parsed, "parser": parser, "confidence": "STATIC_INFERENCE",
-                    "verification_status": "NOT_VERIFIED",
-                })
+        if path.lower().endswith(".py"):
+            found = _extract_python(source)
+        else:
+            found = _extract_js(source)
+        for line_no, callee, sql, parser, dynamic in found:
+            parsed = _parse_sql(sql) if isinstance(sql, str) else {
+                "operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"
+            }
+            records.append({
+                "source": path, "line": line_no, "callee": callee,
+                "access_method": callee.rsplit(".", 1)[-1],
+                **parsed, "parser": parser, "has_dynamic_parts": dynamic,
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+            })
     return records

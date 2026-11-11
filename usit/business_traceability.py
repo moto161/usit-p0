@@ -22,7 +22,7 @@ STAGE_PARSER_SCOPE: dict[str, tuple[str, ...]] = {
     "business_function_to_api_endpoint": ("CALL_GRAPH_DEPTH_8",),
     "api_to_backend_handler": ("HANDLER_UNIQUE_SYMBOL_ONLY",),
     "backend_call_chain": ("CALL_GRAPH_DEPTH_8",),
-    "backend_to_database": ("SQL_SINGLE_LINE_LITERAL_ONLY",),
+    "backend_to_database": ("SQL_LITERAL_EXPRESSION_ONLY",),
     "authorization_evidence": ("AUTHORIZATION_LIMITED_PATTERNS_ONLY",),
     "identity_resource_evidence": ("SAME_LINE_IDENTITY_ONLY",),
 }
@@ -38,8 +38,8 @@ PARSER_SCOPE_LIMITATION_TEXT: dict[str, tuple[str, ...]] = {
         "业务记录只与精确来源文件关联；命名路由 handler 可通过同文件唯一符号或 TypeScript Compiler API 的导入符号证据建立候选引用。",
         "跨文件 handler 仅在编译器符号解析唯一且目标符号存在于当前图谱时关联；动态、外部、歧义或缺少符号证据时保留原状态，不按名称猜测。",
     ),
-    "SQL_SINGLE_LINE_LITERAL_ONLY": (
-        "数据库访问只识别单行直接 SQL 字符串字面量；owner 必须由同路径同调用行的 caller_symbol_id 唯一绑定。动态/拼接/多行 SQL 不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
+    "SQL_LITERAL_EXPRESSION_ONLY": (
+        "数据库访问只识别字面量表达式（隐式拼接、`+` 链、多行与模板字面量；动态插值以 `?` 占位，仅静态骨架参与解析）；变量/调用/`.format()`/`%`/ORM/跨行变量传播仍不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
     ),
     "AUTHORIZATION_LIMITED_PATTERNS_ONLY": (
         "权限证据仅识别有限的 route middleware 名称、显式权限调用名和简单 role/owner 条件；函数权限调用只有在同文件同调用行的唯一 caller_symbol_id 存在时才归属函数。未检测到权限线索不证明缺少授权，检测到线索也不证明运行时执行或检查正确。",

@@ -350,6 +350,28 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertIsNone(access["business_details"]["owner_symbol_id"])
         self.assertEqual(access["business_details"]["owner_resolution_status"], "UNKNOWN")
 
+    def test_database_access_carries_has_dynamic_parts_into_node_details(self):
+        source = graph()
+        source["nodes"].append({
+            "id": "file:server/repos/photo_repo.py", "type": "file",
+            "label": "server/repos/photo_repo.py",
+            "evidence": {"path": "server/repos/photo_repo.py"},
+        })
+        result = project_business_graph(source, {"database_accesses": [
+            {"source": "server/repos/photo_repo.py", "line": 9,
+             "callee": "db.execute", "operation": "SELECT", "tables": ["photos"],
+             "columns": ["id"], "parse_status": "RESOLVED",
+             "has_dynamic_parts": True},
+            {"source": "server/repos/photo_repo.py", "line": 12,
+             "callee": "db.execute", "operation": "SELECT", "tables": ["photos"],
+             "columns": ["id"], "parse_status": "RESOLVED"},
+        ]})
+        accesses = [n for n in result["nodes"] if n.get("business_kind") == "database_access"]
+        by_line = {n["evidence"]["line"]: n for n in accesses}
+        self.assertTrue(by_line[9]["business_details"]["has_dynamic_parts"])
+        # A record from before the flag existed defaults to False.
+        self.assertFalse(by_line[12]["business_details"]["has_dynamic_parts"])
+
     def test_duplicate_same_file_handler_symbols_remain_ambiguous(self):
         source = graph()
         for line in (30, 45):
