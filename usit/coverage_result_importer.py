@@ -122,7 +122,13 @@ def _verify_source_bindings(mapping: dict[str, Any], project_root: str | Path) -
                     else:
                         line_count = len(source_text.splitlines())
                         evidence["source_line_count"] = line_count
-                        if item.get("line_end", 0) > line_count:
+                        line_start = item.get("line_start")
+                        line_end = item.get("line_end")
+                        if (
+                            not isinstance(line_start, int) or isinstance(line_start, bool)
+                            or not isinstance(line_end, int) or isinstance(line_end, bool)
+                            or line_start < 1 or line_end < line_start or line_end > line_count
+                        ):
                             evidence["source_binding_status"] = "SOURCE_LINE_RANGE_OUT_OF_BOUNDS"
                         else:
                             evidence["source_binding_status"] = "SOURCE_BYTES_MATCHED"
