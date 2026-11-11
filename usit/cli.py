@@ -221,6 +221,7 @@ def main(argv=None):
     rp.add_argument('--authorization-file',required=True,help='External usit-test-execution-authorization-v1 record acknowledging project-code execution')
     rp.add_argument('--timeout',type=float,default=1800,help='Maximum execution seconds (default: 1800)')
     rp.add_argument('--pytest-arg',action='append',default=[],help='Allow-listed pytest selector/option; repeat as needed')
+    rp.add_argument('--runner-user',default=None,help='Optional dedicated POSIX user to run the test process as (UID isolation A, Linux only; parent must run as root, user must already exist, and the authorization file must name the same user)')
     ir=sub.add_parser('ingest-test-results',help='Import completed JUnit XML or pytest JSON results through an explicit mapping; never runs tests')
     ir.add_argument('--junit',required=True,help='JUnit XML report from an already completed test run')
     ir.add_argument('--mapping',required=True,help='Reviewed JSON mapping of exact testcase IDs to business_function_id')
@@ -662,7 +663,7 @@ def main(argv=None):
             result=run_controlled_pytest(
                 a.project,evidence_parent=a.evidence_parent,
                 authorization_file=a.authorization_file,pytest_args=a.pytest_arg,
-                timeout=a.timeout,
+                timeout=a.timeout,runner_user=a.runner_user,
             )
             print(json.dumps(result,ensure_ascii=False,indent=2))
             return 0 if result.get('status')=='PASS' else 1

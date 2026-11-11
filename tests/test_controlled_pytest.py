@@ -641,5 +641,146 @@ class ControlledPytestTests(unittest.TestCase):
             _read_execution_artifact(link, 1024, "test artifact")
 
 
+    def _runner_user_for_isolation(self):
+        """Return the dedicated runner user name, or None when isolation tests must skip.
+
+        UID isolation integration tests need a root parent and an existing
+        user named by USIT_TEST_RUNNER_USER. CI runs without the variable,
+        so the tests skip there instead of failing.
+        """
+        geteuid = getattr(os, "geteuid", lambda: -1)
+        if geteuid() != 0:
+            return None
+        name = os.environ.get("USIT_TEST_RUNNER_USER")
+        if not name:
+            return None
+        try:
+            import pwd
+            pwd.getpwnam(name)
+        except KeyError:
+            return None
+        return name
+
+    def _write_authorization(self, runner_user=None):
+        now = datetime.now(timezone.utc)
+        auth = {
+            "schema_version": AUTH_SCHEMA,
+            "project_root": str(self.project.resolve()),
+            "evidence_parent": str(self.evidence.resolve()),
+            "allowed_actions": ["run_pytest_on_git_snapshot"],
+            "acknowledges_project_code_execution": True,
+            "approval_ref": "test-authorization-001",
+            "authorized_at": now.isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+        }
+        if runner_user is not None:
+            auth["runner_user"] = runner_user
+        self.authorization.write_text(json.dumps(auth), encoding="utf-8")
+
+    def test_isolated_run_passes_and_records_runner_isolation(self):
+        runner_user = self._runner_user_for_isolation()
+        if runner_user is None:
+            self.skipTest("UID isolation integration tests need root and USIT_TEST_RUNNER_USER pointing at an existing user")
+        import pwd
+        expected_uid = pwd.getpwnam(runner_user).pw_uid
+        self._write_authorization(runner_user=runner_user)
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+            runner_user=runner_user,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["runner_isolation"], f"POSIX_USER:{runner_user}")
+        self.assertEqual(result["provenance_signature_status"], "VALID")
+        self.assertEqual(result["evidence_manifest_signature_status"], "VALID")
+        # Isolation does not authenticate the runner: the signature proves
+        # the parent produced the documents, not that the tests executed.
+        self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
+        self.assertEqual(result["capture"]["runner_user"], runner_user)
+        self.assertEqual(result["capture"]["runner_uid"], expected_uid)
+        evidence = Path(result["evidence_dir"])
+        provenance = json.loads((evidence / "execution-provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["runner_isolation"], f"POSIX_USER:{runner_user}")
+        gate = json.loads((evidence / "final_gate_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(gate["runner_isolation"], f"POSIX_USER:{runner_user}")
+        self.assertTrue(any("dedicated POSIX user" in item for item in gate["limitations"]))
+
+    def test_isolated_test_process_cannot_write_original_project_tree(self):
+        runner_user = self._runner_user_for_isolation()
+        if runner_user is None:
+            self.skipTest("UID isolation integration tests need root and USIT_TEST_RUNNER_USER pointing at an existing user")
+        import pwd
+        expected_uid = pwd.getpwnam(runner_user).pw_uid
+        self._write_authorization(runner_user=runner_user)
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "def test_isolated_uid_and_original_tree_readonly():\n"
+            f"    assert os.getuid() == {expected_uid}\n"
+            "    assert os.getuid() != 0\n"
+            "    original = Path(os.environ['USIT_ORIGINAL_PROJECT_ROOT'])\n"
+            "    target = original / 'tests' / 'test_smoke.py'\n"
+            "    try:\n"
+            "        target.write_text('tampered')\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('test process could write the original project tree')\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture proves isolation uid and original tree readonly")
+        before = source.read_bytes()
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+            runner_user=runner_user,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(source.read_bytes(), before)
+
+    def test_runner_user_authorization_mismatch_is_rejected(self):
+        runner_user = self._runner_user_for_isolation()
+        if runner_user is None:
+            self.skipTest("UID isolation integration tests need root and USIT_TEST_RUNNER_USER pointing at an existing user")
+        # Caller requests isolation but the authorization file names no runner user.
+        with self.assertRaisesRegex(ValueError, "runner_user does not match"):
+            run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+                runner_user=runner_user,
+            )
+        # Authorization names a different runner user than the caller.
+        self._write_authorization(runner_user="somebody-else")
+        with self.assertRaisesRegex(ValueError, "runner_user does not match"):
+            run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+                runner_user=runner_user,
+            )
+        # Authorization demands isolation but the caller passes none.
+        self._write_authorization(runner_user=runner_user)
+        with self.assertRaisesRegex(ValueError, "runner_user does not match"):
+            run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+            )
+        # A non-root parent cannot request isolation even with matching authorization.
+        with patch.object(os, "geteuid", return_value=1000):
+            with self.assertRaisesRegex(ValueError, "run as root"):
+                run_controlled_pytest(
+                    self.project, evidence_parent=self.evidence,
+                    authorization_file=self.authorization,
+                    pytest_args=["tests/test_smoke.py"], timeout=60,
+                    runner_user=runner_user,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

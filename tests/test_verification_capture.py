@@ -266,5 +266,38 @@ class VerificationCaptureTests(unittest.TestCase):
         )
 
 
+    def test_isolated_run_rejected_when_parent_is_not_root_or_not_posix(self):
+        # Fail-closed: isolation needs a root parent on POSIX. Mock the
+        # platform checks so no real process is ever started.
+        with patch.object(os, "geteuid", return_value=1000), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "run as root"):
+                self.run_capture("pass", user="nobody")
+            popen.assert_not_called()
+        self.assertEqual(list(self.evidence_parent.iterdir()), [])
+        with patch.object(os, "name", "nt"), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "POSIX"):
+                self.run_capture("pass", user="nobody")
+            popen.assert_not_called()
+        self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+    def test_unknown_runner_user_is_rejected_without_starting_process(self):
+        with patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                self.run_capture("pass", user="usit-definitely-does-not-exist-12345")
+            popen.assert_not_called()
+        self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+    def test_root_runner_user_is_rejected_without_starting_process(self):
+        with patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "must not be root"):
+                self.run_capture("pass", user=0)
+            with self.assertRaisesRegex(ValueError, "must not be root"):
+                self.run_capture("pass", user="root")
+            popen.assert_not_called()
+        self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

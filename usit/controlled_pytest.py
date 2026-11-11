@@ -33,7 +33,7 @@ from .test_execution_provenance import (
     MAX_REPORT_BYTES, SCHEMA_VERSION, canonical_json_bytes, sha256_hex,
     validate_execution_provenance,
 )
-from .verification_capture import capture_run, verify_manifest
+from .verification_capture import _resolve_runner_user, capture_run, verify_manifest
 
 AUTH_SCHEMA = "usit-test-execution-authorization-v1"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -337,7 +337,7 @@ def pytest_sessionfinish(session, exitstatus):
             "The import audit event fires before the finder resolves the file, so it carries the module name only; the resolved path is recorded by the meta path finder. If test code removes that finder from sys.meta_path, trail-only names are resolved again at sessionfinish against the then-current sys.path and file bytes.",
             "Code loaded without the import system (ctypes/CDLL, exec() of a string that imports nothing, importlib loader APIs used without registering in sys.modules) raises no import event and remains invisible.",
             "The hook is registered when the runner plugin loads; imports during pytest startup before that point are visible only through the session-end sys.modules snapshot.",
-            "The hook itself cannot be unregistered by test code, but the in-memory audit log lives in the same process as the tests; only OS-level UID isolation would make this evidence authenticated.",
+            "The hook itself cannot be unregistered by test code, but the in-memory audit log lives in the same process as the tests. UID isolation (POSIX_USER) keeps the test process out of the parent process memory and the evidence files, but the log itself is still written by the test process, so only a parent-held output channel would authenticate it.",
         ],
     }
     Path(os.environ["USIT_RUNTIME_IMPORTS_PATH"]).write_text(
@@ -376,7 +376,8 @@ def _canonical_dir(value: str | os.PathLike[str], label: str) -> Path:
     return resolved
 
 
-def _load_authorization(path: str | os.PathLike[str], project: Path, evidence_parent: Path) -> dict[str, Any]:
+def _load_authorization(path: str | os.PathLike[str], project: Path, evidence_parent: Path,
+                        runner_user: str | None = None) -> dict[str, Any]:
     auth_path = Path(path).expanduser()
     if not auth_path.is_absolute() or auth_path.is_symlink():
         raise ValueError("authorization file must be an absolute regular file outside the project")
@@ -400,6 +401,16 @@ def _load_authorization(path: str | os.PathLike[str], project: Path, evidence_pa
     approval_ref = value.get("approval_ref")
     if not isinstance(approval_ref, str) or not approval_ref.strip() or len(approval_ref) > 256:
         raise ValueError("authorization approval_ref is required")
+    # UID isolation is a permission decision, so it must be bound by the
+    # authorization file exactly like project_root / evidence_parent: when
+    # either side names a runner user, both must agree. A caller may not
+    # unilaterally request isolation, and a run may not silently drop
+    # isolation the authorization demands.
+    auth_runner_user = value.get("runner_user")
+    if auth_runner_user is not None and (not isinstance(auth_runner_user, str) or not auth_runner_user):
+        raise ValueError("authorization runner_user must be a non-empty string")
+    if runner_user != auth_runner_user:
+        raise ValueError("authorization runner_user does not match requested runner_user")
     def parse_time(field: str) -> datetime:
         raw = value.get(field)
         if not isinstance(raw, str) or not raw.endswith("Z"):
@@ -544,6 +555,24 @@ def _artifact_record(directory: Path, name: str) -> dict[str, Any]:
     return {"path": name, "size": len(raw), "sha256": sha256_hex(raw)}
 
 
+def _chown_tree(root: Path, uid: int) -> None:
+    """Recursively transfer a staging tree to the runner UID (A1: ownership only).
+
+    Modes are left unchanged (the staging top stays 0700, now owned by the
+    runner user). Any failure is fail-closed: the caller must refuse the run
+    rather than execute it with the wrong owner.
+    """
+    try:
+        for current, directories, filenames in os.walk(root, topdown=False, followlinks=False):
+            for name in filenames:
+                os.chown(Path(current) / name, uid, -1, follow_symlinks=False)
+            for name in directories:
+                os.chown(Path(current) / name, uid, -1, follow_symlinks=False)
+        os.chown(root, uid, -1, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"staging ownership transfer failed: {type(exc).__name__}: {exc}") from exc
+
+
 def _minimal_environment(staging: Path) -> dict[str, str]:
     env: dict[str, str] = {}
     for key in ("PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "LANG", "LC_ALL", "TZ"):
@@ -569,12 +598,19 @@ def run_controlled_pytest(
     authorization_file: str | os.PathLike[str],
     pytest_args: Sequence[str] = (),
     timeout: float = 1800,
+    runner_user: str | None = None,
 ) -> dict[str, Any]:
     """Execute pytest against a clean, staged Git HEAD and produce bound evidence.
 
     This is an execution boundary, not an OS sandbox. The authorization must
     explicitly acknowledge arbitrary project-code execution. Runner authenticity
     remains UNAUTHENTICATED until a platform-backed attestation is implemented.
+
+    ``runner_user`` optionally runs the test process as a dedicated POSIX user
+    (UID isolation A, Linux only): the parent must run as root, the user must
+    already exist, and the authorization file must name the same user. Any
+    refusal raises ValueError before execution; there is no silent fallback
+    to running as the parent user.
     """
     project = _canonical_dir(project_root, "project root")
     parent = _canonical_dir(evidence_parent, "evidence parent")
@@ -582,7 +618,28 @@ def run_controlled_pytest(
         raise ValueError("evidence_parent and project_root must not overlap")
     if not math.isfinite(timeout) or timeout <= 0 or timeout > 24 * 60 * 60:
         raise ValueError("timeout must be finite, greater than zero and no more than 24 hours")
-    authorization = _load_authorization(authorization_file, project, parent)
+    if runner_user is not None and (not isinstance(runner_user, str) or not runner_user):
+        raise ValueError("runner_user must be a non-empty username string")
+    authorization = _load_authorization(authorization_file, project, parent, runner_user=runner_user)
+    # Resolve early (before any Git work or staging) so a refused isolation
+    # request fails fast and never reaches execution.
+    runner_user_name, runner_uid = _resolve_runner_user(runner_user)
+    runner_isolation = f"POSIX_USER:{runner_user_name}" if runner_user_name is not None else "NONE"
+    if runner_isolation == "NONE":
+        isolation_limitation = (
+            "No UID isolation was requested, so the test process ran as the parent user: "
+            "it could read any parent-owned file the OS permits, and the HMAC key file was "
+            "protected only by its 0600 mode and by being written after the test process exited."
+        )
+    else:
+        isolation_limitation = (
+            f"The test process ran as dedicated POSIX user {runner_user_name}: it cannot write "
+            "the evidence directory, the HMAC key file, or the original project tree. It can "
+            "still read world-readable files, reach the network, write inside staging "
+            "(including the JUnit report and runtime-imports manifest), and consume host "
+            "resources, so this is not a sandbox and provenance_authenticity_status stays "
+            "UNAUTHENTICATED."
+        )
     selected_args = _validate_pytest_args(pytest_args)
     status = _git(project, "status", "--porcelain=v1", "--untracked-files=all", limit=4 * 1024 * 1024)
     if status.strip():
@@ -649,10 +706,17 @@ def run_controlled_pytest(
         # after the test process has exited, so the test process cannot read
         # it and forge signatures during the run.
         run_key = generate_run_key()
+        # A1: hand the whole staging tree to the runner user (top stays
+        # 0700, now owned by the runner user) before the test process
+        # starts, so it can write its reports inside staging but nothing
+        # outside it. Any chown failure refuses the run (fail-closed).
+        if runner_uid is not None:
+            _chown_tree(staging, runner_uid)
         capture = capture_run(
             command, project_root=staging, evidence_parent=parent,
             files=[item["path"] for item in source_files],
             approval_ref=authorization["approval_ref"], cwd=staging, env=env, timeout=timeout,
+            user=runner_user,
         )
         evidence = Path(capture.evidence_dir)
         inventory_errors = _staging_inventory_errors(staging, source_files)
@@ -787,6 +851,13 @@ def run_controlled_pytest(
             # its allowed pytest option list contains no -n/--numprocesses,
             # so the summed case durations must fit inside the wall clock.
             "worker_count": 1,
+            # UID isolation A: "POSIX_USER:<name>" when the test process ran
+            # as a dedicated POSIX user, else "NONE". Isolation keeps the
+            # test process out of the evidence directory, the HMAC key file,
+            # and the original project tree, but staging outputs remain
+            # writable by the test process, so authenticity stays
+            # UNAUTHENTICATED (see limitations).
+            "runner_isolation": runner_isolation,
             "source_snapshot": {
                 "manifest_schema_version": source_manifest["schema_version"],
                 "manifest_sha256": manifest_hash,
@@ -829,6 +900,8 @@ def run_controlled_pytest(
         gate["source_snapshot_root"] = "source_snapshot/"
         gate["source_manifest_sha256"] = validation["source_manifest_sha256"]
         gate["pytest_exit_status"] = capture.status
+        gate["runner_isolation"] = runner_isolation
+        gate.setdefault("limitations", []).append(isolation_limitation)
         gate["source_tree_inventory_status"] = "CLEAN" if not inventory_errors else "CHANGED_OR_UNSAFE"
         gate["source_tree_inventory_errors"] = inventory_errors
         gate["runtime_import_binding_status"] = (
@@ -893,6 +966,7 @@ def run_controlled_pytest(
             "provenance_authenticity_status": "UNAUTHENTICATED",
             "execution_source_binding_status": "STAGED_SNAPSHOT_USED_UNAUTHENTICATED",
             "execution_provenance_validation": "STRUCTURE_AND_DIGESTS_VALIDATED",
+            "runner_isolation": runner_isolation,
             "runtime_import_binding_status": (
                 "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT" if not runtime_imports_errors
                 else "RUNTIME_IMPORTS_NOT_BOUND"
@@ -906,6 +980,7 @@ def run_controlled_pytest(
                 "Runtime import paths and hashes are collected but remain unauthenticated; OS-level isolation and runner authenticity are not established.",
                 "A passing pytest report does not establish business-function correctness without reviewed mappings and independent evidence verification.",
                 "HMAC signatures prove the parent process produced the provenance record and evidence manifest, not that the test process executed the reported tests. The per-run key is held in parent memory during the run and stored in a 0600 key file outside the evidence directory after the test process exits; a same-user test process that can read parent memory could steal it, so signatures raise the forgery bar but do not replace UID isolation.",
+                isolation_limitation,
             ],
         }
     finally:

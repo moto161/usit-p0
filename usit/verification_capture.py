@@ -21,6 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+try:
+    import pwd
+except ImportError:  # Non-POSIX platforms have no pwd module.
+    pwd = None  # type: ignore[assignment]
+
 from .safeio import read_bounded_no_follow
 
 __all__ = ["STATUSES", "CaptureResult", "capture_run", "verify_manifest"]
@@ -53,6 +58,8 @@ class CaptureResult:
     manifest_valid: bool
     evidence_complete: bool
     errors: tuple[str, ...] = field(default_factory=tuple)
+    runner_user: str | None = None
+    runner_uid: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,7 +74,47 @@ class CaptureResult:
             "manifest_valid": self.manifest_valid,
             "evidence_complete": self.evidence_complete,
             "errors": list(self.errors),
+            "runner_user": self.runner_user,
+            "runner_uid": self.runner_uid,
         }
+
+
+def _resolve_runner_user(user: str | int | None) -> tuple[str | None, int | None]:
+    """Resolve a requested runner user to (name, uid); (None, None) when unset.
+
+    Fail-closed: a non-POSIX platform, a non-root parent, an unknown name,
+    or uid 0 is refused with ValueError. Callers must never silently fall
+    back to running as the parent UID when isolation was requested.
+    """
+    if user is None:
+        return None, None
+    if isinstance(user, bool) or not isinstance(user, (str, int)):
+        raise ValueError("runner user must be a username string or a UID integer")
+    if os.name != "posix":
+        raise ValueError("running as a dedicated user requires a POSIX platform")
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None or geteuid() != 0:
+        raise ValueError("running as a dedicated user requires the parent process to run as root")
+    if pwd is None:
+        raise ValueError("running as a dedicated user requires the pwd module")
+    if isinstance(user, str):
+        if not user:
+            raise ValueError("runner user name must not be empty")
+        try:
+            entry = pwd.getpwnam(user)
+        except KeyError:
+            raise ValueError(f"runner user does not exist: {user}") from None
+        name, uid = entry.pw_name, entry.pw_uid
+    else:
+        uid = user
+        try:
+            name = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            # A numeric UID needs no passwd entry for setuid to work.
+            name = None
+    if uid < 1:
+        raise ValueError("runner user must not be root (uid 0)")
+    return name, uid
 
 
 def _utc_now() -> str:
@@ -292,6 +339,7 @@ def capture_run(
     timeout: float | None = None,
     interrupt_event: threading.Event | None = None,
     poll_interval: float = 0.05,
+    user: str | int | None = None,
 ) -> CaptureResult:
     """Run one argv command and capture bounded, explicitly named evidence.
 
@@ -300,6 +348,11 @@ def capture_run(
     The evidence parent must already exist outside the project. A fresh child
     directory is created exclusively for each run. Commands are passed directly
     to ``subprocess.Popen`` with ``shell=False`` and ``stdin=DEVNULL``.
+
+    ``user`` optionally runs the command as a dedicated POSIX user
+    (``subprocess.Popen(user=...)``): the parent must run as root, the user
+    must exist, and uid 0 is refused. Any refusal raises ValueError before
+    the process starts; there is no silent fallback to the parent UID.
     """
     if isinstance(command, (str, bytes)) or not command or not all(isinstance(x, str) and x for x in command):
         raise ValueError("command must be a non-empty sequence of non-empty strings")
@@ -312,6 +365,7 @@ def capture_run(
         raise ValueError("timeout must be greater than zero")
     if poll_interval <= 0:
         raise ValueError("poll_interval must be greater than zero")
+    runner_user, runner_uid = _resolve_runner_user(user)
 
     project = _canonical_directory(project_root, "project root")
     parent = _canonical_directory(evidence_parent, "evidence parent")
@@ -351,6 +405,7 @@ def capture_run(
                         list(command), cwd=work, stdin=subprocess.DEVNULL,
                         stdout=out_stream, stderr=err_stream, shell=False,
                         close_fds=True, env=None if env is None else dict(env),
+                        user=runner_uid,
                     )
                     process_started = True
                 except OSError as exc:
@@ -447,7 +502,8 @@ def capture_run(
             status = "NOT_VERIFIED"
         return CaptureResult(run_id, status, exit_code, timed_out, interrupted,
                              str(evidence), str(manifest_path), str(report_path),
-                             manifest_valid, evidence_complete, tuple(errors))
+                             manifest_valid, evidence_complete, tuple(errors),
+                             runner_user, runner_uid)
     except (OSError, ValueError, TypeError) as exc:
         errors.append(f"evidence capture failed: {type(exc).__name__}: {exc}")
         # Do not fabricate a manifest or PASS when evidence writing is incomplete.
@@ -455,4 +511,4 @@ def capture_run(
                              interrupted, str(evidence),
                              str(manifest_path) if manifest_path.exists() else None,
                              str(report_path) if report_path.exists() else None,
-                             False, False, tuple(errors))
+                             False, False, tuple(errors), runner_user, runner_uid)
