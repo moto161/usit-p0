@@ -986,6 +986,27 @@ class ControlledPytestTests(unittest.TestCase):
             return None
         return name, password
 
+    def _failure_detail(self, result):
+        """Result dict plus the child pytest stdout/stderr, for diagnosis.
+
+        The child's own output lives in the evidence dir, not in this
+        job's log; when a controlled run fails, the child's error is the
+        first thing to read (Run #1566: all five isolation tests failed
+        with child exit code 1 and an empty JUnit report, and the log
+        carried no hint of why). Capped so a chatty child cannot flood
+        the failure output.
+        """
+        detail = [str(result)]
+        evidence = Path(result.get("evidence_dir") or "")
+        for name in ("stdout.log", "stderr.log"):
+            try:
+                text = (evidence / name).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if text.strip():
+                detail.append(f"--- child {name} (last 8000 chars) ---\n{text[-8000:]}")
+        return "\n".join(detail)
+
     def test_runner_password_validation_is_fail_closed(self):
         secret = "E1-test-secret-password"
         with self.assertRaisesRegex(ValueError, "requires a runner user"):
@@ -1103,7 +1124,7 @@ class ControlledPytestTests(unittest.TestCase):
             pytest_args=["tests/test_smoke.py"], timeout=120,
             runner_user=runner_user, runner_password=runner_password,
         )
-        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["status"], "PASS", self._failure_detail(result))
         self.assertEqual(result["runner_isolation"], f"WINDOWS_USER:{runner_user}")
         self.assertEqual(result["staging_source_mode"], "READ_ONLY")
         self.assertEqual(result["provenance_signature_status"], "VALID")
@@ -1161,7 +1182,7 @@ class ControlledPytestTests(unittest.TestCase):
             pytest_args=["tests/test_smoke.py"], timeout=120,
             runner_user=runner_user, runner_password=runner_password,
         )
-        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["status"], "PASS", self._failure_detail(result))
         self.assertEqual(source.read_bytes(), before)
 
     def test_windows_isolated_run_blocks_writes_into_staging_tree(self):
@@ -1197,7 +1218,7 @@ class ControlledPytestTests(unittest.TestCase):
             pytest_args=["tests/test_smoke.py"], timeout=120,
             runner_user=runner_user, runner_password=runner_password,
         )
-        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["status"], "PASS", self._failure_detail(result))
         self.assertEqual(result["runner_isolation"], f"WINDOWS_USER:{runner_user}")
         self.assertEqual(result["staging_source_mode"], "READ_ONLY")
 
@@ -1231,7 +1252,7 @@ class ControlledPytestTests(unittest.TestCase):
             pytest_args=["tests/test_smoke.py"], timeout=120,
             runner_user=runner_user, runner_password=runner_password,
         )
-        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["status"], "PASS", self._failure_detail(result))
         self.assertEqual(result["runner_isolation"], f"WINDOWS_USER:{runner_user}")
         self.assertEqual(result["staging_source_mode"], "READ_ONLY")
 
@@ -1247,7 +1268,7 @@ class ControlledPytestTests(unittest.TestCase):
             pytest_args=["tests/test_smoke.py"], timeout=120,
             runner_user=runner_user, runner_password=runner_password,
         )
-        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["status"], "PASS", self._failure_detail(result))
         evidence = Path(result["evidence_dir"])
         junit = evidence / "junit.xml"
         self.assertTrue(junit.is_file())
