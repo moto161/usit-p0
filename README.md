@@ -316,11 +316,17 @@ python -m usit ingest-coverage --format jacoco-xml --coverage .\\app\\build\\rep
 
 `verify-evidence` merges an existing `usit-graph-v1` business graph with optional imported test-result and code-coverage artifacts. It emits one evidence row per `business_function_id`, validates artifact schemas and graph SHA-256 identity, and flags unknown function IDs, duplicate IDs, invalid statuses and graph-hash mismatches.
 
-The conclusion vocabulary is deliberately limited:
+The conclusion vocabulary is deliberately limited. Pass-family conclusions
+carry a `_UNAUTHENTICATED` suffix, and every evidence row plus the top-level
+result carries a `verification_authenticity` field (currently always
+`UNAUTHENTICATED`): a pass here records that the imported report says the
+tests passed, it does not prove the tests were actually executed by a trusted
+runner. A VALID provenance HMAC authenticates the evidence document's
+producer, not the runner, so it does not change this marker.
 - `TEST_FAILURE_OBSERVED`: imported runtime report contains at least one failed mapped test.
-- `TEST_PASS_AND_CODE_LINES_COVERED`: mapped tests passed and explicitly mapped executable lines are covered.
-- `TEST_PASS_WITH_COVERAGE_GAP`: mapped tests passed but mapped code lines are partial or uncovered.
-- `TEST_PASS_COVERAGE_NOT_MEASURED`: tests passed but no usable coverage evidence exists.
+- `TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED`: mapped tests passed and explicitly mapped executable lines are covered.
+- `TEST_PASS_WITH_COVERAGE_GAP_UNAUTHENTICATED`: mapped tests passed but mapped code lines are partial or uncovered.
+- `TEST_PASS_COVERAGE_NOT_MEASURED_UNAUTHENTICATED`: tests passed but no usable coverage evidence exists.
 - `TEST_EVIDENCE_INCONCLUSIVE`: mapped tests were skipped/unknown or the imported report omitted one or more expected mapped testcase IDs.
 - `NO_RUNTIME_TEST_EVIDENCE`: no imported runtime test evidence exists.
 - `EVIDENCE_CONFLICT`: source graph identity, business-function linkage or testcase completeness metadata conflicts; a `PASSED` row with missing mapped testcases is downgraded to `UNKNOWN` and reported as a conflict.

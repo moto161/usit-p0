@@ -28,7 +28,7 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
             {"test_id":"t-upload","business_function_id":"bf-upload","execution_status":"NOT_EXECUTED"}]}
         self.matrix={"schema_version":"usit-business-evidence-verification-v1","business_function_evidence":[
             {"business_function_id":"bf-upload","test_execution_status":"PASSED",
-             "code_coverage_status":"COVERED","verification_conclusion":"TEST_PASS_AND_CODE_LINES_COVERED",
+             "code_coverage_status":"COVERED","verification_conclusion":"TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED",
              "evidence_conflict":False},
             {"business_function_id":"bf-delete","test_execution_status":"FAILED",
              "code_coverage_status":"PARTIAL","verification_conclusion":"TEST_FAILURE_OBSERVED",

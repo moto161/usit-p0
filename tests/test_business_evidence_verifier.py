@@ -64,7 +64,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                 {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0,"source_binding_evidence":[{"source_file":"src/delete.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/delete.py","line_start":1,"line_end":5}]}]}
         result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
         by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
-        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED")
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED")
         self.assertEqual(
             by_id["bf-upload"]["code_coverage_detail"]["source_hashes"]["coverage_report_sha256"],
             "3"*64,
@@ -89,7 +89,7 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                 {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0,"source_binding_evidence":[{"source_file":"src/delete.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/delete.py","line_start":1,"line_end":5}]}]}
         result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
         by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
-        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED")
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED")
         self.assertEqual(by_id["bf-upload"]["execution_binding_status"],"MATCHED")
         self.assertEqual(by_id["bf-upload"]["test_execution_id"],"run-1")
         self.assertEqual(by_id["bf-upload"]["coverage_execution_id"],"run-1")
@@ -139,8 +139,6 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                       {item["kind"] for item in result["evidence_conflicts"]})
 
     def test_neither_side_bound_keeps_old_behavior(self):
-        # Both sides unbound: no false claim of a shared execution, and no
-        # conflict -- the old behavior, with the gap visible as NOT_PROVIDED.
         tests={"schema_version":"usit-test-execution-results-v1",
             "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
             "business_function_results":[
@@ -151,9 +149,33 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                 {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0,"source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/upload.py","line_start":1,"line_end":5}]}]}
         result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
         by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
-        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED")
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED")
         self.assertEqual(by_id["bf-upload"]["execution_binding_status"],"NOT_PROVIDED")
         self.assertEqual(result["evidence_conflict_count"],0)
+
+    def test_pass_conclusions_carry_unauthenticated_marker(self):
+        # P1-9: a pass conclusion must not be quotable as verified. The
+        # pass-family conclusion words carry _UNAUTHENTICATED, and every row
+        # plus the top level carries an explicit verification_authenticity
+        # field. Non-pass conclusions keep their names but still carry it.
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
+            "business_function_results":[
+                {"business_function_id":"bf-upload","execution_status":"PASSED","mapped_test_case_count":3,"failed":0,"skipped":0},
+                {"business_function_id":"bf-delete","execution_status":"FAILED","mapped_test_case_count":2,"failed":1,"skipped":0}]}
+        coverage={"schema_version":"usit-code-coverage-results-v1",
+            "source_hashes":{"coverage_report_sha256":"3"*64,"mapping_json_sha256":"4"*64,"business_graph_sha256":self.graph_hash},
+            "business_function_coverage":[
+                {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0,"source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/upload.py","line_start":1,"line_end":5}]},
+                {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0,"source_binding_evidence":[{"source_file":"src/delete.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/delete.py","line_start":1,"line_end":5}]}]}
+        result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
+        by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED")
+        self.assertEqual(by_id["bf-delete"]["verification_conclusion"],"TEST_FAILURE_OBSERVED")
+        for row in result["business_function_evidence"]:
+            self.assertEqual(row["verification_authenticity"],"UNAUTHENTICATED")
+        self.assertEqual(result["verification_authenticity"],"UNAUTHENTICATED")
+        self.assertTrue(any("UNAUTHENTICATED" in line for line in result["global_limitations"]))
 
     def test_graph_hash_mismatch_is_global_conflict(self):
         tests={"schema_version":"usit-test-execution-results-v1",

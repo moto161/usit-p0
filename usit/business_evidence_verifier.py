@@ -719,9 +719,9 @@ def verify_business_function_evidence(
         else:
             test_source_report_locator_status = "REPORT_LOCATOR_NOT_VERIFIED"
         if ts=="FAILED": conclusion="TEST_FAILURE_OBSERVED"
-        elif ts=="PASSED" and cs=="COVERED": conclusion="TEST_PASS_AND_CODE_LINES_COVERED"
-        elif ts=="PASSED" and cs in {"PARTIAL","NOT_COVERED"}: conclusion="TEST_PASS_WITH_COVERAGE_GAP"
-        elif ts=="PASSED": conclusion="TEST_PASS_COVERAGE_NOT_MEASURED"
+        elif ts=="PASSED" and cs=="COVERED": conclusion="TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED"
+        elif ts=="PASSED" and cs in {"PARTIAL","NOT_COVERED"}: conclusion="TEST_PASS_WITH_COVERAGE_GAP_UNAUTHENTICATED"
+        elif ts=="PASSED": conclusion="TEST_PASS_COVERAGE_NOT_MEASURED_UNAUTHENTICATED"
         elif ts=="UNKNOWN": conclusion="TEST_EVIDENCE_INCONCLUSIVE"
         else: conclusion="NO_RUNTIME_TEST_EVIDENCE"
         matrix.append({
@@ -764,6 +764,12 @@ def verify_business_function_evidence(
             } if cov else None,
             "verification_conclusion":conclusion,"business_correctness":"NOT_PROVEN",
             "evidence_conflict":False,
+            # The conclusion word itself carries the marker for pass claims,
+            # and every row also carries an explicit authenticity field: no
+            # conclusion in this report is authenticated until OS-level UID
+            # isolation exists. A VALID provenance HMAC authenticates the
+            # document's producer, not the runner, so it does not change this.
+            "verification_authenticity":"UNAUTHENTICATED",
             "test_execution_id":test_execution_id,
             "coverage_execution_id":coverage_execution_id,
             "execution_binding_status":execution_binding_status,
@@ -781,11 +787,13 @@ def verify_business_function_evidence(
         "business_graph_sha256":graph_hash,
         "business_function_count":len(matrix),
         "verification_conclusion_counts":dict(sorted(counts.items())),
+        "verification_authenticity":"UNAUTHENTICATED",
         "evidence_conflict_count":len(conflicts),
         "evidence_conflicts":conflicts,
         "business_function_evidence":matrix,
         "global_limitations":[
             "PASS 表示导入报告记录测试通过，不证明测试充分、需求完整或业务行为正确。",
+            "本报告所有结论均为 UNAUTHENTICATED：通过类结论词本身带 _UNAUTHENTICATED 后缀，每行与顶层另有 verification_authenticity 字段；HMAC 签名只认证证据文档的产生方，不认证测试执行本身。",
             "代码行覆盖率不证明断言有效、分支覆盖完整、权限正确或端到端用户流程可用。",
             "静态业务功能视图仍是 STATIC_INFERENCE；本报告不会把它升级为 VERIFIED_FACT。",
             "测试结果与覆盖率必须引用同一份业务图；图哈希不一致时标记证据冲突。",
