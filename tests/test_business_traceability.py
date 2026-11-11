@@ -521,6 +521,9 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertEqual(shared["explicit_parent_edges"], [])
         self.assertEqual(shared["parent_topology_status"], "NOT_ATTRIBUTABLE_ACROSS_FUNCTIONS")
         self.assertIn("没有逐事件功能归属", shared["interpretation"])
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED", markdown)
+        self.assertIn("bf-list, bf-delete", markdown)
 
     def test_rejects_malformed_runtime_correlation_parent_edges(self):
         runtime = {
