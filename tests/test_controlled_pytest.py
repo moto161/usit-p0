@@ -357,9 +357,15 @@ class ControlledPytestTests(unittest.TestCase):
 
         A test that rewrites an already-imported source file, executes the
         modified code, then restores the original bytes and mtime (os.utime)
-        leaves no content trace -- but ctime cannot be reset by a
+        leaves no content trace -- but POSIX ctime cannot be reset by a
         non-privileged process, so the pre/post snapshot diff must catch it.
+
+        POSIX-only: on Windows st_ctime is the file creation time, which a
+        write does not change, so this detection does not apply there.
         """
+        import sys
+        if sys.platform == "win32":
+            self.skipTest("POSIX ctime does not exist on Windows (st_ctime is creation time)")
         impl = self.project / "impl.py"
         impl.write_text("VALUE = 'original'\n", encoding="utf-8")
         source = self.project / "tests" / "test_smoke.py"

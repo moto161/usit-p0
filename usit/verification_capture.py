@@ -154,9 +154,12 @@ def _read_snapshot(path: Path, rel: str) -> dict[str, Any]:
     path_identity = (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns)
     if identity_before != identity_after or identity_after != path_identity or size != after_fd.st_size:
         raise OSError(f"snapshot target changed during read: {rel}")
-    # ctime_ns is recorded so a modify-then-restore cycle is detectable:
-    # content and mtime can both be restored (os.utime), but a non-privileged
-    # process cannot reset ctime, so any write leaves an irreversible mark.
+    # ctime_ns is recorded so a modify-then-restore cycle is detectable on
+    # POSIX: content and mtime can both be restored (os.utime), but a
+    # non-privileged process cannot reset ctime, so any write leaves an
+    # irreversible mark. On Windows st_ctime is the file creation time, which
+    # a write does not change; there the field still catches delete-and-
+    # recreate (creation time changes) but not in-place modify-restore.
     return {"path": rel, "state": "PRESENT", "size": size, "sha256": digest.hexdigest(),
             "ctime_ns": int(after_path.st_ctime_ns)}
 
