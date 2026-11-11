@@ -471,8 +471,12 @@ class TestPlanGenerationEndToEndTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             (base / "tests").mkdir()
-            (base / "tests" / "test_usit_generated.py").write_text(
-                test_source, encoding="utf-8")
+            # write_bytes, not write_text: text mode translates \n to
+            # the platform line separator (\r\n on Windows), which
+            # would change the file bytes and break the sha256 the
+            # mapping declares (CI Run #1554 failed exactly this way).
+            (base / "tests" / "test_usit_generated.py").write_bytes(
+                test_source.encode("utf-8"))
             report = base / "report.json"
             mapping_path = base / "mapping.json"
             graph_path = base / "graph.json"
