@@ -472,6 +472,56 @@ class BusinessTraceabilityTests(unittest.TestCase):
         self.assertIn("事件审阅顺序（非因果）", markdown)
         self.assertIn("采集端声明父子边：evt-1 → evt-2", markdown)
 
+    def test_shared_correlation_does_not_attribute_all_stages_to_each_function(self):
+        graph = {
+            **self.graph,
+            "business_understanding": {
+                **self.graph["business_understanding"],
+                "business_function_views": [
+                    *self.graph["business_understanding"]["business_function_views"],
+                    {"business_function_id": "bf-delete"},
+                ],
+            },
+        }
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": ["bf-list", "bf-delete"],
+            "correlations": [{
+                "correlation_id": "corr-shared",
+                "business_function_ids": ["bf-list", "bf-delete"],
+                "event_count": 3,
+                "observed_stages": ["ui", "http_request", "backend"],
+                "observed_event_ids_by_timestamp": ["evt-1", "evt-2", "evt-3"],
+                "explicit_parent_edges": [
+                    {"parent_event_id": "evt-1", "child_event_id": "evt-2"},
+                    {"parent_event_id": "evt-2", "child_event_id": "evt-3"},
+                ],
+                "parent_topology_status": "LINEAR_CHAIN",
+                "parent_link_coverage_ratio": 1.0,
+                "root_event_ids": ["evt-1"],
+                "leaf_event_ids": ["evt-3"],
+                "branching_parent_event_ids": [],
+                "isolated_event_ids": [],
+                "cycle_event_ids": [],
+            }],
+        }
+        result = build_business_traceability(
+            self.semantics, graph, self.mapping,
+            input_hashes=self.hashes, runtime_evidence_validation=runtime,
+        )
+        linked = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        shared = linked["runtime_observation"]["correlations"][0]
+        self.assertEqual(shared["function_attribution_status"],
+                         "SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED")
+        self.assertEqual(shared["function_ids_in_correlation"], ["bf-list", "bf-delete"])
+        self.assertEqual(shared["observed_stages"], [])
+        self.assertEqual(shared["observed_event_ids_by_timestamp"], [])
+        self.assertEqual(shared["explicit_parent_edges"], [])
+        self.assertEqual(shared["parent_topology_status"], "NOT_ATTRIBUTABLE_ACROSS_FUNCTIONS")
+        self.assertIn("没有逐事件功能归属", shared["interpretation"])
+
     def test_rejects_malformed_runtime_correlation_parent_edges(self):
         runtime = {
             "schema_version": "usit-runtime-evidence-validation-v1",
