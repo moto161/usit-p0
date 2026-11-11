@@ -1090,6 +1090,32 @@ class ControlledPytestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least one path"):
             windows_runner.deny_write_access([], "usit-runner")
 
+    def test_windows_deny_write_access_uses_granular_rights(self):
+        # Run #1567: denying the simple (W) right also denied opening
+        # the file for reading (generic write carries SYNCHRONIZE and
+        # READ_CONTROL), so the child pytest died at plugin load with
+        # PermissionError in importlib get_data. The deny must use the
+        # granular write bits only (wd,ad,wea,wa), which block writes
+        # without touching opens for read.
+        if os.name != "nt":
+            self.skipTest("deny_write_access needs the Windows runner module")
+        from usit import windows_runner
+        from types import SimpleNamespace
+
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", fake_run):
+            windows_runner.deny_write_access([self.project], "usit-runner", recursive=True)
+            windows_runner.deny_write_access([self.project], "usit-runner")
+        self.assertEqual(calls, [
+            ["icacls", str(self.project), "/deny", "usit-runner:(wd,ad,wea,wa)", "/T"],
+            ["icacls", str(self.project), "/deny", "usit-runner:(wd,ad,wea,wa)"],
+        ])
+
     def test_windows_spawn_failure_names_the_working_directory(self):
         # A spawn that fails on its working directory must name that
         # directory: the bare Win32 code alone (Run #1564: error 267)

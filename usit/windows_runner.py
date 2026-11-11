@@ -300,6 +300,16 @@ def deny_write_access(paths, username: str, *, recursive: bool = False) -> None:
     (icacls ``/T``). Raises ValueError when icacls is unavailable or
     exits non-zero; the username is not a secret and never appears in a
     password context.
+
+    The denied rights are the granular write bits (wd,ad,wea,wa) --
+    write data/add file, append data/add subdirectory, write extended
+    attributes, write attributes -- and deliberately NOT the simple
+    (W) right: (W) maps to generic write, which also carries the
+    SYNCHRONIZE and READ_CONTROL bits, so denying (W) denies opening
+    the file at all, even for reading. Run #1567 proved it: with a (W)
+    deny, the child pytest died at plugin load with PermissionError in
+    importlib get_data on _usit_runner_plugin.py. The granular bits
+    block writes without touching opens for read.
     """
     import subprocess
 
@@ -309,7 +319,7 @@ def deny_write_access(paths, username: str, *, recursive: bool = False) -> None:
     if not targets or any(not target for target in targets):
         raise ValueError("deny_write_access requires at least one path")
     for target in targets:
-        command = ["icacls", target, "/deny", f"{username}:(W)"]
+        command = ["icacls", target, "/deny", f"{username}:(wd,ad,wea,wa)"]
         if recursive:
             command.append("/T")
         try:
