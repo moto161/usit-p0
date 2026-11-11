@@ -681,6 +681,13 @@ class ControlledPytestTests(unittest.TestCase):
         self.authorization.write_text(json.dumps(auth), encoding="utf-8")
 
     def test_make_staging_read_only_sets_modes_and_keeps_outputs_writable(self):
+        # POSIX-only: on Windows os.chmod only toggles the read-only flag,
+        # so the exact permission bits (0555/0444/0644/0755) cannot be
+        # expressed or observed there, and this helper is only ever called
+        # for isolated runs, which are POSIX-only.
+        import sys
+        if sys.platform == "win32":
+            self.skipTest("POSIX permission bits do not apply on Windows")
         staging = self.base / "staging"
         (staging / "tests").mkdir(parents=True)
         source = staging / "tests" / "test_smoke.py"
