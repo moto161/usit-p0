@@ -35,6 +35,7 @@ AUTH_SCHEMA = "usit-test-execution-authorization-v1"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_FILES = 50_000
 MAX_RUNTIME_IMPORTS_BYTES = 50 * 1024 * 1024
+MAX_EXECUTION_ARTIFACT_BYTES = 50 * 1024 * 1024
 
 
 def _read_execution_artifact(path: str | os.PathLike[str], limit: int, label: str) -> bytes:
@@ -336,7 +337,7 @@ def _staging_inventory_errors(staging: Path, source_files: Sequence[dict[str, An
 
 def _artifact_record(directory: Path, name: str) -> dict[str, Any]:
     path = directory / name
-    raw = path.read_bytes()
+    raw = _read_execution_artifact(path, MAX_EXECUTION_ARTIFACT_BYTES, f"artifact {name}")
     return {"path": name, "size": len(raw), "sha256": sha256_hex(raw)}
 
 
@@ -442,7 +443,9 @@ def run_controlled_pytest(
         evidence = Path(capture.evidence_dir)
         inventory_errors = _staging_inventory_errors(staging, source_files)
         try:
-            pre_snapshot = json.loads((evidence / "pre_snapshot.json").read_text(encoding="utf-8"))
+            pre_snapshot = json.loads(_read_execution_artifact(
+                evidence / "pre_snapshot.json", MAX_EXECUTION_ARTIFACT_BYTES, "pre-execution snapshot"
+            ).decode("utf-8"))
             pre_entries = {item.get("path"): item for item in pre_snapshot.get("files", [])}
             for item in source_files:
                 observed = pre_entries.get(item["path"])
@@ -514,7 +517,9 @@ def run_controlled_pytest(
             (json.dumps(source_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
         )
         gate_path = evidence / "final_gate_report.json"
-        gate = json.loads(gate_path.read_text(encoding="utf-8"))
+        gate = json.loads(_read_execution_artifact(
+            gate_path, MAX_EXECUTION_ARTIFACT_BYTES, "final gate report"
+        ).decode("utf-8"))
         provenance = {
             "schema_version": SCHEMA_VERSION,
             "execution_id": capture.run_id,
@@ -568,7 +573,9 @@ def run_controlled_pytest(
             gate.setdefault("errors", []).extend(inventory_errors)
         gate_path.write_text(json.dumps(gate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         manifest_path = evidence / "evidence_manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(_read_execution_artifact(
+            manifest_path, MAX_EXECUTION_ARTIFACT_BYTES, "evidence manifest"
+        ).decode("utf-8"))
         names = {item["path"] for item in manifest["artifacts"]}
         for name in ("junit.xml", "source-manifest.json", "execution-provenance.json", "runner-plugin.py", "runtime-imports.json"):
             if (evidence / name).is_file() and name not in names:
