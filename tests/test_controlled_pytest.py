@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from xml.etree import ElementTree as ET
@@ -14,7 +16,8 @@ from unittest.mock import patch
 
 from usit.controlled_pytest import (
     AUTH_SCHEMA, MAX_REPORT_BYTES, MAX_RUNTIME_IMPORTS_BYTES,
-    _make_staging_read_only, _read_execution_artifact, run_controlled_pytest,
+    _make_staging_read_only, _read_execution_artifact,
+    _windows_isolation_staging_dir, run_controlled_pytest,
 )
 from usit.verification_capture import verify_manifest
 from usit.test_result_importer import ingest_junit_results
@@ -1016,6 +1019,67 @@ class ControlledPytestTests(unittest.TestCase):
                     pytest_args=["tests/test_smoke.py"], timeout=60,
                     runner_user="somebody",
                 )
+
+    def test_windows_isolation_staging_dir_is_under_program_data(self):
+        # Run #1564: staging under the parent user's profile Temp is not
+        # traversable by the runner user, so the spawn fails with Win32
+        # error 267. Windows isolated runs stage under %ProgramData%.
+        if os.name != "nt":
+            self.skipTest("Windows isolation staging dir is a Windows-only path")
+        staging = _windows_isolation_staging_dir()
+        try:
+            self.assertTrue(staging.is_dir())
+            self.assertEqual(staging.parent.name, "usit-staging")
+            self.assertTrue(
+                os.path.normcase(str(staging)).startswith(
+                    os.path.normcase(os.environ["ProgramData"])))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_windows_isolation_staging_dir_refuses_non_windows(self):
+        if os.name == "nt":
+            self.skipTest("non-Windows refusal is a POSIX-only check")
+        with self.assertRaisesRegex(ValueError, "requires a Windows platform"):
+            _windows_isolation_staging_dir()
+
+    def test_windows_isolation_staging_dir_requires_program_data(self):
+        if os.name != "nt":
+            self.skipTest("ProgramData requirement is a Windows-only check")
+        with patch.dict(os.environ, {"ProgramData": ""}):
+            with self.assertRaisesRegex(ValueError, "ProgramData"):
+                _windows_isolation_staging_dir()
+
+    def test_windows_grant_read_access_rejects_empty_arguments(self):
+        if os.name != "nt":
+            self.skipTest("grant_read_access needs the Windows runner module")
+        from usit import windows_runner
+
+        with self.assertRaisesRegex(ValueError, "non-empty username"):
+            windows_runner.grant_read_access([self.project], "")
+        with self.assertRaisesRegex(ValueError, "at least one path"):
+            windows_runner.grant_read_access([], "usit-runner")
+
+    def test_windows_spawn_failure_names_the_working_directory(self):
+        # A spawn that fails on its working directory must name that
+        # directory: the bare Win32 code alone (Run #1564: error 267)
+        # does not say which directory was unusable.
+        isolated = self._windows_runner_user_for_isolation()
+        if isolated is None:
+            self.skipTest("Windows isolation integration tests need an administrator parent and USIT_TEST_RUNNER_USER + USIT_RUNNER_PASSWORD")
+        runner_user, runner_password = isolated
+        from usit import windows_runner
+
+        missing = Path(os.environ["ProgramData"]) / "usit-staging" / "usit-does-not-exist"
+        self.assertFalse(missing.exists())
+        with tempfile.TemporaryFile("w+b") as out, tempfile.TemporaryFile("w+b") as err:
+            with self.assertRaises(ValueError) as ctx:
+                windows_runner.spawn_as_user(
+                    [sys.executable, "-c", "pass"], cwd=missing, env=None,
+                    stdout_file=out, stderr_file=err,
+                    username=runner_user, password=runner_password,
+                )
+        self.assertIn(str(missing), str(ctx.exception))
+        self.assertNotIn(runner_password, str(ctx.exception))
 
     def test_windows_isolated_run_passes_and_records_runner_isolation(self):
         isolated = self._windows_runner_user_for_isolation()

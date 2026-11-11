@@ -86,8 +86,8 @@ jobs:
     # runner user is created with a random password that is masked and
     # passed to the test step through GITHUB_ENV only; it is never
     # printed, and the runner VM is discarded after the job. The parent
-    # (the Actions agent) runs as administrator, which
-    # LogonUser/CreateProcessAsUser requires.
+    # (the Actions agent) runs as administrator, which the Windows
+    # isolation spawn (CreateProcessWithLogonW) requires.
     runs-on: windows-latest
     env:
       PYTHONUTF8: "1"

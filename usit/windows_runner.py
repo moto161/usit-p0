@@ -254,6 +254,40 @@ def grant_modify_access(paths, username: str) -> None:
             raise ValueError(f"icacls grant failed for the runner user: {detail[:500]}")
 
 
+def grant_read_access(paths, username: str, *, recursive: bool = False) -> None:
+    """Grant a local user Read & Execute on the given paths via icacls (fail-closed).
+
+    Used for the staging tree of a Windows isolated run: the runner user
+    must be able to traverse into staging and read the staged sources
+    (the two output files and HOME/TMPDIR get Modify separately, via
+    :func:`grant_modify_access`). With ``recursive=True`` the grant covers
+    the whole existing tree (icacls ``/T``); without it, only the named
+    paths. Raises ValueError when icacls is unavailable or exits non-zero;
+    the username is not a secret and never appears in a password context.
+    """
+    import subprocess
+
+    if not username or not isinstance(username, str):
+        raise ValueError("grant_read_access requires a non-empty username string")
+    targets = [str(path) for path in paths]
+    if not targets or any(not target for target in targets):
+        raise ValueError("grant_read_access requires at least one path")
+    for target in targets:
+        command = ["icacls", target, "/grant", f"{username}:(RX)"]
+        if recursive:
+            command.append("/T")
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True, text=True, timeout=120,
+            )
+        except OSError as exc:
+            raise ValueError(f"icacls grant failed for the runner user: {type(exc).__name__}") from exc
+        if result.returncode != 0:
+            detail = (result.stdout.strip() + " " + result.stderr.strip()).strip()
+            raise ValueError(f"icacls grant failed for the runner user: {detail[:500]}")
+
+
 def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, username, password) -> WindowsProcess:
     """Spawn ``command`` (argv list) as a dedicated local Windows user.
 
@@ -302,7 +336,12 @@ def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, username, pass
             env_block, str(cwd), ctypes.byref(startup), ctypes.byref(info),
         )
         if not ok:
-            raise _win32_error("spawning the runner child process")
+            # Name the working directory in the failure: CreateProcessWithLogonW
+            # reports an unusable current directory only as a bare Win32 code
+            # (Run #1564: error 267 for a staging dir under the parent user's
+            # profile Temp, which the runner user cannot traverse), and the
+            # directory is the first thing to check. The cwd holds no secret.
+            raise _win32_error(f"spawning the runner child process (cwd={cwd})")
         try:
             _kernel32.CloseHandle(info.hThread)
         except OSError:

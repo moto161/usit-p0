@@ -628,6 +628,38 @@ def _make_staging_read_only(root: Path, writable_files: frozenset[str] = _WRITAB
         raise ValueError(f"staging read-only hardening failed: {type(exc).__name__}: {exc}") from exc
 
 
+def _windows_isolation_staging_dir() -> Path:
+    """Create a staging directory the Windows runner user can reach (E1).
+
+    The staging tree is the test process's working directory, so
+    CreateProcessWithLogonW must be able to open it as the runner user.
+    The default system temp root on Windows is the parent user's profile
+    Temp (``C:\\Users\\<parent>\\AppData\\Local\\Temp``), whose ancestor
+    chain denies other local users outright -- the runner user cannot
+    even traverse into it, and the spawn fails with Win32 error 267
+    (ERROR_DIRECTORY, Run #1564). So a Windows isolated run stages under
+    ``%ProgramData%\\usit-staging`` instead: ProgramData is the shared
+    machine location, traversable and readable by every local user, and
+    the admin parent creates the root. Any failure creating the root or
+    the staging dir refuses the run (fail-closed); there is no silent
+    fallback to the profile temp, which is known to fail at spawn.
+    """
+    if os.name != "nt":
+        raise ValueError("Windows isolation staging requires a Windows platform")
+    program_data = os.environ.get("ProgramData")
+    if not program_data:
+        raise ValueError("Windows isolation staging requires the ProgramData environment variable")
+    root = Path(program_data) / "usit-staging"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"cannot create the shared Windows staging root: {type(exc).__name__}") from exc
+    try:
+        return Path(tempfile.mkdtemp(prefix=".usit-stage-", dir=root)).resolve()
+    except OSError as exc:
+        raise ValueError(f"cannot create the Windows isolation staging directory: {type(exc).__name__}") from exc
+
+
 def _minimal_environment(staging: Path) -> dict[str, str]:
     env: dict[str, str] = {}
     for key in ("PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "LANG", "LC_ALL", "TZ"):
@@ -703,8 +735,9 @@ def run_controlled_pytest(
         staging_source_mode = "WRITABLE"
     elif os.name == "nt":
         runner_isolation = f"WINDOWS_USER:{runner_user_name}"
-        # E1: no explicit read-only hardening yet (E2 adds icacls ACLs);
-        # the tree is isolated only by cross-user ownership.
+        # E1: the tree is explicitly granted Read & Execute for the runner
+        # user (see the icacls grants below), but no explicit write deny
+        # yet -- that is E2, which flips this to READ_ONLY.
         staging_source_mode = "NOT_HARDENED"
     else:
         runner_isolation = f"POSIX_USER:{runner_user_name}"
@@ -721,8 +754,10 @@ def run_controlled_pytest(
         isolation_limitation = (
             f"The test process ran as dedicated Windows user {runner_user_name}: it cannot write "
             "the evidence directory, the HMAC key file, or the original project tree. The staged "
-            "source tree is isolated only by cross-user ownership in E1 (no explicit read-only "
-            "hardening yet; E2 adds icacls ACLs). Its JUnit report and runtime-imports manifest "
+            "source tree lives under %ProgramData% so the runner user can traverse into it, and "
+            "is explicitly granted read-only (Read & Execute) for the runner user in E1, with "
+            "only the JUnit report, the runtime-imports manifest and HOME/TMPDIR writable; "
+            "explicit write denies (E2) are still pending. Its JUnit report and runtime-imports manifest "
             "travel through staging files (Windows has no parent-held pipe channel), so it can "
             "still write false data into them, bounded by the stdout summary cross-check and the "
             "snapshot binding, so provenance_authenticity_status stays UNAUTHENTICATED. It can "
@@ -762,7 +797,14 @@ def run_controlled_pytest(
     # evidence dir would let it enumerate ".." and reach run_* evidence.
     # (Depth-in-depth only: /proc can still reveal the parent, so this does
     # not replace UID isolation; it just closes the trivial enumeration path.)
-    staging = Path(tempfile.mkdtemp(prefix=".usit-stage-")).resolve()
+    # Exception: a Windows isolated run stages under %ProgramData% instead
+    # (see _windows_isolation_staging_dir) -- the profile temp root is not
+    # traversable by the runner user, so spawning there fails with Win32
+    # error 267 (Run #1564).
+    if os.name == "nt" and runner_user_name is not None:
+        staging = _windows_isolation_staging_dir()
+    else:
+        staging = Path(tempfile.mkdtemp(prefix=".usit-stage-")).resolve()
     try:
         source_files = _extract_archive(archive, staging)
         source_manifest = {"schema_version": "usit-manifest-v1", "git_commit": head, "files": source_files}
@@ -864,13 +906,17 @@ def run_controlled_pytest(
             _make_staging_read_only(
                 staging, frozenset() if _PIPE_CHANNEL else _WRITABLE_STAGING_FILES)
         if runner_user_name is not None and os.name == "nt":
-            # E1: the runner user must be able to write exactly the four
-            # paths it legitimately writes (the two pre-created output files
-            # and HOME/TMPDIR); everything else in staging stays owned by
-            # the parent (cross-user isolation until E2 adds icacls denies).
-            # Any icacls failure refuses the run (fail-closed).
+            # E1: the runner user must be able to traverse into staging and
+            # read the staged sources (explicit recursive Read & Execute, so
+            # the run does not depend on the ProgramData ACL alone), and to
+            # write exactly the four paths it legitimately writes (the two
+            # pre-created output files and HOME/TMPDIR). Everything else in
+            # staging stays owned by the parent and unwritable by the runner
+            # user until E2 adds explicit icacls denies. Any icacls failure
+            # refuses the run (fail-closed).
             from usit import windows_runner
 
+            windows_runner.grant_read_access([staging], runner_user_name, recursive=True)
             windows_runner.grant_modify_access(
                 [staging / ".usit-junit.xml", staging / ".usit-runtime-imports.json",
                  staging / ".usit-home", staging / ".usit-tmp"],
