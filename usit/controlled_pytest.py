@@ -26,13 +26,23 @@ from xml.etree import ElementTree as ET
 
 from .safeio import read_bounded_no_follow
 from .test_execution_provenance import (
-    SCHEMA_VERSION, canonical_json_bytes, sha256_hex, validate_execution_provenance,
+    MAX_REPORT_BYTES, SCHEMA_VERSION, canonical_json_bytes, sha256_hex,
+    validate_execution_provenance,
 )
 from .verification_capture import capture_run, verify_manifest
 
 AUTH_SCHEMA = "usit-test-execution-authorization-v1"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_FILES = 50_000
+MAX_RUNTIME_IMPORTS_BYTES = 50 * 1024 * 1024
+
+
+def _read_execution_artifact(path: str | os.PathLike[str], limit: int, label: str) -> bytes:
+    """Read a runner-produced artifact with a hard cap and final-component no-follow."""
+    try:
+        return read_bounded_no_follow(path, limit)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{label} is not a bounded regular file: {type(exc).__name__}") from exc
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 
@@ -449,13 +459,15 @@ def run_controlled_pytest(
                 "evidence_dir": str(evidence), "reason": "pytest did not produce a JUnit report",
                 "provenance_authenticity_status": "UNAUTHENTICATED",
             }
-        report_bytes = report_source.read_bytes()
+        report_bytes = _read_execution_artifact(report_source, MAX_REPORT_BYTES, "JUnit report")
         runtime_path = staging / ".usit-runtime-imports.json"
         runtime_imports = None
         runtime_imports_bytes = b""
         runtime_imports_errors: list[str] = []
         try:
-            runtime_imports_bytes = runtime_path.read_bytes()
+            runtime_imports_bytes = _read_execution_artifact(
+                runtime_path, MAX_RUNTIME_IMPORTS_BYTES, "runtime imports manifest"
+            )
             runtime_imports = json.loads(runtime_imports_bytes.decode("utf-8"))
             if not isinstance(runtime_imports, dict) or runtime_imports.get("schema_version") != "usit-runtime-imports-v1":
                 raise ValueError("unsupported runtime imports schema")
