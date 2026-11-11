@@ -119,6 +119,13 @@ class AndroidEventAdapterTests(unittest.TestCase):
             adapt_android_jsonl("not-bytes", self.graph, self.graph_hash,
                                 "s1", "2026-11-01T12:00:00+08:00")
 
+    def test_in_memory_adapter_rejects_oversized_input_before_decode(self):
+        from usit.android_event_adapter import MAX_INPUT_BYTES
+        oversized = b"x" * (MAX_INPUT_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "exceeds size limit"):
+            adapt_android_jsonl(oversized, self.graph, self.graph_hash,
+                                "s1", "2026-11-01T12:00:00+08:00")
+
     def test_rejects_duplicate_ids_and_timezone_less_timestamps(self):
         records = [dict(row) for row in self.records[:2]]
         records[1]["event_id"] = records[0]["event_id"]
