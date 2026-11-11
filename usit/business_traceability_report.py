@@ -64,6 +64,13 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                 f"拓扑：{_cell(correlation.get('parent_topology_status') or 'NOT_PROVIDED')}；"
                 f"父子关联覆盖：{_cell(correlation.get('parent_link_coverage_ratio') if correlation.get('parent_link_coverage_ratio') is not None else 'NOT_PROVIDED')}"
             )
+            attribution = correlation.get("function_attribution_status")
+            if attribution:
+                function_ids = _items(correlation.get("function_ids_in_correlation"))
+                lines.append(
+                    f"  - 业务功能归属：{_cell(attribution)}；"
+                    f"关联功能：{_cell(', '.join(map(str, function_ids)) if function_ids else '未提供')}"
+                )
             event_ids = _items(correlation.get("observed_event_ids_by_timestamp"))
             if event_ids:
                 lines.append(f"  - 事件审阅顺序（非因果）：{_cell(' → '.join(map(str, event_ids)))}")
