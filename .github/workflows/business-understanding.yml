@@ -44,6 +44,33 @@ jobs:
         run: |
           python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text(chr(10).join(['### Full repository regression (diagnostic)', '', '- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**', '- This run is non-gating; targeted business-understanding/security tests and USIT self-test are the required gates.']) + chr(10), encoding='utf-8')"
 
+  isolation-regression:
+    # Optional (non-required) Linux job: runs the same gate list as
+    # business-understanding, but as root with USIT_TEST_RUNNER_USER set,
+    # so the UID isolation integration tests in test_controlled_pytest.py
+    # actually run instead of skipping. GitHub Actions runners are
+    # non-root, so the gate step needs sudo; $(which python) is used
+    # because the setup-python interpreter is outside sudo's secure_path.
+    runs-on: ubuntu-latest
+    env:
+      USIT_TEST_RUNNER_USER: usit-runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pinned Python runtime dependencies
+        run: python -m pip install 'cryptography==50.0.2' 'pytest==8.3.5'
+      - name: Install the pinned local TypeScript parser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Create dedicated runner user (idempotent)
+        run: id -u usit-runner >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin usit-runner
+      - name: Run required gate as root with dedicated runner user
+        run: sudo -E "$(which python)" -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_test_result_importer tests.test_pytest_result_importer tests.test_test_report_adapters tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_verification_gap_analyzer tests.test_project_quality_assessment tests.test_business_traceability tests.test_traceability_cli_io tests.test_traceability_template tests.test_business_graph tests.test_graph_validation tests.test_graph_argument_bindings tests.test_database_access tests.test_permission_evidence tests.test_python_resolver tests.test_security_test_planner tests.test_identity_evidence tests.test_identity_graph tests.test_runtime_evidence tests.test_android_event_adapter tests.test_ai_gateway tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_ai_evidence_binding  tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_execution_provenance tests.test_evidence_signing tests.test_controlled_pytest tests.test_verification_capture tests.test_p074_identity_ctime tests.test_p0710zrf12_content_verification tests.test_p079_public_paths tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_js_ts_adapter_regressions -v
+
   windows-regression:
     runs-on: windows-latest
     env:
