@@ -2,11 +2,20 @@
 
 This module is the Windows counterpart of the POSIX ``subprocess.Popen(user=...)``
 path in :mod:`usit.verification_capture`: it runs a command as a dedicated
-low-privilege local Windows user through ``LogonUserW`` +
-``CreateProcessAsUserW`` (``ctypes`` only, no new dependency).
+low-privilege local Windows user through ``CreateProcessWithLogonW``
+(``ctypes`` only, no new dependency).
 
 Importing this module on a non-Windows platform raises ``ValueError``
 immediately; callers must import it lazily inside the Windows branch only.
+
+Mechanism note (Run #1563): the first implementation used
+``LogonUser`` + ``CreateProcessAsUser``, but that needs
+SeAssignPrimaryTokenPrivilege, which an administrator token does not
+hold by default (it is granted only to LOCAL SERVICE / NETWORK
+SERVICE), so the spawn failed with Win32 error 1300 on the CI runner.
+``CreateProcessWithLogonW`` performs the logon itself and does not need
+that privilege -- it is the same call ``runas`` uses, and it works from
+an administrator parent with the target user's password.
 
 Security rules (fail-closed, mirroring the POSIX path):
 
@@ -45,9 +54,6 @@ _kernel32 = ctypes.WinDLL("kernel32", use_errno=True, use_last_error=True)
 _netapi32 = ctypes.WinDLL("netapi32", use_errno=True, use_last_error=True)
 _shell32 = ctypes.WinDLL("shell32", use_errno=True, use_last_error=True)
 
-LOGON32_LOGON_INTERACTIVE = 2
-LOGON32_LOGON_BATCH = 4
-LOGON32_PROVIDER_DEFAULT = 0
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
 CREATE_NO_WINDOW = 0x08000000
 STARTF_USESTDHANDLES = 0x00000100
@@ -62,34 +68,9 @@ DWORD = wintypes.DWORD
 BOOL = wintypes.BOOL
 LPWSTR = wintypes.LPWSTR
 
-TOKEN_ADJUST_PRIVILEGES = 0x00000020
-TOKEN_QUERY = 0x00000008
-SE_PRIVILEGE_ENABLED = 0x00000002
-ERROR_NOT_ALL_ASSIGNED = 1300
 
-
-class LUID(ctypes.Structure):
-    _fields_ = [("LowPart", DWORD), ("HighPart", ctypes.c_long)]
-
-
-class LUID_AND_ATTRIBUTES(ctypes.Structure):
-    _fields_ = [("Luid", LUID), ("Attributes", DWORD)]
-
-
-class TOKEN_PRIVILEGES(ctypes.Structure):
-    _fields_ = [("PrivilegeCount", DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
-
-
-_advapi32.LogonUserW.argtypes = [LPWSTR, LPWSTR, LPWSTR, DWORD, DWORD, ctypes.POINTER(HANDLE)]
-_advapi32.LogonUserW.restype = BOOL
-_advapi32.OpenProcessToken.argtypes = [HANDLE, DWORD, ctypes.POINTER(HANDLE)]
-_advapi32.OpenProcessToken.restype = BOOL
-_advapi32.LookupPrivilegeValueW.argtypes = [LPWSTR, LPWSTR, ctypes.POINTER(LUID)]
-_advapi32.LookupPrivilegeValueW.restype = BOOL
-_advapi32.AdjustTokenPrivileges.argtypes = [HANDLE, BOOL, ctypes.POINTER(TOKEN_PRIVILEGES), DWORD, ctypes.c_void_p, ctypes.c_void_p]
-_advapi32.AdjustTokenPrivileges.restype = BOOL
-_kernel32.CreateProcessAsUserW.argtypes = [HANDLE, LPWSTR, LPWSTR, ctypes.c_void_p, ctypes.c_void_p, BOOL, DWORD, ctypes.c_void_p, LPWSTR, ctypes.c_void_p, ctypes.c_void_p]
-_kernel32.CreateProcessAsUserW.restype = BOOL
+_advapi32.CreateProcessWithLogonW.argtypes = [LPWSTR, LPWSTR, LPWSTR, DWORD, LPWSTR, LPWSTR, DWORD, ctypes.c_void_p, LPWSTR, ctypes.c_void_p, ctypes.c_void_p]
+_advapi32.CreateProcessWithLogonW.restype = BOOL
 _kernel32.SetHandleInformation.argtypes = [HANDLE, DWORD, DWORD]
 _kernel32.SetHandleInformation.restype = BOOL
 _kernel32.WaitForSingleObject.argtypes = [HANDLE, DWORD]
@@ -100,8 +81,6 @@ _kernel32.TerminateProcess.argtypes = [HANDLE, wintypes.UINT]
 _kernel32.TerminateProcess.restype = BOOL
 _kernel32.CloseHandle.argtypes = [HANDLE]
 _kernel32.CloseHandle.restype = BOOL
-_kernel32.GetCurrentProcess.argtypes = []
-_kernel32.GetCurrentProcess.restype = HANDLE
 _netapi32.NetUserGetInfo.argtypes = [LPWSTR, LPWSTR, DWORD, ctypes.POINTER(ctypes.c_void_p)]
 _netapi32.NetUserGetInfo.restype = DWORD
 _netapi32.NetApiBufferFree.argtypes = [ctypes.c_void_p]
@@ -163,26 +142,6 @@ def user_exists(username: str) -> bool:
     return status == NERR_SUCCESS
 
 
-def logon_user_primary_token(username: str, password: str, *, logon_type: int = LOGON32_LOGON_INTERACTIVE):
-    """Return a primary token HANDLE for a local user (caller must CloseHandle it).
-
-    ``domain`` is ``"."`` (the local machine). Raises ``ValueError`` on any
-    failure; the password is never included in the message.
-    """
-    if not isinstance(username, str) or not username:
-        raise ValueError("runner username must be a non-empty string")
-    if not isinstance(password, str) or not password:
-        raise ValueError("runner password must be a non-empty string")
-    if logon_type not in (LOGON32_LOGON_INTERACTIVE, LOGON32_LOGON_BATCH):
-        raise ValueError("unsupported Windows logon type")
-    token = HANDLE()
-    ok = _advapi32.LogonUserW(username, ".", password, logon_type,
-                              LOGON32_PROVIDER_DEFAULT, ctypes.byref(token))
-    if not ok:
-        raise _win32_error("Windows logon for the runner user")
-    return token
-
-
 def _environment_block(env: dict[str, str] | None) -> ctypes.Array | None:
     if env is None:
         return None
@@ -201,7 +160,7 @@ def _inheritable_handle(file_obj) -> int:
 
 
 class WindowsProcess:
-    """A minimal Popen-like handle around a CreateProcessAsUser child.
+    """A minimal Popen-like handle around a CreateProcessWithLogonW child.
 
     Only the operations :func:`usit.verification_capture.capture_run` needs
     are provided: :meth:`poll`, :meth:`terminate`, :meth:`kill`,
@@ -263,12 +222,6 @@ class WindowsProcess:
         self.terminate()
 
 
-def close_handle(handle) -> None:
-    """Best-effort CloseHandle for a token/process handle owned by the caller."""
-    if handle:
-        _kernel32.CloseHandle(handle)
-
-
 def grant_modify_access(paths, username: str) -> None:
     """Grant a local user Modify on the given paths via icacls (fail-closed).
 
@@ -301,49 +254,25 @@ def grant_modify_access(paths, username: str) -> None:
             raise ValueError(f"icacls grant failed for the runner user: {detail[:500]}")
 
 
-def _enable_privileges(names) -> None:
-    """Enable already-held privileges in the parent token (fail-closed).
+def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, username, password) -> WindowsProcess:
+    """Spawn ``command`` (argv list) as a dedicated local Windows user.
 
-    CreateProcessAsUser needs SeAssignPrimaryTokenPrivilege and
-    SeIncreaseQuotaPrivilege enabled in the caller's token. An
-    administrator token holds both but has them disabled by default;
-    enabling only affects this process's own token. AdjustTokenPrivileges
-    returns TRUE even when a privilege was not assigned, so the last
-    error must be checked fresh (ERROR_NOT_ALL_ASSIGNED = 1300).
-    """
-    process = _kernel32.GetCurrentProcess()
-    token = HANDLE()
-    if not _advapi32.OpenProcessToken(process, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ctypes.byref(token)):
-        raise _win32_error("opening the parent process token")
-    try:
-        for name in names:
-            luid = LUID()
-            if not _advapi32.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
-                raise _win32_error(f"looking up privilege {name}")
-            privileges = TOKEN_PRIVILEGES()
-            privileges.PrivilegeCount = 1
-            privileges.Privileges[0].Luid = luid
-            privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
-            ctypes.set_last_error(0)
-            if not _advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(privileges), 0, None, None):
-                raise _win32_error(f"enabling privilege {name}")
-            if ctypes.get_last_error() == ERROR_NOT_ALL_ASSIGNED:
-                raise ValueError(
-                    f"enabling privilege {name} failed: Win32 error {ERROR_NOT_ALL_ASSIGNED} (privilege not held)")
-    finally:
-        _kernel32.CloseHandle(token)
-
-
-def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, token) -> WindowsProcess:
-    """Spawn ``command`` (argv list) as the user behind ``token``.
-
-    ``token`` is a primary token HANDLE from :func:`logon_user_primary_token`
-    (the caller owns it; this function does not close it). ``stdout_file`` /
-    ``stderr_file`` are open binary file objects the child writes to;
-    stdin is the NUL device. Returns a :class:`WindowsProcess`.
+    Uses ``CreateProcessWithLogonW`` (the call ``runas`` uses): it performs
+    the logon itself from ``username``/``password`` (domain ``"."``, the
+    local machine; logon flags 0, so no user profile is loaded) and does
+    not need SeAssignPrimaryTokenPrivilege in the parent token -- the
+    privilege an administrator token does not hold by default, which is
+    what blocked the earlier LogonUser + CreateProcessAsUser path
+    (Run #1563, Win32 error 1300). ``stdout_file`` / ``stderr_file`` are
+    open binary file objects the child writes to; stdin is the NUL device.
+    The password is never logged or stored. Returns a :class:`WindowsProcess`.
     """
     if not command or any(not isinstance(part, str) or not part for part in command):
         raise ValueError("command must be a non-empty sequence of non-empty strings")
+    if not isinstance(username, str) or not username:
+        raise ValueError("runner username must be a non-empty string")
+    if not isinstance(password, str) or not password:
+        raise ValueError("runner password must be a non-empty string")
     from subprocess import list2cmdline
 
     command_line = ctypes.create_unicode_buffer(list2cmdline(list(command)))
@@ -360,9 +289,6 @@ def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, token) -> Wind
             raise _win32_error("marking the child stdin handle inheritable")
         stdout_handle = _inheritable_handle(stdout_file)
         stderr_handle = _inheritable_handle(stderr_file)
-        # CreateProcessAsUser needs these privileges enabled in the parent
-        # token (an administrator token holds them disabled by default).
-        _enable_privileges(("SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"))
         startup = STARTUPINFOW()
         startup.cb = ctypes.sizeof(startup)
         startup.dwFlags = STARTF_USESTDHANDLES
@@ -371,8 +297,8 @@ def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, token) -> Wind
         startup.hStdError = stderr_handle
         info = PROCESS_INFORMATION()
         flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW
-        ok = _kernel32.CreateProcessAsUserW(
-            token, None, command_line, None, None, True, flags,
+        ok = _advapi32.CreateProcessWithLogonW(
+            username, ".", password, 0, None, command_line, flags,
             env_block, str(cwd), ctypes.byref(startup), ctypes.byref(info),
         )
         if not ok:

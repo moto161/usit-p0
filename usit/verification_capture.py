@@ -230,7 +230,7 @@ def _resolve_runner_user(user: str | int | None) -> tuple[str | None, int | None
         raise ValueError("runner user must be a username string or a UID integer")
     if os.name == "nt":
         # E1: Windows isolation runs the test process as a dedicated local
-        # user via LogonUser/CreateProcessAsUser (see usit.windows_runner).
+        # user via CreateProcessWithLogonW (see usit.windows_runner).
         # The password is supplied separately at spawn time (capture_run's
         # user_password); resolution only checks the user exists and the
         # parent can hand out a primary token.
@@ -511,8 +511,7 @@ def capture_run(
     must exist, and uid 0 is refused. On Windows (E1) ``user`` names a
     dedicated local user and ``user_password`` (required, never logged, never
     stored in provenance) supplies its logon password for
-    ``LogonUser``/``CreateProcessAsUser``; the parent must run as
-    administrator. Any refusal raises ValueError before the process starts;
+    ``CreateProcessWithLogonW``; the parent must run as administrator. Any refusal raises ValueError before the process starts;
     there is no silent fallback to the parent identity.
 
     ``pipe_channels`` optionally hands the child parent-held pipe write ends
@@ -612,20 +611,19 @@ def capture_run(
                 try:
                     if os.name == "nt" and runner_user is not None:
                         # E1: Windows has no Popen(user=...); spawn through
-                        # LogonUser/CreateProcessAsUser. The token is the
-                        # parent's copy; it is closed once the child exists.
+                        # CreateProcessWithLogonW, which performs the logon
+                        # itself and needs no SeAssignPrimaryTokenPrivilege
+                        # in the parent token (the LogonUser +
+                        # CreateProcessAsUser path failed with Win32 error
+                        # 1300 on CI: an administrator token does not hold
+                        # that privilege by default).
                         if windows_runner is None:
                             raise ValueError("Windows runner support is unavailable on this platform")
-                        token = windows_runner.logon_user_primary_token(
-                            runner_user, user_password)
-                        try:
-                            process = windows_runner.spawn_as_user(
-                                list(command), cwd=work,
-                                env=None if env is None else dict(env),
-                                stdout_file=out_stream, stderr_file=err_stream,
-                                token=token)
-                        finally:
-                            windows_runner.close_handle(token)
+                        process = windows_runner.spawn_as_user(
+                            list(command), cwd=work,
+                            env=None if env is None else dict(env),
+                            stdout_file=out_stream, stderr_file=err_stream,
+                            username=runner_user, password=user_password)
                     else:
                         process = subprocess.Popen(
                             list(command), cwd=work, stdin=subprocess.DEVNULL,
