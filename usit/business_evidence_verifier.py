@@ -623,6 +623,20 @@ def verify_business_function_evidence(
                                 "index": index,
                             })
                             continue
+                        # C1: the candidate this executed case attributes
+                        # to, carried from the mapping through the
+                        # importer. Absent for hand-written mappings;
+                        # present-but-malformed is a conflict.
+                        candidate_test_id = item.get("candidate_test_id")
+                        if candidate_test_id is not None and (
+                            not isinstance(candidate_test_id, str) or not candidate_test_id.strip()
+                        ):
+                            conflicts.append({
+                                "kind": "INVALID_TEST_CASE_EVIDENCE",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            continue
                         raw_binding = item.get("test_source_binding_evidence")
                         binding_status = item.get("test_source_binding_status", "TEST_SOURCE_BINDING_NOT_PROVIDED")
                         allowed_binding_statuses = {
@@ -809,6 +823,7 @@ def verify_business_function_evidence(
                         })
                         test_case_evidence.append({
                             "test_case_id": item["test_case_id"],
+                            "candidate_test_id": candidate_test_id,
                             "status": item["status"],
                             "classname": item.get("classname"),
                             "name": item.get("name"),

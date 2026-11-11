@@ -448,15 +448,40 @@ def build_business_traceability(
         # (not per test case: executed test_case_ids and candidate
         # test_ids live in different ID spaces with no link, so the gate
         # can only say whether this function has any confirmed oracle).
+        # C1 refines it per test case when the executed cases carry a
+        # candidate_test_id (reserved by the planner): a PASSED case
+        # owned by a confirmed candidate supports the row; PASSED cases
+        # owned only by unconfirmed candidates do not. Without any
+        # candidate-linked case, the B2 per-function gate still applies.
         # A PASSED execution behind an unconfirmed oracle cannot support
         # the row: its test_execution stage becomes UNKNOWN. FAILED stays
         # FAILED -- a failure is observed regardless of oracle status.
+        confirmed_candidate_ids = {
+            str(item.get("test_id")) for item in candidate_items
+            if isinstance(item, dict) and isinstance(item.get("expected_result_confirmation"), dict)
+            and item.get("test_id") is not None
+        }
+        mapped_cases = test_execution_detail.get("mapped_test_cases", []) if isinstance(test_execution_detail, dict) else []
+        linked_cases = [
+            case for case in mapped_cases
+            if isinstance(case, dict) and isinstance(case.get("candidate_test_id"), str)
+        ]
         if not candidate_items:
             expected_result_confirmation_status = "NOT_APPLICABLE"
-        elif any(isinstance(item, dict) and isinstance(item.get("expected_result_confirmation"), dict) for item in candidate_items):
+            expected_result_confirmation_scope = "NOT_APPLICABLE"
+        elif linked_cases:
+            expected_result_confirmation_scope = "PER_TEST_CASE"
+            passed_linked = [case for case in linked_cases if case.get("status") == "PASSED"]
+            if any(case["candidate_test_id"] in confirmed_candidate_ids for case in passed_linked):
+                expected_result_confirmation_status = "CONFIRMED"
+            else:
+                expected_result_confirmation_status = "UNCONFIRMED"
+        elif confirmed_candidate_ids:
             expected_result_confirmation_status = "CONFIRMED"
+            expected_result_confirmation_scope = "PER_FUNCTION"
         else:
             expected_result_confirmation_status = "UNCONFIRMED"
+            expected_result_confirmation_scope = "PER_FUNCTION"
         if expected_result_confirmation_status == "UNCONFIRMED" and runtime_status == "PASSED":
             runtime_status = "UNKNOWN"
         stages = {
@@ -530,12 +555,17 @@ def build_business_traceability(
             "stage_parser_scope": {stage: list(codes) for stage, codes in STAGE_PARSER_SCOPE.items()},
             # B2 G4: whether any linked candidate's expected result was
             # confirmed (CONFIRMED / UNCONFIRMED / NOT_APPLICABLE).
+            # C1: which granularity the gate used (PER_TEST_CASE when
+            # executed cases carried a candidate_test_id, else
+            # PER_FUNCTION).
             "expected_result_confirmation_status": expected_result_confirmation_status,
+            "expected_result_confirmation_scope": expected_result_confirmation_scope,
             "endpoint": {"method": view.get("method"), "path": view.get("endpoint")} if view else None,
             "test_candidate_ids": sorted(str(item.get("test_id")) for item in candidate_items if item.get("test_id") is not None),
             "test_candidates": [
                 {
                     "test_id": item.get("test_id"),
+                    "test_case_id": item.get("test_case_id"),
                     "category": item.get("category"),
                     "target": item.get("target"),
                     "purpose": item.get("purpose"),
@@ -606,7 +636,8 @@ def build_business_traceability(
             "映射 manifest 绑定精确 graph SHA-256；图谱变化后必须重新审阅或重新生成映射，旧映射不会自动迁移。",
             "共享 correlation 的运行时观察不归属到单个功能；该功能的行状态不升为 TRACEABLE_WITH_RUNTIME_EVIDENCE，观察阶段记 SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED。",
             "共享 correlation 有逐事件归属时，归属来自采集端声明与事件自带字段，未经独立验证；声明与事件一致只证明自述无矛盾，不证明事件真实属于该功能；父子拓扑仍为 correlation 层级。",
-            "预期结果确认门禁按功能判定，不按用例判定；已执行测试 ID 与候选 ID 无链接，不能证明通过的用例恰好是已确认的候选。",
+            "预期结果确认门禁在用例带 planner 预留 test_case_id 时按用例判定，否则按功能判定；无候选归属的用例不能证明通过的恰好是已确认的候选。",
+            "逐用例确认门禁只覆盖用了 planner 预留 test_case_id 的用例；手写映射、无候选归属的用例仍走逐功能门禁；预留 ID 本身不证明用例真的测了该候选（用例体与 ID 均由作者填写，错填 ID 会导致错误归属）。",
             "预期结果确认记录（reviewed_by/reviewed_at/rationale）只校验存在与格式合法，不验证确认人确为业务负责人；业务负责人身份由流程保证。",
             "运行时一致性只比对事件显式字段与静态视图；UI 组件名与静态入口文件无可靠等值关系时记 NOT_CHECKED，不判冲突。",
             "reviewed_by/reviewed_at/rationale 是审阅者提供的审计元数据，不构成身份认证或电子签名。",

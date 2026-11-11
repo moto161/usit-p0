@@ -62,7 +62,9 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
         confirmation_status = row.get("expected_result_confirmation_status")
         if confirmation_status:
             note = "；预期结果未经业务负责人确认，测试通过不证明业务正确" if confirmation_status == "UNCONFIRMED" else ""
-            lines.append(f"- 预期结果确认（业务负责人）：{_cell(confirmation_status)}{note}")
+            scope = row.get("expected_result_confirmation_scope")
+            scope_text = f"；判定粒度：{_cell(scope)}" if isinstance(scope, str) and scope else ""
+            lines.append(f"- 预期结果确认（业务负责人）：{_cell(confirmation_status)}{note}{scope_text}")
         runtime_evidence = row.get("runtime_evidence")
         runtime_evidence = runtime_evidence if isinstance(runtime_evidence, dict) else {}
         source_version = runtime_evidence.get("source_version_binding_status")
@@ -159,6 +161,8 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                     f"  - {_cell(candidate.get('test_id'))} / {_cell(candidate.get('category'))}："
                     f"{_cell(candidate.get('purpose'))}"
                 )
+                if candidate.get("test_case_id"):
+                    lines.append(f"    - 预留 test_case_id：{_cell(candidate.get('test_case_id'))}")
                 lines.append(
                     f"    - 设计状态：{_cell(candidate.get('design_status'))}；"
                     f"执行状态：{_cell(candidate.get('execution_status'))}；"

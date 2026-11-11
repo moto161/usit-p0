@@ -21,6 +21,85 @@ def _stable_id(kind: str, payload: Mapping[str, Any]) -> str:
     return f"bt-{kind}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}"
 
 
+def _reserved_test_case_id(test_id: str, function_id: str) -> str:
+    """C1: the deterministic reserved pytest nodeid for one
+    (candidate, business function) pair. Only [a-z0-9_]: the test id
+    and function id with '-' rewritten to '_'. The function suffix is
+    always present: one candidate design may serve several functions
+    (same method+endpoint matched by several function views), and
+    without it those functions would collide on one test_case_id and
+    the importer would reject the mapping as duplicate. The ID is a
+    reservation only -- the test body does not exist yet; the author
+    uses this ID when writing the test so its result attributes back
+    to this exact candidate."""
+    safe_test = test_id.replace("-", "_")
+    safe_function = function_id.replace("-", "_")
+    return f"tests/test_usit_generated.py::test_{safe_test}_{safe_function}"
+
+
+def assign_reserved_test_case_ids(candidates: list[dict[str, Any]]) -> int:
+    """C1: give every candidate linked to a business function its
+    reserved test_case_id. Candidates without a function link get
+    none. Returns the number of reservations made."""
+    reserved = 0
+    for candidate in candidates:
+        function_id = candidate.get("business_function_id")
+        test_id = candidate.get("test_id")
+        if isinstance(function_id, str) and function_id and isinstance(test_id, str) and test_id:
+            candidate["test_case_id"] = _reserved_test_case_id(test_id, function_id)
+            reserved += 1
+    return reserved
+
+
+def build_test_case_mapping(
+    business_plan: Mapping[str, Any] | None,
+    security_plan: Mapping[str, Any] | None,
+    graph_sha256: str,
+) -> dict[str, Any]:
+    """C1: build the usit-test-result-mapping-v1 document the test
+    result importer consumes, from the reserved test_case_ids of both
+    plans. Only candidates that carry both test_case_id and
+    business_function_id produce an entry. test_source_file/line/sha256
+    stay absent: the test body is not written yet; the author fills
+    them in when writing the test (the importer only checks source
+    binding for cases actually present in a report)."""
+    if not isinstance(graph_sha256, str) or len(graph_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in graph_sha256
+    ):
+        raise ValueError("graph_sha256 must be a lowercase SHA-256 digest")
+    mappings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for plan in (business_plan, security_plan):
+        candidates = plan.get("candidates", []) if isinstance(plan, Mapping) else []
+        if not isinstance(candidates, list):
+            raise ValueError("test plan candidates must be a list")
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            test_case_id = candidate.get("test_case_id")
+            function_id = candidate.get("business_function_id")
+            test_id = candidate.get("test_id")
+            if not (isinstance(test_case_id, str) and test_case_id
+                    and isinstance(function_id, str) and function_id
+                    and isinstance(test_id, str) and test_id):
+                continue
+            if test_case_id in seen:
+                raise ValueError(f"duplicate reserved test_case_id: {test_case_id}")
+            seen.add(test_case_id)
+            mappings.append({
+                "test_case_id": test_case_id,
+                "business_function_id": function_id,
+                "candidate_test_id": test_id,
+                "usit_reserved": True,
+            })
+    mappings.sort(key=lambda item: item["test_case_id"])
+    return {
+        "schema_version": "usit-test-result-mapping-v1",
+        "source_graph_sha256": graph_sha256,
+        "mappings": mappings,
+    }
+
+
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -498,6 +577,10 @@ def plan_business_tests(semantics: Mapping[str, Any], business_graph: Mapping[st
         raise ValueError(f"candidate limit exceeded: {len(candidates)} > {_PLAN_LIMIT}")
 
     candidates.sort(key=lambda item: (item["category"], item["target"], item["test_id"]))
+    # C1: reserve a deterministic test_case_id per (candidate, function)
+    # pair so results written under that ID attribute back to this
+    # exact candidate. Candidates without a function link get none.
+    assign_reserved_test_case_ids(candidates)
     counts: dict[str, int] = {}
     for item in candidates:
         counts[item["category"]] = counts.get(item["category"], 0) + 1

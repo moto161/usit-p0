@@ -291,6 +291,31 @@ def build_verification_gap_backlog(
                 "该业务功能已链接的测试候选预期结果均未被业务负责人确认；即使测试通过，也不能作为业务正确证据。",
                 "由业务负责人依据已批准的验收标准确认候选预期结果，并在测试计划中记录确认人、时间与理由后重新生成追溯矩阵。",
                 refs,fid)
+        # C1: a linked candidate whose reserved test_case_id never ran,
+        # while the function does have executed cases. Functions with
+        # no executed case at all never get this gap (the existing
+        # NO_RUNTIME_TEST_EVIDENCE / INCONCLUSIVE_TEST_EVIDENCE covers
+        # that); the mapped_test_cases non-empty guard is the scope.
+        if isinstance(trace_row, dict) and runtime:
+            runtime_evidence = trace_row.get("runtime_evidence")
+            detail = runtime_evidence.get("test_execution_detail") if isinstance(runtime_evidence, dict) else None
+            cases = detail.get("mapped_test_cases") if isinstance(detail, dict) else None
+            if isinstance(cases, list) and cases:
+                executed = {case.get("candidate_test_id") for case in cases
+                            if isinstance(case, dict) and isinstance(case.get("candidate_test_id"), str)}
+                for candidate in trace_row.get("test_candidates", []) or []:
+                    if not isinstance(candidate, dict):
+                        continue
+                    test_case_id = candidate.get("test_case_id")
+                    test_id = candidate.get("test_id")
+                    if (isinstance(test_case_id, str) and test_case_id
+                            and isinstance(test_id, str) and test_id
+                            and test_id not in executed):
+                        add("RESERVED_TEST_CASE_NOT_EXECUTED","BUSINESS_FUNCTION",fid,"P1",
+                            f"测试候选 {test_id} 已预留 test_case_id {test_case_id}，但该用例未在已导入的执行报告中出现；设计已生成，执行未发生。",
+                            "按预留 ID 编写并执行该候选的测试用例，导入执行报告后重新生成追溯矩阵；若候选不再适用，先修订测试计划。",
+                            refs,fid)
+                        break
 
     gaps.sort(key=lambda x:({"P0":0,"P1":1,"P2":2}.get(x["priority"],9),x["gap_kind"],x["target"],x["gap_id"]))
     counts=Counter(x["gap_kind"] for x in gaps)

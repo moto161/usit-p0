@@ -675,6 +675,14 @@ def ingest_junit_results(
             raise ValueError(f"mapping entry {index} has invalid test_case_id")
         if not isinstance(function_id, str) or function_id not in known_functions:
             raise ValueError(f"mapping entry {index} references unknown business_function_id")
+        # C1: a mapping entry may name the plan candidate this reserved
+        # test_case_id belongs to, so executed results attribute back to
+        # the exact candidate. Absent for hand-written mappings.
+        candidate_test_id = item.get("candidate_test_id")
+        if candidate_test_id is not None and (not isinstance(candidate_test_id, str) or not candidate_test_id.strip()):
+            raise ValueError(f"mapping entry {index} has invalid candidate_test_id")
+        if "usit_reserved" in item and not isinstance(item["usit_reserved"], bool):
+            raise ValueError(f"mapping entry {index} has invalid usit_reserved")
         case_id = case_id.strip()
         if case_id in explicit_map:
             raise ValueError(f"duplicate mapping for test_case_id: {case_id}")
@@ -706,7 +714,8 @@ def ingest_junit_results(
             source_binding.setdefault("declared_test_source_line", mapping_item.get("test_source_line"))
             source_binding.setdefault("declared_test_source_file_sha256", mapping_item.get("test_source_file_sha256"))
             mapped_cases[mapping_item["business_function_id"]].append({
-                **case, "test_source_binding_evidence": source_binding,
+                **case, "candidate_test_id": mapping_item.get("candidate_test_id"),
+                "test_source_binding_evidence": source_binding,
                 "test_source_binding_status": source_binding["status"],
                 "test_source_snapshot_binding_evidence": snapshot_binding,
                 "test_source_snapshot_binding_status": snapshot_binding["status"],

@@ -10,6 +10,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from .business_test_planner import assign_reserved_test_case_ids
+
 SCHEMA_VERSION = "usit-security-test-candidates-v1"
 _LIMIT = 10_000
 
@@ -360,6 +362,9 @@ def plan_security_tests(business_graph: Mapping[str, Any]) -> dict[str, Any]:
     if len(candidates) > _LIMIT:
         raise ValueError(f"security candidate limit exceeded: {len(candidates)} > {_LIMIT}")
     candidates.sort(key=lambda item: (item["category"], item["target"], item["test_id"]))
+    # C1: reserve a deterministic test_case_id per (candidate, function)
+    # pair, same rule as the business planner.
+    assign_reserved_test_case_ids(candidates)
     counts: dict[str, int] = {}
     for item in candidates:
         counts[item["category"]] = counts.get(item["category"], 0) + 1

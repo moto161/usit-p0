@@ -155,6 +155,20 @@ def _plan_business_tests(a) -> int:
             json.dumps(security_plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+    # C1: when a graph was supplied, also emit the test-case mapping the
+    # result importer consumes: one reserved test_case_id per linked
+    # (candidate, business function) pair, so results written under
+    # those IDs attribute back to the exact candidate. Without a graph
+    # there is no function linkage, so no mapping is written.
+    mapping = None
+    if business_graph is not None:
+        from .business_test_planner import build_test_case_mapping
+        mapping = build_test_case_mapping(
+            plan, security_plan, hashlib.sha256(business_graph_bytes).hexdigest())
+        (out / "test_case_mapping.json").write_text(
+            json.dumps(mapping, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     summary = {
         "project_root": str(project),
         "entity_count": semantics["entity_count"],
@@ -164,6 +178,9 @@ def _plan_business_tests(a) -> int:
         "test_candidate_count": plan["candidate_count"],
         "security_test_candidate_count": (
             security_plan["candidate_count"] if security_plan is not None else None
+        ),
+        "test_case_mapping_count": (
+            len(mapping["mappings"]) if mapping is not None else None
         ),
         "business_graph_linked_records": (
             business_graph.get("business_understanding", {}).get("linked_records", 0)
@@ -180,8 +197,9 @@ def _plan_business_tests(a) -> int:
             str(out / "business_test_plan.json"),
             *([str(out / "business_knowledge_graph.json")] if business_graph is not None else []),
             *([str(out / "security_test_candidates.json")] if security_plan is not None else []),
+            *([str(out / "test_case_mapping.json")] if mapping is not None else []),
         ],
-        "note": "Static business understanding and security test-candidate design only; candidates require requirements review and separate authorization. No build, test, database or network operation was executed.",
+        "note": "Static business understanding and security test-candidate design only; candidates require requirements review and separate authorization. Reserved test_case_ids (when a graph was supplied) name the IDs tests must use so results attribute back to the exact candidate; the test bodies themselves are not generated. No build, test, database or network operation was executed.",
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
