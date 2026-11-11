@@ -647,6 +647,131 @@ class BusinessTraceabilityTests(unittest.TestCase):
             build_business_traceability(self.semantics, self.graph, self.mapping,
                 input_hashes=self.hashes, runtime_evidence_validation=malformed)
 
+    # ---- B1: G3 shared-correlation row cap ----
+    def test_shared_correlation_caps_row_below_runtime_evidence(self):
+        graph = {
+            **self.graph,
+            "business_understanding": {
+                **self.graph["business_understanding"],
+                "business_function_views": [
+                    *self.graph["business_understanding"]["business_function_views"],
+                    {"business_function_id": "bf-delete"},
+                ],
+            },
+        }
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash},
+            "business_function_ids_observed": ["bf-list", "bf-delete"],
+            "correlations": [{
+                "correlation_id": "corr-shared",
+                "business_function_ids": ["bf-list", "bf-delete"],
+                "event_count": 3,
+                "observed_stages": ["ui", "http_request", "backend"],
+                "observed_event_ids_by_timestamp": ["evt-1", "evt-2", "evt-3"],
+                "explicit_parent_edges": [
+                    {"parent_event_id": "evt-1", "child_event_id": "evt-2"},
+                    {"parent_event_id": "evt-2", "child_event_id": "evt-3"},
+                ],
+                "parent_topology_status": "LINEAR_CHAIN",
+                "parent_link_coverage_ratio": 1.0,
+                "root_event_ids": ["evt-1"],
+                "leaf_event_ids": ["evt-3"],
+                "branching_parent_event_ids": [],
+                "isolated_event_ids": [],
+                "cycle_event_ids": [],
+            }],
+        }
+        evidence = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{"business_function_id": "bf-list",
+                "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL"}]}
+        result = build_business_traceability(
+            self.semantics, graph, self.mapping, evidence_matrix=evidence,
+            input_hashes=self.hashes, runtime_evidence_validation=runtime)
+        linked = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        # The shared correlation's observation cannot be attributed to
+        # this function alone, so the row must not rise to the runtime
+        # evidence state even though its tests passed.
+        self.assertEqual(linked["stage_status"]["runtime_observation"],
+                         "SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED")
+        self.assertEqual(linked["traceability_status"],
+                         "TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE")
+        self.assertNotEqual(linked["traceability_status"],
+                            "TRACEABLE_WITH_RUNTIME_EVIDENCE")
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED", markdown)
+
+    # ---- B1: G2 verifier consistency passes through to traceability ----
+    def test_runtime_static_mismatch_reaches_traceability_and_markdown(self):
+        runtime = {
+            "schema_version": "usit-runtime-evidence-validation-v1",
+            "assessment_status": "VALIDATED_EVENT_STRUCTURE",
+            "source_hashes": {"business_graph_sha256": self.graph_hash,
+                              "runtime_evidence_sha256": "b" * 64},
+            "business_function_ids_observed": ["bf-list"],
+            "correlations": [{"correlation_id": "corr-1", "business_function_ids": ["bf-list"],
+                "runtime_observation_status": "RUNTIME_OBSERVED"}],
+        }
+        evidence = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{
+                "business_function_id": "bf-list",
+                "test_execution_status": "PASSED", "code_coverage_status": "PARTIAL",
+                "verification_conclusion": "EVIDENCE_CONFLICT", "evidence_conflict": True,
+                "runtime_consistency_status": "MISMATCH",
+                "runtime_consistency_detail": {
+                    "compared_event_count": 1, "matched_event_count": 0,
+                    "mismatches": [{"event_id": "evt-9", "field": "route_template",
+                                    "expected": "/api/photos", "actual": "/api/photos/123"}]},
+            }]}
+        result = build_business_traceability(
+            self.semantics, self.graph, self.mapping, evidence_matrix=evidence,
+            input_hashes=self.hashes, runtime_evidence_validation=runtime)
+        linked = next(row for row in result["rows"] if row["feature_name"] == "查看照片")
+        self.assertEqual(linked["stage_status"]["runtime_observation"], "EVIDENCE_CONFLICT")
+        self.assertEqual(linked["runtime_observation"]["consistency"], "MISMATCH")
+        self.assertEqual(linked["traceability_status"], "EVIDENCE_CONFLICT")
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("evt-9", markdown)
+        self.assertIn("/api/photos/123", markdown)
+
+    # ---- B1: G6 parser scope annotation + drift test ----
+    def test_every_row_carries_stage_parser_scope(self):
+        result = build_business_traceability(self.semantics, self.graph, self.mapping,
+            input_hashes=self.hashes)
+        self.assertTrue(result["rows"])
+        for row in result["rows"]:
+            scope = row["stage_parser_scope"]
+            self.assertEqual(scope["business_function_to_frontend_entrypoint"], ["JSX_TSX_ONLY"])
+            self.assertEqual(scope["business_function_to_api_endpoint"], ["CALL_GRAPH_DEPTH_8"])
+            self.assertEqual(scope["api_to_backend_handler"], ["HANDLER_UNIQUE_SYMBOL_ONLY"])
+            self.assertEqual(scope["backend_call_chain"], ["CALL_GRAPH_DEPTH_8"])
+            self.assertEqual(scope["backend_to_database"], ["SQL_SINGLE_LINE_LITERAL_ONLY"])
+            self.assertEqual(scope["authorization_evidence"], ["AUTHORIZATION_LIMITED_PATTERNS_ONLY"])
+            self.assertEqual(scope["identity_resource_evidence"], ["SAME_LINE_IDENTITY_ONLY"])
+        markdown = render_business_traceability_markdown(result)
+        self.assertIn("解析口径", markdown)
+        self.assertIn("JSX_TSX_ONLY", markdown)
+
+    def test_parser_scope_limitation_text_matches_real_graph_limitations(self):
+        from usit.business_graph import project_business_graph
+        from usit.business_traceability import PARSER_SCOPE_LIMITATION_TEXT, STAGE_PARSER_SCOPE
+        graph = {"schema_version": "usit-graph-v1", "nodes": [
+            {"id": "file:docs/requirements.md", "type": "file",
+             "label": "docs/requirements.md", "evidence": {"path": "docs/requirements.md"}},
+        ], "edges": []}
+        semantics = {"features": [{"name": "查看照片", "source": "docs/requirements.md", "line": 12}]}
+        projected = project_business_graph(graph, semantics)
+        limitations = projected["business_understanding"]["limitations"]
+        for code, texts in PARSER_SCOPE_LIMITATION_TEXT.items():
+            for text in texts:
+                self.assertIn(text, limitations,
+                              f"parser scope {code} text drifted from graph limitations")
+        for stage, codes in STAGE_PARSER_SCOPE.items():
+            for code in codes:
+                self.assertIn(code, PARSER_SCOPE_LIMITATION_TEXT,
+                              f"stage {stage} code {code} has no limitation text mapping")
+
 
 if __name__ == "__main__":
     unittest.main()

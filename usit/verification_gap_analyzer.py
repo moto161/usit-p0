@@ -218,6 +218,19 @@ def build_verification_gap_backlog(
                     "测试执行状态缺失、无效、未执行、被跳过或结果未知，不能形成通过结论。",
                     "核对测试结果工件及状态映射；补齐测试前置条件后在获批环境执行，并保留原始报告。",
                     refs,fid)
+            # B1: the two new conflict kinds each get their own review
+            # signal. The generic P0 EVIDENCE_CONFLICT gap above already
+            # fires for the same row; these P1 entries name the cause.
+            if runtime.get("runtime_consistency_status")=="MISMATCH":
+                add("RUNTIME_STATIC_MISMATCH","BUSINESS_FUNCTION",fid,"P1",
+                    "运行时事件的显式字段（HTTP method/path、数据库操作/表）与该功能的静态视图不一致；组合结论已降级为证据冲突。",
+                    "核对采集端事件字段与静态图谱的 method/endpoint、数据库访问记录，确认哪一边过期或错误后重新采集或重新生成图谱。",
+                    refs,fid)
+            if runtime.get("source_version_binding_status")=="DIVERGENT":
+                add("TEST_COVERAGE_SOURCE_VERSION_DIVERGENCE","BUSINESS_FUNCTION",fid,"P1",
+                    "测试快照与覆盖率报告的源码哈希在重叠文件上不一致；两者可能来自同一执行的两次不同源码版本，组合结论已降级为证据冲突。",
+                    "用同一源码版本重新执行测试并重新采集覆盖率，或核对快照与覆盖率的来源记录。",
+                    refs,fid)
         if runtime.get("code_coverage_status") in {None,"NOT_MEASURED","UNKNOWN"}:
             add("CODE_COVERAGE_NOT_MEASURED","BUSINESS_FUNCTION",fid,"P2",
                 "没有可用的业务功能源码行覆盖率证据。",

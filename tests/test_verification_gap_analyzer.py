@@ -238,6 +238,44 @@ class VerificationGapAnalyzerTests(unittest.TestCase):
                 self.assertIn("INCONCLUSIVE_TEST_EVIDENCE", kinds)
                 self.assertNotIn("NO_RUNTIME_TEST_EVIDENCE", kinds)
 
+    # ---- B1: the two new conflict kinds get their own review signals ----
+    def test_runtime_static_mismatch_is_a_p1_gap_not_a_defect(self):
+        matrix = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{
+                "business_function_id": "bf-upload", "test_execution_status": "PASSED",
+                "code_coverage_status": "COVERED",
+                "verification_conclusion": "EVIDENCE_CONFLICT", "evidence_conflict": True,
+                "runtime_consistency_status": "MISMATCH"}]}
+        result = build_verification_gap_backlog(
+            {"features": [], "endpoint_contract_alignment": []},
+            {"schema_version": "usit-graph-v1", "business_understanding": {
+                "business_function_views": [{"business_function_id": "bf-upload"}]}},
+            None, matrix)
+        mismatch = next(x for x in result["gaps"] if x["gap_kind"] == "RUNTIME_STATIC_MISMATCH")
+        self.assertEqual(mismatch["priority"], "P1")
+        self.assertFalse(mismatch["defect_confirmed"])
+        self.assertEqual(mismatch["business_function_id"], "bf-upload")
+        # The generic P0 conflict gap still fires for the same row.
+        self.assertIn("EVIDENCE_CONFLICT", {x["gap_kind"] for x in result["gaps"]})
+
+    def test_source_version_divergence_is_a_p1_gap_not_a_defect(self):
+        matrix = {"schema_version": "usit-business-evidence-verification-v1",
+            "business_function_evidence": [{
+                "business_function_id": "bf-upload", "test_execution_status": "PASSED",
+                "code_coverage_status": "COVERED",
+                "verification_conclusion": "EVIDENCE_CONFLICT", "evidence_conflict": True,
+                "source_version_binding_status": "DIVERGENT"}]}
+        result = build_verification_gap_backlog(
+            {"features": [], "endpoint_contract_alignment": []},
+            {"schema_version": "usit-graph-v1", "business_understanding": {
+                "business_function_views": [{"business_function_id": "bf-upload"}]}},
+            None, matrix)
+        divergence = next(x for x in result["gaps"]
+                          if x["gap_kind"] == "TEST_COVERAGE_SOURCE_VERSION_DIVERGENCE")
+        self.assertEqual(divergence["priority"], "P1")
+        self.assertFalse(divergence["defect_confirmed"])
+        self.assertEqual(divergence["business_function_id"], "bf-upload")
+
 
 if __name__=="__main__":
     unittest.main()

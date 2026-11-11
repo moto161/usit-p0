@@ -701,6 +701,342 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         self.assertTrue(all(x["test_execution_status"]=="NOT_MEASURED" for x in result["business_function_evidence"]))
         self.assertTrue(all(x["code_coverage_status"]=="NOT_MEASURED" for x in result["business_function_evidence"]))
 
+    # ---- B1: G1 source-version binding (snapshot manifest vs coverage) ----
+    def _b1_graph(self):
+        graph = {"schema_version": "usit-graph-v1", "business_understanding": {
+            "business_function_views": [{
+                "business_function_id": "bf-upload", "endpoint_id": "ep-upload",
+                "method": "GET", "endpoint": "/api/photos",
+                "frontend_entrypoints": [{"source_file": "web/Photos.tsx", "event_line": 4}],
+                "database_accesses": [{"operation": "SELECT", "tables": ["photos"]}],
+            }, {
+                "business_function_id": "bf-delete", "endpoint_id": "ep-delete",
+                "method": "DELETE", "endpoint": "/api/photos/{id}",
+                "frontend_entrypoints": [],
+                "database_accesses": [],
+            }]}}
+        graph_hash = hashlib.sha256(
+            json.dumps(graph, ensure_ascii=False, indent=2).encode()).hexdigest()
+        return graph, graph_hash
+
+    def _b1_tests(self, graph_hash, manifest_hashes=None):
+        provenance = {"execution_id": "run-1"}
+        if manifest_hashes is not None:
+            provenance["source_manifest_file_hashes"] = manifest_hashes
+        return {"schema_version": "usit-test-execution-results-v1",
+            "source_hashes": {"test_report_sha256": "1" * 64, "mapping_json_sha256": "2" * 64,
+                              "business_graph_sha256": graph_hash},
+            "execution_provenance": provenance,
+            "business_function_results": [
+                {"business_function_id": "bf-upload", "execution_status": "PASSED",
+                 "mapped_test_case_count": 3, "failed": 0, "skipped": 0},
+                {"business_function_id": "bf-delete", "execution_status": "FAILED",
+                 "mapped_test_case_count": 2, "failed": 1, "skipped": 0}]}
+
+    def _b1_coverage(self, graph_hash, source_files=None):
+        hashes = {"coverage_report_sha256": "3" * 64, "mapping_json_sha256": "4" * 64,
+                  "business_graph_sha256": graph_hash}
+        if source_files is not None:
+            hashes["source_files"] = source_files
+        def bound(source_file, digest):
+            return {"source_file": source_file, "source_binding_status": "SOURCE_BYTES_MATCHED",
+                    "expected_source_file_sha256": digest, "actual_source_file_sha256": digest,
+                    "source_line_count": 5, "line_start": 1, "line_end": 5}
+        return {"schema_version": "usit-code-coverage-results-v1", "execution_id": "run-1",
+            "source_hashes": hashes,
+            "business_function_coverage": [
+                {"business_function_id": "bf-upload", "code_coverage_status": "COVERED",
+                 "line_coverage_percent": 100.0, "source_binding_evidence": [bound("src/upload.py", "a" * 64)],
+                 "mapping_ranges": [{"source_file": "src/upload.py", "line_start": 1, "line_end": 5}]},
+                {"business_function_id": "bf-delete", "code_coverage_status": "PARTIAL",
+                 "line_coverage_percent": 50.0, "source_binding_evidence": [bound("src/delete.py", "b" * 64)],
+                 "mapping_ranges": [{"source_file": "src/delete.py", "line_start": 1, "line_end": 5}]}]}
+
+    def test_g1_matching_snapshot_and_coverage_hashes_keep_combined_conclusion(self):
+        graph, graph_hash = self._b1_graph()
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash, {"src/upload.py": "a" * 64, "src/delete.py": "b" * 64}),
+            self._b1_coverage(graph_hash, {"src/upload.py": "a" * 64, "src/delete.py": "b" * 64}),
+            graph_hash)
+        by_id = {x["business_function_id"]: x for x in result["business_function_evidence"]}
+        self.assertEqual(by_id["bf-upload"]["source_version_binding_status"], "MATCHED")
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],
+                         "TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED")
+        self.assertEqual(result["evidence_conflict_count"], 0)
+
+    def test_g1_divergent_hashes_downgrade_only_the_related_function(self):
+        graph, graph_hash = self._b1_graph()
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash, {"src/upload.py": "a" * 64, "src/delete.py": "b" * 64}),
+            self._b1_coverage(graph_hash, {"src/upload.py": "a" * 64, "src/delete.py": "c" * 64}),
+            graph_hash)
+        by_id = {x["business_function_id"]: x for x in result["business_function_evidence"]}
+        # Only src/delete.py diverges, and only bf-delete's coverage row
+        # references it: bf-upload's own files agree, so its combined
+        # conclusion must not be downgraded by another function's file.
+        self.assertEqual(by_id["bf-upload"]["source_version_binding_status"], "MATCHED")
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],
+                         "TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED")
+        self.assertFalse(by_id["bf-upload"]["evidence_conflict"])
+        self.assertEqual(by_id["bf-delete"]["source_version_binding_status"], "DIVERGENT")
+        self.assertEqual(by_id["bf-delete"]["verification_conclusion"], "EVIDENCE_CONFLICT")
+        self.assertTrue(by_id["bf-delete"]["evidence_conflict"])
+        divergent = [item for item in result["evidence_conflicts"]
+                     if item["kind"] == "TEST_COVERAGE_SOURCE_VERSION_DIVERGENCE"]
+        self.assertEqual(len(divergent), 1)
+        self.assertEqual(divergent[0]["business_function_id"], "bf-delete")
+        self.assertEqual(divergent[0]["divergent_source_files"][0]["source_file"], "src/delete.py")
+        self.assertEqual(divergent[0]["divergent_source_files"][0]["test_sha256"], "b" * 64)
+        self.assertEqual(divergent[0]["divergent_source_files"][0]["coverage_sha256"], "c" * 64)
+
+    def test_g1_no_overlapping_files_is_reported_not_claimed(self):
+        graph, graph_hash = self._b1_graph()
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash, {"src/other.py": "a" * 64}),
+            self._b1_coverage(graph_hash, {"src/upload.py": "a" * 64, "src/delete.py": "b" * 64}),
+            graph_hash)
+        by_id = {x["business_function_id"]: x for x in result["business_function_evidence"]}
+        self.assertEqual(by_id["bf-upload"]["source_version_binding_status"], "NO_OVERLAPPING_SOURCE_FILES")
+        self.assertNotIn("TEST_COVERAGE_SOURCE_VERSION_DIVERGENCE",
+                         {item["kind"] for item in result["evidence_conflicts"]})
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],
+                         "TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED")
+
+    def test_g1_missing_hash_set_on_one_side_is_not_provided(self):
+        graph, graph_hash = self._b1_graph()
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash),
+            self._b1_coverage(graph_hash, {"src/upload.py": "a" * 64}),
+            graph_hash)
+        by_id = {x["business_function_id"]: x for x in result["business_function_evidence"]}
+        self.assertEqual(by_id["bf-upload"]["source_version_binding_status"], "NOT_PROVIDED")
+        self.assertNotIn("TEST_COVERAGE_SOURCE_VERSION_DIVERGENCE",
+                         {item["kind"] for item in result["evidence_conflicts"]})
+
+    # ---- B1: G2 runtime-to-static consistency ----
+    def _b1_event(self, event_id, event_type, function_id, **fields):
+        event = {"event_id": event_id, "event_type": event_type, "correlation_id": "c1",
+                 "business_function_id": function_id}
+        event.update(fields)
+        return event
+
+    def test_g2_matching_http_and_database_events_are_matched(self):
+        graph, graph_hash = self._b1_graph()
+        events = [
+            self._b1_event("e1", "HTTP_REQUEST", "bf-upload",
+                           http_method="GET", route_template="/api/photos"),
+            self._b1_event("e2", "DATABASE_CHANGE", "bf-upload",
+                           db_operation="select", table_or_collection="photos"),
+        ]
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash), self._b1_coverage(graph_hash),
+            graph_hash, runtime_events=events)
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["runtime_consistency_status"], "MATCHED")
+        self.assertEqual(upload["runtime_consistency_detail"]["compared_event_count"], 2)
+        self.assertEqual(upload["runtime_consistency_detail"]["matched_event_count"], 2)
+        self.assertEqual(upload["runtime_consistency_detail"]["mismatches"], [])
+        self.assertNotIn("RUNTIME_STATIC_MISMATCH",
+                         {item["kind"] for item in result["evidence_conflicts"]})
+
+    def test_g2_path_mismatch_downgrades_to_evidence_conflict(self):
+        graph, graph_hash = self._b1_graph()
+        events = [self._b1_event("e1", "HTTP_REQUEST", "bf-delete",
+                                 http_method="DELETE", route_template="/api/photos/123")]
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash), self._b1_coverage(graph_hash),
+            graph_hash, runtime_events=events)
+        delete = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-delete")
+        self.assertEqual(delete["runtime_consistency_status"], "MISMATCH")
+        self.assertEqual(delete["verification_conclusion"], "EVIDENCE_CONFLICT")
+        self.assertTrue(delete["evidence_conflict"])
+        mismatch = [item for item in result["evidence_conflicts"]
+                    if item["kind"] == "RUNTIME_STATIC_MISMATCH"]
+        self.assertEqual(len(mismatch), 1)
+        self.assertEqual(mismatch[0]["event_id"], "e1")
+        self.assertEqual(mismatch[0]["field"], "route_template")
+        self.assertEqual(mismatch[0]["expected"], "/api/photos/{id}")
+        self.assertEqual(mismatch[0]["actual"], "/api/photos/123")
+
+    def test_g2_event_without_comparable_fields_is_not_provided(self):
+        graph, graph_hash = self._b1_graph()
+        events = [self._b1_event("e1", "HTTP_RESPONSE", "bf-upload", status_code=200)]
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash), self._b1_coverage(graph_hash),
+            graph_hash, runtime_events=events)
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["runtime_consistency_status"], "NOT_PROVIDED")
+        self.assertNotIn("RUNTIME_STATIC_MISMATCH",
+                         {item["kind"] for item in result["evidence_conflicts"]})
+
+    def test_g2_database_event_with_unknown_table_is_a_mismatch(self):
+        graph, graph_hash = self._b1_graph()
+        events = [self._b1_event("e1", "DATABASE_CHANGE", "bf-upload",
+                                 db_operation="SELECT", table_or_collection="sessions")]
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash), self._b1_coverage(graph_hash),
+            graph_hash, runtime_events=events)
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["runtime_consistency_status"], "MISMATCH")
+        mismatch = [item for item in result["evidence_conflicts"]
+                    if item["kind"] == "RUNTIME_STATIC_MISMATCH"]
+        self.assertEqual(mismatch[0]["field"], "table_or_collection")
+        self.assertEqual(mismatch[0]["expected"], ["photos"])
+        self.assertEqual(mismatch[0]["actual"], "sessions")
+
+    def test_g2_database_event_is_not_checked_when_static_tables_are_missing(self):
+        graph, graph_hash = self._b1_graph()
+        events = [self._b1_event("e1", "DATABASE_CHANGE", "bf-delete",
+                                 db_operation="DELETE", table_or_collection="photos")]
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash), self._b1_coverage(graph_hash),
+            graph_hash, runtime_events=events)
+        delete = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-delete")
+        self.assertEqual(delete["runtime_consistency_status"], "NOT_CHECKED_NO_STATIC_TABLE")
+        self.assertNotIn("RUNTIME_STATIC_MISMATCH",
+                         {item["kind"] for item in result["evidence_conflicts"]})
+
+    def test_g2_component_name_is_not_checked_against_entrypoint_files(self):
+        # A component name ("PhotoDetail") has no reliable equality
+        # relation to static entrypoint file paths ("web/Photos.tsx");
+        # judging it would manufacture false conflicts, so it is
+        # NOT_CHECKED, never a mismatch.
+        graph, graph_hash = self._b1_graph()
+        events = [self._b1_event("e1", "UI_ACTION", "bf-upload", component="PhotoDetail")]
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash), self._b1_coverage(graph_hash),
+            graph_hash, runtime_events=events)
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["runtime_consistency_status"], "NOT_CHECKED_UI_COMPONENT")
+        self.assertNotIn("RUNTIME_STATIC_MISMATCH",
+                         {item["kind"] for item in result["evidence_conflicts"]})
+
+    def test_g2_component_matching_an_entrypoint_file_exactly_is_matched(self):
+        graph, graph_hash = self._b1_graph()
+        events = [self._b1_event("e1", "UI_ACTION", "bf-upload", component="web/Photos.tsx")]
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash), self._b1_coverage(graph_hash),
+            graph_hash, runtime_events=events)
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["runtime_consistency_status"], "MATCHED")
+        self.assertEqual(upload["runtime_consistency_detail"]["matched_event_count"], 1)
+
+    def test_g2_function_without_runtime_events_is_not_observed(self):
+        graph, graph_hash = self._b1_graph()
+        events = [self._b1_event("e1", "HTTP_REQUEST", "bf-upload",
+                                 http_method="GET", route_template="/api/photos")]
+        result = verify_business_function_evidence(
+            graph, self._b1_tests(graph_hash), self._b1_coverage(graph_hash),
+            graph_hash, runtime_events=events)
+        delete = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-delete")
+        self.assertEqual(delete["runtime_consistency_status"], "NOT_OBSERVED")
+        self.assertEqual(delete["runtime_consistency_detail"]["compared_event_count"], 0)
+
+    # ---- B1: G5 claim vs observed ----
+    def test_g5_claim_and_parent_observation_are_kept_separate(self):
+        graph, graph_hash = self._b1_graph()
+        tests = self._b1_tests(graph_hash)
+        tests["execution_provenance"]["pytest_exit_code"] = 0
+        tests["execution_provenance"]["pytest_exit_status"] = "EXIT_OK"
+        result = verify_business_function_evidence(
+            graph, tests, self._b1_coverage(graph_hash), graph_hash)
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        claim = upload["claim_vs_observed"]
+        self.assertEqual(claim["claimed"]["test_execution_status"], "PASSED")
+        self.assertEqual(claim["claimed"]["code_coverage_status"], "COVERED")
+        self.assertEqual(claim["claimed"]["line_coverage_percent"], 100.0)
+        self.assertEqual(claim["claimed"]["execution_binding"], "MATCHED")
+        self.assertEqual(claim["observed_by_parent"],
+                         {"pytest_exit_code": 0, "pytest_exit_status": "EXIT_OK"})
+        self.assertNotIn("test_execution_status", claim["observed_by_parent"])
+
+    def test_g5_observed_is_empty_without_provenance(self):
+        graph, graph_hash = self._b1_graph()
+        tests = self._b1_tests(graph_hash)
+        del tests["execution_provenance"]
+        result = verify_business_function_evidence(
+            graph, tests, self._b1_coverage(graph_hash), graph_hash)
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["claim_vs_observed"]["observed_by_parent"], {})
+        self.assertEqual(upload["claim_vs_observed"]["claimed"]["test_execution_status"], "PASSED")
+
+    # ---- B1: CLI wiring for --runtime-events ----
+    def test_cli_verify_evidence_accepts_runtime_events_and_reports_mismatch(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from usit.cli import main
+        graph, graph_hash = self._b1_graph()
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            graph_path = base / "graph.json"
+            tests_path = base / "tests.json"
+            coverage_path = base / "coverage.json"
+            events_path = base / "events.json"
+            out = base / "evidence.json"
+            graph_path.write_bytes(json.dumps(graph, ensure_ascii=False, indent=2).encode())
+            tests_path.write_text(json.dumps(self._b1_tests(graph_hash)), encoding="utf-8")
+            coverage_path.write_text(json.dumps(self._b1_coverage(graph_hash)), encoding="utf-8")
+            events_path.write_text(json.dumps({
+                "schema_version": "usit-runtime-evidence-v1",
+                "source_graph_sha256": graph_hash,
+                "session": {"session_id": "s1", "platform": "WEB",
+                            "captured_at": "2026-11-01T12:00:00+08:00"},
+                "events": [self._b1_event("e1", "HTTP_REQUEST", "bf-delete",
+                                          http_method="DELETE",
+                                          route_template="/api/photos/123")],
+            }), encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                code = main(["verify-evidence", "--graph", str(graph_path),
+                             "--test-results", str(tests_path),
+                             "--coverage-results", str(coverage_path),
+                             "--runtime-events", str(events_path),
+                             "--out", str(out)])
+            self.assertEqual(code, 1)
+            saved = json.loads(out.read_text(encoding="utf-8"))
+            self.assertIn("RUNTIME_STATIC_MISMATCH",
+                          {item["kind"] for item in saved["evidence_conflicts"]})
+
+    def test_cli_verify_evidence_rejects_runtime_events_for_another_graph(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from usit.cli import main
+        graph, graph_hash = self._b1_graph()
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            graph_path = base / "graph.json"
+            events_path = base / "events.json"
+            out = base / "evidence.json"
+            graph_path.write_bytes(json.dumps(graph, ensure_ascii=False, indent=2).encode())
+            events_path.write_text(json.dumps({
+                "schema_version": "usit-runtime-evidence-v1",
+                "source_graph_sha256": "0" * 64,
+                "session": {"session_id": "s1", "platform": "WEB",
+                            "captured_at": "2026-11-01T12:00:00+08:00"},
+                "events": [],
+            }), encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                code = main(["verify-evidence", "--graph", str(graph_path),
+                             "--runtime-events", str(events_path), "--out", str(out)])
+            # main() catches the ValueError as a validation error
+            # (exit code 2, distinct from evidence-conflict exit 1);
+            # fail-closed means no evidence file is written at all.
+            self.assertEqual(code, 2)
+            self.assertFalse(out.exists())
+
 
 if __name__=="__main__":
     unittest.main()

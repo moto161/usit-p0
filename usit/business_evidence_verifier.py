@@ -40,11 +40,150 @@ def _validated_hashes(value: Any, required: tuple[str, ...], label: str) -> dict
     return result
 
 
+def _hash_map(value: Any, label: str) -> dict[str, str] | None:
+    """Validate an optional {source path: SHA-256} map; absent stays absent."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object mapping source paths to SHA-256 digests")
+    result = {}
+    for path, digest in value.items():
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError(f"{label} keys must be non-empty source paths")
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError(f"{label}[{path}] must be a lowercase SHA-256 hex digest")
+        result[path] = digest
+    return result
+
+
+def _check_runtime_consistency(
+    view: dict[str, Any], events: list[dict[str, Any]]
+) -> tuple[str, dict[str, Any]]:
+    """Compare attributed runtime events against one function's static view.
+
+    Only explicit event fields are compared; time adjacency, shared
+    correlation IDs, or mere event existence never count as consistency.
+    A field the event does not carry is NOT_PROVIDED, not a mismatch. A
+    static item the graph never identified is NOT_CHECKED, not a mismatch.
+    UI_ACTION `component` is a component name, not a file path: it only
+    matches an entrypoint's `source_file` by exact equality. A
+    non-matching component name is NOT_CHECKED, never a conflict -- names
+    have no reliable equality relation to static entrypoint paths (a real
+    capture records e.g. "PhotoDetail" while the static entrypoint is
+    "web/Photos.tsx"), so judging it would manufacture false conflicts.
+    Returns (status, detail); mismatches carry event_id/field/expected/actual.
+    """
+    static_method = view.get("method")
+    static_endpoint = view.get("endpoint")
+    static_tables: set[str] = set()
+    static_operations: set[str] = set()
+    for access in view.get("database_accesses", []) or []:
+        if not isinstance(access, dict):
+            continue
+        for table in access.get("tables", []) or []:
+            if isinstance(table, str) and table:
+                static_tables.add(table)
+        operation = access.get("operation")
+        if isinstance(operation, str) and operation and operation.upper() != "UNKNOWN":
+            static_operations.add(operation.upper())
+    entrypoint_files = {
+        entry.get("source_file")
+        for entry in view.get("frontend_entrypoints", []) or []
+        if isinstance(entry, dict) and isinstance(entry.get("source_file"), str)
+    }
+    mismatches: list[dict[str, Any]] = []
+    compared = 0
+    matched = 0
+    first_not_checked: str | None = None
+    for event in events:
+        event_id = event.get("event_id")
+        event_type = event.get("event_type")
+        outcome: str | None = None
+        event_mismatch = False
+        if event_type in {"HTTP_REQUEST", "HTTP_RESPONSE"}:
+            method = event.get("http_method")
+            template = event.get("route_template")
+            if method is None and template is None:
+                outcome = "NOT_PROVIDED"
+            elif not isinstance(static_method, str) or not isinstance(static_endpoint, str):
+                outcome = "NOT_CHECKED_NO_STATIC_ENDPOINT"
+            else:
+                if method is not None and method.upper() != static_method.upper():
+                    mismatches.append({"event_id": event_id, "field": "http_method",
+                                       "expected": static_method, "actual": method})
+                    event_mismatch = True
+                if template is not None and template != static_endpoint:
+                    mismatches.append({"event_id": event_id, "field": "route_template",
+                                       "expected": static_endpoint, "actual": template})
+                    event_mismatch = True
+                outcome = "MISMATCH" if event_mismatch else "MATCHED"
+        elif event_type == "DATABASE_CHANGE":
+            table = event.get("table_or_collection")
+            operation = event.get("db_operation")
+            if table is None and operation is None:
+                outcome = "NOT_PROVIDED"
+            else:
+                if table is not None:
+                    if not static_tables:
+                        outcome = "NOT_CHECKED_NO_STATIC_TABLE"
+                    elif table not in static_tables:
+                        mismatches.append({"event_id": event_id, "field": "table_or_collection",
+                                           "expected": sorted(static_tables), "actual": table})
+                        event_mismatch = True
+                if operation is not None:
+                    if not static_operations:
+                        if outcome is None:
+                            outcome = "NOT_CHECKED_NO_STATIC_OPERATION"
+                    elif operation.upper() not in static_operations:
+                        mismatches.append({"event_id": event_id, "field": "db_operation",
+                                           "expected": sorted(static_operations), "actual": operation})
+                        event_mismatch = True
+                if outcome is None:
+                    outcome = "MISMATCH" if event_mismatch else "MATCHED"
+                elif event_mismatch:
+                    outcome = "MISMATCH"
+        elif event_type == "UI_ACTION":
+            component = event.get("component")
+            if component is None:
+                outcome = "NOT_PROVIDED"
+            elif not entrypoint_files:
+                outcome = "NOT_CHECKED_NO_STATIC_ENTRYPOINT"
+            elif component in entrypoint_files:
+                outcome = "MATCHED"
+            else:
+                outcome = "NOT_CHECKED_UI_COMPONENT"
+        else:
+            outcome = "NOT_PROVIDED"
+        if outcome in {"MATCHED", "MISMATCH"}:
+            compared += 1
+            if outcome == "MATCHED":
+                matched += 1
+        elif outcome is not None and outcome.startswith("NOT_CHECKED") and first_not_checked is None:
+            first_not_checked = outcome
+    if mismatches:
+        status = "MISMATCH"
+    elif matched:
+        status = "MATCHED"
+    elif first_not_checked is not None:
+        status = first_not_checked
+    elif events:
+        status = "NOT_PROVIDED"
+    else:
+        status = "NOT_OBSERVED"
+    return status, {
+        "compared_event_count": compared,
+        "matched_event_count": matched,
+        "mismatches": mismatches,
+    }
+
+
 def verify_business_function_evidence(
     business_graph: dict[str, Any],
     test_results: dict[str, Any] | None = None,
     coverage_results: dict[str, Any] | None = None,
     business_graph_sha256: str | None = None,
+    runtime_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(business_graph, dict) or business_graph.get("schema_version") != GRAPH_SCHEMA:
         raise ValueError("business graph must use usit-graph-v1")
@@ -115,12 +254,60 @@ def verify_business_function_evidence(
             conflicts.append({"kind":"UNKNOWN_BUSINESS_FUNCTION","source":source,
                               "business_function_id":function_id})
 
+    # Runtime events for the G2 consistency check: only events carrying an
+    # explicit business_function_id that exists in this graph are
+    # attributed. Events without attribution, or naming an unknown
+    # function, are not compared here -- the runtime evidence validator
+    # is the place that flags unknown function IDs. The caller is
+    # expected to pass events from a document already validated by
+    # validate_runtime_evidence; the verifier re-checks only the fields
+    # it compares, fail-closed.
+    runtime_events_by_function: dict[str, list[dict[str, Any]]] = {}
+    if runtime_events is not None:
+        if not isinstance(runtime_events, list):
+            raise ValueError("runtime_events must be a list")
+        for index, event in enumerate(runtime_events):
+            if not isinstance(event, dict):
+                raise ValueError(f"runtime_events[{index}] must be an object")
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str) or not event_id.strip():
+                raise ValueError(f"runtime_events[{index}].event_id must be a non-empty string")
+            function_id = event.get("business_function_id")
+            if function_id is not None and (not isinstance(function_id, str) or not function_id.strip()):
+                raise ValueError(f"runtime_events[{index}].business_function_id must be a non-empty string or absent")
+            event_type = event.get("event_type")
+            if event_type is not None and not isinstance(event_type, str):
+                raise ValueError(f"runtime_events[{index}].event_type must be a string or absent")
+            for field in ("http_method", "route_template", "db_operation", "table_or_collection", "component"):
+                value = event.get(field)
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"runtime_events[{index}].{field} must be a string or absent")
+            if function_id and function_id in known:
+                runtime_events_by_function.setdefault(function_id, []).append(event)
+
+    # G1: the test run's source-snapshot file hashes and the coverage
+    # run's source-file hashes are validated here; the per-function
+    # comparison itself happens in the loop below, over the files each
+    # function's own coverage row references. A shared execution_id
+    # does not prove the same source version: the snapshot and the
+    # coverage may come from different checkouts of one run. Only
+    # overlapping files are judged; no overlap, or a missing hash set
+    # on either side, is reported, never claimed as agreement.
+    test_manifest_hashes = _hash_map(
+        test_provenance.get("source_manifest_file_hashes") if isinstance(test_provenance, dict) else None,
+        "test results execution_provenance.source_manifest_file_hashes")
+    coverage_source_hashes = _hash_map(
+        coverage_results.get("source_hashes", {}).get("source_files")
+        if isinstance(coverage_results, dict) and isinstance(coverage_results.get("source_hashes"), dict) else None,
+        "coverage results source_hashes.source_files")
+
     matrix=[]
     for function_id, view in sorted(views.items()):
         test=test_by_id.get(function_id); cov=coverage_by_id.get(function_id)
         ts=test.get("execution_status","NOT_MEASURED") if test else "NOT_MEASURED"
         reported_test_status = ts
         cs=cov.get("code_coverage_status","NOT_MEASURED") if cov else "NOT_MEASURED"
+        reported_coverage_status = cs
         # Execution binding is checked per function that combines both sides:
         # a mismatch (or one side bound while the other is unbound) means
         # the test and coverage evidence may come from different runs, so the
@@ -157,6 +344,68 @@ def verify_business_function_evidence(
                 execution_binding_status = "NOT_PROVIDED"
         else:
             execution_binding_status = "NOT_APPLICABLE"
+        # G1 source-version binding: only functions combining test and
+        # coverage evidence are judged. The comparison is per function,
+        # over the source files that function's own coverage row
+        # references (mapping_ranges + source_binding_evidence): a
+        # divergence on an unrelated function's file must not downgrade
+        # this function's combined conclusion -- that would manufacture
+        # a false conflict. The design's "相关功能" is exactly this set.
+        if test is not None and cov is not None:
+            if test_manifest_hashes is None or coverage_source_hashes is None:
+                source_version_binding_status = "NOT_PROVIDED"
+            else:
+                referenced_files = {
+                    item.get("source_file")
+                    for item in (cov.get("mapping_ranges") or [])
+                    if isinstance(item, dict) and isinstance(item.get("source_file"), str)
+                } | {
+                    item.get("source_file")
+                    for item in (cov.get("source_binding_evidence") or [])
+                    if isinstance(item, dict) and isinstance(item.get("source_file"), str)
+                }
+                overlapping = sorted(
+                    path for path in referenced_files
+                    if path in test_manifest_hashes and path in coverage_source_hashes)
+                function_divergent = [
+                    path for path in overlapping
+                    if test_manifest_hashes[path] != coverage_source_hashes[path]]
+                if function_divergent:
+                    source_version_binding_status = "DIVERGENT"
+                    conflicts.append({
+                        "kind": "TEST_COVERAGE_SOURCE_VERSION_DIVERGENCE",
+                        "business_function_id": function_id,
+                        "divergent_source_files": [
+                            {"source_file": path,
+                             "test_sha256": test_manifest_hashes[path],
+                             "coverage_sha256": coverage_source_hashes[path]}
+                            for path in function_divergent
+                        ],
+                    })
+                elif overlapping:
+                    source_version_binding_status = "MATCHED"
+                else:
+                    source_version_binding_status = "NO_OVERLAPPING_SOURCE_FILES"
+        else:
+            source_version_binding_status = "NOT_APPLICABLE"
+        # G2 runtime-to-static consistency: only attributed events are
+        # compared, against this function's own static view.
+        if runtime_events is None:
+            runtime_consistency_status = "NOT_APPLICABLE"
+            runtime_consistency_detail = None
+        else:
+            function_events = runtime_events_by_function.get(function_id, [])
+            runtime_consistency_status, runtime_consistency_detail = _check_runtime_consistency(
+                view, function_events)
+            for mismatch in runtime_consistency_detail["mismatches"]:
+                conflicts.append({
+                    "kind": "RUNTIME_STATIC_MISMATCH",
+                    "business_function_id": function_id,
+                    "event_id": mismatch["event_id"],
+                    "field": mismatch["field"],
+                    "expected": mismatch["expected"],
+                    "actual": mismatch["actual"],
+                })
         coverage_source_verified = False
         if cov is not None:
             percent = cov.get("line_coverage_percent")
@@ -773,6 +1022,38 @@ def verify_business_function_evidence(
             "test_execution_id":test_execution_id,
             "coverage_execution_id":coverage_execution_id,
             "execution_binding_status":execution_binding_status,
+            "source_version_binding_status":source_version_binding_status,
+            "runtime_consistency_status":runtime_consistency_status,
+            "runtime_consistency_detail":runtime_consistency_detail,
+            # G5: keep what the reports claim separate from what the
+            # parent process itself observed. The verifier can only see
+            # the pytest exit code from the execution provenance; the
+            # snapshot diff and staging inventory live in the controlled
+            # runner's gate report, not in these inputs -- so an empty
+            # observed_by_parent is written empty, never filled with
+            # claim fields.
+            "claim_vs_observed":{
+                "claimed":{
+                    "test_execution_status":reported_test_status,
+                    "code_coverage_status":reported_coverage_status,
+                    # The row's own sanitized percent, not the raw
+                    # reported value: a non-finite percent (NaN/inf) is
+                    # already preserved as repr() in the
+                    # INVALID_COVERAGE_PERCENT conflict, and copying the
+                    # raw value here would make the emitted matrix
+                    # invalid JSON (json.dumps(allow_nan=False) fails).
+                    "line_coverage_percent": (percent if cov and percent_valid else None),
+                    "execution_binding":execution_binding_status,
+                },
+                "observed_by_parent":{
+                    key: value for key, value in (
+                        ("pytest_exit_code",
+                         test_provenance.get("pytest_exit_code") if isinstance(test_provenance, dict) else None),
+                        ("pytest_exit_status",
+                         test_provenance.get("pytest_exit_status") if isinstance(test_provenance, dict) else None),
+                    ) if value is not None
+                },
+            },
         })
     global_hash_conflict=any(x["kind"]=="GRAPH_HASH_MISMATCH" for x in conflicts)
     conflict_ids={x.get("business_function_id") for x in conflicts if x.get("business_function_id")}
@@ -802,5 +1083,8 @@ def verify_business_function_evidence(
             "测试与覆盖率报告、映射文件和业务图的 SHA-256 来源哈希会保留；覆盖率行范围与缺失源文件会随功能证据输出。",
             "覆盖率百分比、行计数和映射范围会执行结构校验；无效值产生证据冲突，不得作为可信覆盖结论。",
             "未提供的测试或覆盖率证据标记 NOT_MEASURED，不推断为失败或零覆盖。",
+            "测试快照 manifest 与覆盖率 source_files 的源码哈希会交叉比对；重叠文件哈希不一致时相关功能降级为证据冲突；无重叠文件或一方未提供哈希时明确标记，不冒充一致。",
+            "运行时事件的显式字段（HTTP method/path、数据库操作/表）会与静态视图比对；不一致时相关功能降级为证据冲突；事件缺字段或静态未识别出对应项时不判，只记 NOT_PROVIDED 或 NOT_CHECKED。",
+            "每行分开列出报告声称（claimed）与父进程观测（observed_by_parent）；父进程观测目前只有测试 provenance 中的退出码，观测为空时写空对象，不用声称字段填满。",
         ],
     }

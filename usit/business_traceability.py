@@ -10,6 +10,46 @@ from datetime import datetime
 from typing import Any
 
 
+# G6: parser-scope codes for the static stages, and the exact graph
+# limitation text each code encodes. Rows carry only the codes; the texts
+# live in business_graph.py. A test builds a real graph and asserts every
+# mapped text appears verbatim in its limitations, so editing a limitation
+# without updating this table fails the test instead of silently drifting.
+# Limitations 3 and 5 in that list are general no-inference statements,
+# not a parser scope for one stage, so no code maps to them.
+STAGE_PARSER_SCOPE: dict[str, tuple[str, ...]] = {
+    "business_function_to_frontend_entrypoint": ("JSX_TSX_ONLY",),
+    "business_function_to_api_endpoint": ("CALL_GRAPH_DEPTH_8",),
+    "api_to_backend_handler": ("HANDLER_UNIQUE_SYMBOL_ONLY",),
+    "backend_call_chain": ("CALL_GRAPH_DEPTH_8",),
+    "backend_to_database": ("SQL_SINGLE_LINE_LITERAL_ONLY",),
+    "authorization_evidence": ("AUTHORIZATION_LIMITED_PATTERNS_ONLY",),
+    "identity_resource_evidence": ("SAME_LINE_IDENTITY_ONLY",),
+}
+
+PARSER_SCOPE_LIMITATION_TEXT: dict[str, tuple[str, ...]] = {
+    "JSX_TSX_ONLY": (
+        "前端交互目前仅识别 JSX/TSX 的有限事件属性与唯一命名 handler；尚未连接前端 handler 到 API client 和后端 endpoint，也未覆盖 Vue、Angular、XML 或 Jetpack Compose UI 模型。",
+    ),
+    "CALL_GRAPH_DEPTH_8": (
+        "调用链仅沿唯一 RESOLVED 的图谱符号边进行有界静态展开；循环会标记，深度/数量上限会截断，不证明运行时执行。",
+    ),
+    "HANDLER_UNIQUE_SYMBOL_ONLY": (
+        "业务记录只与精确来源文件关联；命名路由 handler 可通过同文件唯一符号或 TypeScript Compiler API 的导入符号证据建立候选引用。",
+        "跨文件 handler 仅在编译器符号解析唯一且目标符号存在于当前图谱时关联；动态、外部、歧义或缺少符号证据时保留原状态，不按名称猜测。",
+    ),
+    "SQL_SINGLE_LINE_LITERAL_ONLY": (
+        "数据库访问只识别单行直接 SQL 字符串字面量；owner 必须由同路径同调用行的 caller_symbol_id 唯一绑定。动态/拼接/多行 SQL 不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
+    ),
+    "AUTHORIZATION_LIMITED_PATTERNS_ONLY": (
+        "权限证据仅识别有限的 route middleware 名称、显式权限调用名和简单 role/owner 条件；函数权限调用只有在同文件同调用行的唯一 caller_symbol_id 存在时才归属函数。未检测到权限线索不证明缺少授权，检测到线索也不证明运行时执行或检查正确。",
+    ),
+    "SAME_LINE_IDENTITY_ONLY": (
+        "身份/资源数据流仅识别有限同一源码行模式；只有身份线索与数据库调用位于同文件同一行时才附着到数据库访问，再经已解析 endpoint 调用链关联。未做跨行变量/参数/返回值传播、别名解析、ORM 映射或控制流分析；同一行模式不证明运行时身份可信或资源授权正确。",
+    ),
+}
+
+
 def build_business_traceability(
     semantics: dict[str, Any],
     graph: dict[str, Any],
@@ -279,7 +319,21 @@ def build_business_traceability(
         runtime_status = runtime.get("test_execution_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
         coverage_status = runtime.get("code_coverage_status", "NOT_MEASURED") if runtime else "NOT_MEASURED"
         function_runtime_conflict = bool(fid and fid in runtime_conflict_function_ids)
-        runtime_observation_status = "EVIDENCE_CONFLICT" if runtime_global_conflict or function_runtime_conflict else ("RUNTIME_OBSERVED" if fid in runtime_observed_ids else ("NOT_OBSERVED" if runtime_evidence_validation else "NOT_MEASURED"))
+        # B1 G3: a function inside a shared correlation has no per-event
+        # ownership, so its observation is unresolved, never a clean
+        # RUNTIME_OBSERVED -- even though its events exist.
+        shared_correlation = bool(fid and any(
+            item.get("function_attribution_status") == "SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED"
+            for item in runtime_correlations_by_function.get(fid, [])
+        ))
+        # B1 G2: a runtime/static mismatch found by the evidence
+        # verifier downgrades this stage as well (the row status already
+        # becomes EVIDENCE_CONFLICT through test_evidence_conflict).
+        verifier_runtime_mismatch = bool(
+            runtime and runtime.get("runtime_consistency_status") == "MISMATCH")
+        runtime_observation_status = "EVIDENCE_CONFLICT" if runtime_global_conflict or function_runtime_conflict or verifier_runtime_mismatch else (
+            "SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED" if shared_correlation else (
+            "RUNTIME_OBSERVED" if fid in runtime_observed_ids else ("NOT_OBSERVED" if runtime_evidence_validation else "NOT_MEASURED")))
         valid_runtime_statuses = {"PASSED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "NOT_MEASURED"}
         valid_coverage_statuses = {"COVERED", "PARTIAL", "NOT_COVERED", "UNKNOWN", "NOT_MEASURED"}
         if runtime_status not in valid_runtime_statuses:
@@ -309,9 +363,13 @@ def build_business_traceability(
             "code_coverage": coverage_status,
             "runtime_observation": runtime_observation_status,
         }
+        # B1 G3: a shared-correlation function never rises to
+        # TRACEABLE_WITH_RUNTIME_EVIDENCE, even when its tests pass --
+        # the runtime observation cannot be attributed to it alone. It
+        # caps at TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE.
         row_status = "EVIDENCE_CONFLICT" if view and (runtime_global_conflict or function_runtime_conflict or test_evidence_conflict) else (
-            "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} else (
-            "TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE" if view and runtime and stages["test_execution"] == "UNKNOWN" else (
+            "TRACEABLE_WITH_RUNTIME_EVIDENCE" if view and runtime and stages["test_execution"] in {"PASSED", "FAILED"} and not shared_correlation else (
+            "TRACEABLE_WITH_INCONCLUSIVE_TEST_EVIDENCE" if view and runtime and (stages["test_execution"] == "UNKNOWN" or (shared_correlation and stages["test_execution"] in {"PASSED", "FAILED"})) else (
             "TRACEABLE_WITH_RUNTIME_OBSERVATION" if view and runtime_observation_status == "RUNTIME_OBSERVED" else (
             "TRACEABLE_TO_STATIC_FUNCTION_VIEW" if view else linkage))))
         status_counts[row_status] += 1
@@ -347,6 +405,10 @@ def build_business_traceability(
             "feature_name": feature["name"], "feature_source": feature.get("source"), "feature_line": feature.get("line"),
             "mapping_decision": decision, "business_function_id": fid if view else None,
             "traceability_status": row_status, "stage_status": stages,
+            # G6: the parser scope of each static stage, taken from the
+            # central table above. Stage status values are unchanged;
+            # this only annotates the aperture each status was reached in.
+            "stage_parser_scope": {stage: list(codes) for stage, codes in STAGE_PARSER_SCOPE.items()},
             "endpoint": {"method": view.get("method"), "path": view.get("endpoint")} if view else None,
             "test_candidate_ids": sorted(str(item.get("test_id")) for item in candidate_items if item.get("test_id") is not None),
             "test_candidates": [
@@ -375,6 +437,9 @@ def build_business_traceability(
             "runtime_evidence": runtime,
             "runtime_observation": {
                 "status": runtime_observation_status,
+                # B1 G2: pass through the verifier's per-function
+                # runtime/static consistency result for this row.
+                "consistency": runtime.get("runtime_consistency_status") if isinstance(runtime, dict) else None,
                 "correlation_ids": sorted(
                     item["correlation_id"] for item in runtime_correlations_by_function.get(fid, [])
                 ) if fid else [],
@@ -416,6 +481,8 @@ def build_business_traceability(
             "运行时事件按显式 business_function_id 和 correlation_id 关联；无显式关联的事件不会映射到需求功能。",
             "代码覆盖和权限/身份阶段状态仅表示输入工件中的证据状态，不证明安全性或业务正确性。",
             "映射 manifest 绑定精确 graph SHA-256；图谱变化后必须重新审阅或重新生成映射，旧映射不会自动迁移。",
+            "共享 correlation 的运行时观察不归属到单个功能；该功能的行状态不升为 TRACEABLE_WITH_RUNTIME_EVIDENCE，观察阶段记 SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED。",
+            "运行时一致性只比对事件显式字段与静态视图；UI 组件名与静态入口文件无可靠等值关系时记 NOT_CHECKED，不判冲突。",
             "reviewed_by/reviewed_at/rationale 是审阅者提供的审计元数据，不构成身份认证或电子签名。",
         ],
     }

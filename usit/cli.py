@@ -243,6 +243,7 @@ def main(argv=None):
     ev.add_argument('--graph',required=True,help='Exact business_knowledge_graph.json used by importers')
     ev.add_argument('--test-results',help='Optional usit-test-execution-results-v1 JSON')
     ev.add_argument('--coverage-results',help='Optional usit-code-coverage-results-v1 JSON')
+    ev.add_argument('--runtime-events',help='Optional already validated usit-runtime-evidence-v1 JSON; its events are cross-checked against the static graph views')
     ev.add_argument('--out',required=True,help='New JSON evidence matrix path; existing files are never overwritten')
     ga=sub.add_parser('analyze-gaps',help='Build a requirements and business-function verification gap backlog; review candidates only')
     ga.add_argument('--semantics',required=True,help='business_semantics.json')
@@ -634,11 +635,19 @@ def main(argv=None):
             graph_bytes, graph_doc=_read_bounded_json(a.graph,50*1024*1024)
             test_doc=_read_bounded_json(a.test_results,20*1024*1024)[1] if a.test_results else None
             coverage_doc=_read_bounded_json(a.coverage_results,50*1024*1024)[1] if a.coverage_results else None
+            runtime_events=None
+            if a.runtime_events:
+                _, runtime_doc=_read_bounded_json(a.runtime_events,50*1024*1024)
+                if not isinstance(runtime_doc,dict) or runtime_doc.get("schema_version")!="usit-runtime-evidence-v1":
+                    raise ValueError("runtime events must use usit-runtime-evidence-v1")
+                if runtime_doc.get("source_graph_sha256")!=hashlib.sha256(graph_bytes).hexdigest():
+                    raise ValueError("runtime events source_graph_sha256 does not match the supplied graph bytes")
+                runtime_events=runtime_doc.get("events")
             output=Path(a.out).expanduser()
             if output.is_symlink(): raise ValueError("output must not be a symbolic link")
             output=output.resolve()
             if output.exists(): raise ValueError("evidence output already exists; choose a new path to preserve prior evidence")
-            result=verify_business_function_evidence(graph_doc,test_doc,coverage_doc,hashlib.sha256(graph_bytes).hexdigest())
+            result=verify_business_function_evidence(graph_doc,test_doc,coverage_doc,hashlib.sha256(graph_bytes).hexdigest(),runtime_events=runtime_events)
             output.parent.mkdir(parents=True,exist_ok=True)
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","business_function_count","verification_conclusion_counts","evidence_conflict_count")}

@@ -43,11 +43,14 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             f"- 映射决策：{_cell(row.get('mapping_decision'))}",
             f"- 审阅记录：{_cell(review.get('reviewed_by') or '无')} / {_cell(review.get('reviewed_at') or '无')}",
             f"- 审阅理由：{_cell(review.get('rationale') or '尚无审阅记录')}",
-            "", "| 层级 | 状态 |", "|---|---|"])
+            "", "| 层级 | 状态 | 解析口径 |", "|---|---|---|"])
         stages = row.get("stage_status", {})
+        parser_scope = row.get("stage_parser_scope", {})
         if isinstance(stages, dict):
             for key, value in stages.items():
-                lines.append(f"| {_cell(key)} | {_cell(value)} |")
+                scope = parser_scope.get(key) if isinstance(parser_scope, dict) else None
+                scope_text = ", ".join(str(code) for code in scope) if isinstance(scope, list) and scope else "—"
+                lines.append(f"| {_cell(key)} | {_cell(value)} | {_cell(scope_text)} |")
         candidates = _items(row.get("test_candidate_ids"))
         observation = row.get("runtime_observation") if isinstance(row.get("runtime_observation"), dict) else {}
         correlation_ids = _items(observation.get("correlation_ids"))
@@ -56,6 +59,31 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
             f"- 运行时事件观察：{_cell(observation.get('status') or (stages.get('runtime_observation') if isinstance(stages, dict) else 'NOT_MEASURED'))}",
             f"- 运行时关联 ID：{_cell(', '.join(map(str, correlation_ids)) if correlation_ids else '无')}",
             f"- 代码覆盖：{_cell(stages.get('code_coverage') if isinstance(stages, dict) else 'UNKNOWN')}"])
+        runtime_evidence = row.get("runtime_evidence")
+        runtime_evidence = runtime_evidence if isinstance(runtime_evidence, dict) else {}
+        source_version = runtime_evidence.get("source_version_binding_status")
+        if source_version:
+            lines.append(f"- 源码版本绑定（测试快照 vs 覆盖率）：{_cell(source_version)}")
+        consistency = observation.get("consistency") or runtime_evidence.get("runtime_consistency_status")
+        if consistency:
+            lines.append(f"- 运行时一致性（事件显式字段 vs 静态视图）：{_cell(consistency)}")
+            detail = runtime_evidence.get("runtime_consistency_detail")
+            if isinstance(detail, dict):
+                for mismatch in _items(detail.get("mismatches")):
+                    if isinstance(mismatch, dict):
+                        lines.append(
+                            f"  - 不一致：{_cell(mismatch.get('event_id'))} / {_cell(mismatch.get('field'))}："
+                            f"静态声称 {_cell(mismatch.get('expected'))}，事件报告 {_cell(mismatch.get('actual'))}"
+                        )
+        claim = runtime_evidence.get("claim_vs_observed")
+        if isinstance(claim, dict):
+            claimed = claim.get("claimed") if isinstance(claim.get("claimed"), dict) else {}
+            observed = claim.get("observed_by_parent") if isinstance(claim.get("observed_by_parent"), dict) else {}
+            lines.append(
+                f"- 声称 vs 父进程观测：测试 {_cell(claimed.get('test_execution_status'))}；"
+                f"覆盖 {_cell(claimed.get('code_coverage_status'))}；"
+                f"父进程观测退出码 {_cell(observed.get('pytest_exit_code') if observed.get('pytest_exit_code') is not None else '未观测')}"
+            )
         for correlation in _items(observation.get("correlations")):
             if not isinstance(correlation, dict):
                 continue
@@ -91,8 +119,6 @@ def render_business_traceability_markdown(report: dict[str, Any]) -> str:
                     lines.append(f"  - {label}：{_cell(', '.join(map(str, values)))}")
             if correlation.get("interpretation"):
                 lines.append(f"  - 解释边界：{_cell(correlation.get('interpretation'))}")
-        runtime_evidence = row.get("runtime_evidence")
-        runtime_evidence = runtime_evidence if isinstance(runtime_evidence, dict) else {}
         execution_detail = runtime_evidence.get("test_execution_detail")
         if isinstance(execution_detail, dict):
             completeness = execution_detail.get("mapped_case_completeness") or "NOT_PROVIDED"
