@@ -268,8 +268,12 @@ class VerificationCaptureTests(unittest.TestCase):
 
     def test_isolated_run_rejected_when_parent_is_not_root_or_not_posix(self):
         # Fail-closed: isolation needs a root parent on POSIX. Mock the
-        # platform checks so no real process is ever started.
-        with patch.object(os, "geteuid", return_value=1000), \
+        # platform checks so no real process is ever started. The POSIX
+        # name is mocked too: on Windows os.name is "nt", so the POSIX
+        # check would fire before the root check; create=True because
+        # os.geteuid does not exist on Windows at all.
+        with patch.object(os, "geteuid", return_value=1000, create=True), \
+             patch.object(os, "name", "posix"), \
              patch.object(capture.subprocess, "Popen") as popen:
             with self.assertRaisesRegex(ValueError, "run as root"):
                 self.run_capture("pass", user="nobody")
@@ -283,14 +287,48 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
 
     def test_unknown_runner_user_is_rejected_without_starting_process(self):
-        with patch.object(capture.subprocess, "Popen") as popen:
+        # Mock a root parent on POSIX plus a pwd stand-in whose lookups
+        # always miss, so the test reaches the "does not exist" check on
+        # any platform: CI runners are non-root, and Windows has no pwd
+        # module at all. Without these the parent/platform check fires
+        # first and the expected message never appears.
+        def _missing(name):
+            raise KeyError(name)
+
+        def _missing_uid(uid):
+            raise KeyError(uid)
+
+        fake_pwd = types.SimpleNamespace(getpwnam=_missing, getpwuid=_missing_uid)
+        with patch.object(os, "geteuid", return_value=0, create=True), \
+             patch.object(os, "name", "posix"), \
+             patch.object(capture, "pwd", fake_pwd), \
+             patch.object(capture.subprocess, "Popen") as popen:
             with self.assertRaisesRegex(ValueError, "does not exist"):
                 self.run_capture("pass", user="usit-definitely-does-not-exist-12345")
             popen.assert_not_called()
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
 
     def test_root_runner_user_is_rejected_without_starting_process(self):
-        with patch.object(capture.subprocess, "Popen") as popen:
+        # Same platform mocking as above, with a pwd stand-in that only
+        # knows the root entry, so the test reaches the "must not be
+        # root" check on any platform.
+        root = types.SimpleNamespace(pw_name="root", pw_uid=0)
+
+        def _getpwnam(name):
+            if name == "root":
+                return root
+            raise KeyError(name)
+
+        def _getpwuid(uid):
+            if uid == 0:
+                return root
+            raise KeyError(uid)
+
+        fake_pwd = types.SimpleNamespace(getpwnam=_getpwnam, getpwuid=_getpwuid)
+        with patch.object(os, "geteuid", return_value=0, create=True), \
+             patch.object(os, "name", "posix"), \
+             patch.object(capture, "pwd", fake_pwd), \
+             patch.object(capture.subprocess, "Popen") as popen:
             with self.assertRaisesRegex(ValueError, "must not be root"):
                 self.run_capture("pass", user=0)
             with self.assertRaisesRegex(ValueError, "must not be root"):

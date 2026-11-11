@@ -85,7 +85,10 @@ class EvidenceSigningTests(unittest.TestCase):
         path = self.base / key_file_name(run_id)
         written = write_key_file(path, run_id, self.key)
         self.assertEqual(written, path)
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        if os.name == "posix":
+            # Windows ignores the mode bits passed to os.open, so a 0600
+            # file does not exist there; the permission only holds on POSIX.
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
         found_run_id, found_key = read_key_file(path)
         self.assertEqual(found_run_id, run_id)
         self.assertEqual(found_key, self.key)

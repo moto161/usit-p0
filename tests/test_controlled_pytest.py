@@ -136,7 +136,10 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertTrue(key_path.is_file())
         self.assertNotEqual(key_path.parent.resolve(), evidence.resolve())
         self.assertEqual(key_path.parent.resolve(), self.evidence.resolve())
-        self.assertEqual(stat.S_IMODE(os.stat(key_path).st_mode), 0o600)
+        if os.name == "posix":
+            # Windows ignores the mode bits passed to os.open, so a 0600
+            # file does not exist there; the permission only holds on POSIX.
+            self.assertEqual(stat.S_IMODE(os.stat(key_path).st_mode), 0o600)
         # Post-hoc verification with the key file re-checks both signatures
         # and every manifest artifact, without the parent process.
         from usit.evidence_signing import read_key_file, verify_evidence_directory
