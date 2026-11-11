@@ -45,6 +45,12 @@ class RuntimeEvidenceTests(unittest.TestCase):
             ],
         }
 
+    def test_in_memory_validator_enforces_serialized_size_limit(self):
+        from unittest.mock import patch
+        with patch("usit.runtime_evidence.MAX_EVENT_BYTES", 1):
+            with self.assertRaisesRegex(ValueError, "exceeds size limit"):
+                validate_runtime_evidence(self.doc, self.graph, self.graph_hash)
+
     def test_file_validator_rejects_duplicate_json_keys_in_runtime_events(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
