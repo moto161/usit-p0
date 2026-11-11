@@ -743,8 +743,12 @@ def run_controlled_pytest(
         junit_channel = None
         imports_channel = None
         if _PIPE_CHANNEL:
-            junit_channel = open_pipe_channel("junit", MAX_REPORT_BYTES)
-            imports_channel = open_pipe_channel("runtime_imports", MAX_RUNTIME_IMPORTS_BYTES)
+            # D1: the pipes must be owned by the runner user when the
+            # child runs isolated: re-opening a root-owned pipe through
+            # /dev/fd/<N> is PermissionError for another UID even though
+            # the child inherited the fd (see open_pipe_channel).
+            junit_channel = open_pipe_channel("junit", MAX_REPORT_BYTES, owner_uid=runner_uid)
+            imports_channel = open_pipe_channel("runtime_imports", MAX_RUNTIME_IMPORTS_BYTES, owner_uid=runner_uid)
             junit_target = f"/dev/fd/{junit_channel.write_fd}"
             imports_target = f"/dev/fd/{imports_channel.write_fd}"
         else:

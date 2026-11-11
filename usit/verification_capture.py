@@ -63,17 +63,40 @@ class PipeChannel:
     max_bytes: int
 
 
-def open_pipe_channel(name: str, max_bytes: int) -> PipeChannel:
+def open_pipe_channel(name: str, max_bytes: int, owner_uid: int | None = None) -> PipeChannel:
     """Create a parent-held pipe channel. POSIX only; refuses on
     other platforms so callers must choose the staging-file channel
-    there instead of silently falling back."""
+    there instead of silently falling back.
+
+    ``owner_uid`` optionally transfers ownership of the pipe's write
+    end to another user (the parent must run as root). This matters
+    when the child runs as a dedicated user: re-opening a pipe through
+    ``/dev/fd/<N>`` (how pytest's junitxml plugin and the runner
+    plugin write their outputs) re-checks the pipe inode's owner, so
+    a pipe created by root is PermissionError for the runner user
+    even though it inherited the fd. ``os.fchown`` on the write end
+    makes the re-open succeed; the parent (root) keeps reading
+    regardless of ownership.
+    """
     if os.name != "posix":
         raise ValueError("parent-held pipe channels require a POSIX platform")
     if not isinstance(name, str) or not name.strip():
         raise ValueError("pipe channel name must be a non-empty string")
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
         raise ValueError("pipe channel max_bytes must be a positive integer")
+    if owner_uid is not None:
+        if not isinstance(owner_uid, int) or isinstance(owner_uid, bool) or owner_uid < 1:
+            raise ValueError("pipe channel owner_uid must be a positive UID integer")
     read_fd, write_fd = os.pipe()
+    if owner_uid is not None:
+        try:
+            os.fchown(write_fd, owner_uid, -1)
+        except OSError as exc:
+            os.close(read_fd)
+            os.close(write_fd)
+            raise ValueError(
+                f"pipe channel '{name}' ownership transfer failed: {type(exc).__name__}"
+            ) from exc
     return PipeChannel(name=name, read_fd=read_fd, write_fd=write_fd, max_bytes=max_bytes)
 
 

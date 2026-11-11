@@ -600,8 +600,12 @@ class ControlledPytestTests(unittest.TestCase):
         writes the report to a parent-held pipe, so no staging JUnit file
         exists and the hook merely creates a stray file the parent never
         reads. The run passes with the real counts, and the evidence
-        JUnit holds exactly one test.
+        JUnit holds exactly one test. POSIX only: Windows uses the
+        staging-file channel, where the same hook is caught by the
+        cross-check test above.
         """
+        if os.name != "posix":
+            self.skipTest("the pipe channel is POSIX-only")
         conftest = self.project / "tests" / "conftest.py"
         conftest.write_text(
             "import pytest\n"
@@ -641,10 +645,11 @@ class ControlledPytestTests(unittest.TestCase):
             pytest_args=["tests/test_smoke.py"], timeout=60,
         )
         self.assertEqual(result["status"], "PASS", result)
+        expected = "PARENT_PIPE" if os.name == "posix" else "STAGING_FILE"
         provenance = json.loads(
             (Path(result["evidence_dir"]) / "execution-provenance.json").read_text(encoding="utf-8"))
-        self.assertEqual(provenance["output_channel"], "PARENT_PIPE")
-        self.assertEqual(result["output_channel"], "PARENT_PIPE")
+        self.assertEqual(provenance["output_channel"], expected)
+        self.assertEqual(result["output_channel"], expected)
 
     def test_staging_parent_does_not_expose_evidence_dir(self):
         """The test process must not see the evidence run directory via '..'.

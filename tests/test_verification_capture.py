@@ -428,6 +428,27 @@ class PipeChannelTests(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_pipe_channel_reopen_as_other_user_needs_owner_transfer(self):
+        """D1: a pipe re-opened via /dev/fd checks the pipe inode owner.
+
+        A child running as another UID inherits the write fd, but
+        re-opening it through /dev/fd/<N> (how pytest's junitxml plugin
+        writes) re-checks the pipe inode's owner: a root-owned pipe is
+        PermissionError for the runner user. Transferring ownership of
+        the write end with owner_uid makes the re-open succeed.
+        """
+        geteuid = getattr(os, "geteuid", None)
+        runner_name = os.environ.get("USIT_TEST_RUNNER_USER")
+        if geteuid is None or geteuid() != 0 or not runner_name or capture.pwd is None:
+            self.skipTest("needs root and USIT_TEST_RUNNER_USER pointing at an existing user")
+        runner_uid = capture.pwd.getpwnam(runner_name).pw_uid
+        channel = capture.open_pipe_channel("as-runner", 1024 * 1024, owner_uid=runner_uid)
+        code = f"open('/dev/fd/{channel.write_fd}', 'w', encoding='utf-8').write('from-runner')"
+        result = self.run_pipe_capture(code, [channel], user=runner_name)
+        self.assertEqual(result.status, "PASS", result.errors)
+        self.assertEqual(result.pipe_errors, ())
+        self.assertEqual(result.pipe_outputs["as-runner"], b"from-runner")
+
     def test_open_pipe_channel_refuses_non_posix(self):
         with patch.object(os, "name", "nt"):
             with self.assertRaisesRegex(ValueError, "POSIX"):
