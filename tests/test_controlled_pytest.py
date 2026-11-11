@@ -959,6 +959,191 @@ class ControlledPytestTests(unittest.TestCase):
                     runner_user=runner_user,
                 )
 
+    # ---- Windows isolation (E1) ----
+
+    def _windows_runner_user_for_isolation(self):
+        """Return (name, password) for Windows isolation tests, or None to skip.
+
+        Windows isolation integration tests need an administrator parent and
+        a dedicated user named by USIT_TEST_RUNNER_USER with its password in
+        USIT_RUNNER_PASSWORD. CI sets both in the windows-isolation job
+        only; everywhere else these tests skip.
+        """
+        if os.name != "nt":
+            return None
+        name = os.environ.get("USIT_TEST_RUNNER_USER")
+        password = os.environ.get("USIT_RUNNER_PASSWORD")
+        if not name or not password:
+            return None
+        from usit import windows_runner
+
+        if not windows_runner.is_parent_admin():
+            return None
+        if not windows_runner.user_exists(name):
+            return None
+        return name, password
+
+    def test_runner_password_validation_is_fail_closed(self):
+        secret = "E1-test-secret-password"
+        with self.assertRaisesRegex(ValueError, "requires a runner user"):
+            run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+                runner_password=secret,
+            )
+        with self.assertRaisesRegex(ValueError, "only supported on Windows") as ctx:
+            run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+                runner_user="somebody", runner_password=secret,
+            )
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_windows_runner_user_without_password_is_rejected(self):
+        # The password check fires before the authorization file is read,
+        # so this needs no authorization fixture.
+        with patch.object(os, "name", "nt"):
+            with self.assertRaisesRegex(ValueError, "requires runner_password"):
+                run_controlled_pytest(
+                    self.project, evidence_parent=self.evidence,
+                    authorization_file=self.authorization,
+                    pytest_args=["tests/test_smoke.py"], timeout=60,
+                    runner_user="somebody",
+                )
+
+    def test_windows_isolated_run_passes_and_records_runner_isolation(self):
+        isolated = self._windows_runner_user_for_isolation()
+        if isolated is None:
+            self.skipTest("Windows isolation integration tests need an administrator parent and USIT_TEST_RUNNER_USER + USIT_RUNNER_PASSWORD")
+        runner_user, runner_password = isolated
+        self._write_authorization(runner_user=runner_user)
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=120,
+            runner_user=runner_user, runner_password=runner_password,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["runner_isolation"], f"WINDOWS_USER:{runner_user}")
+        self.assertEqual(result["staging_source_mode"], "NOT_HARDENED")
+        self.assertEqual(result["provenance_signature_status"], "VALID")
+        self.assertEqual(result["evidence_manifest_signature_status"], "VALID")
+        # Isolation does not authenticate the runner: the signature proves
+        # the parent produced the documents, not that the tests executed.
+        self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
+        self.assertEqual(result["capture"]["runner_user"], runner_user)
+        self.assertIsNone(result["capture"]["runner_uid"])
+        evidence = Path(result["evidence_dir"])
+        provenance = json.loads((evidence / "execution-provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["runner_isolation"], f"WINDOWS_USER:{runner_user}")
+        self.assertEqual(provenance["staging_source_mode"], "NOT_HARDENED")
+        gate = json.loads((evidence / "final_gate_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(gate["runner_isolation"], f"WINDOWS_USER:{runner_user}")
+        self.assertTrue(any("dedicated Windows user" in item for item in gate["limitations"]))
+        # The password never reaches provenance, the gate report or the result.
+        self.assertNotIn(runner_password, json.dumps(result, ensure_ascii=False))
+        self.assertNotIn(runner_password, (evidence / "execution-provenance.json").read_text(encoding="utf-8"))
+        self.assertNotIn(runner_password, (evidence / "final_gate_report.json").read_text(encoding="utf-8"))
+
+    def test_windows_isolated_test_process_cannot_write_original_project_tree(self):
+        isolated = self._windows_runner_user_for_isolation()
+        if isolated is None:
+            self.skipTest("Windows isolation integration tests need an administrator parent and USIT_TEST_RUNNER_USER + USIT_RUNNER_PASSWORD")
+        runner_user, runner_password = isolated
+        self._write_authorization(runner_user=runner_user)
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "import ctypes\n"
+            "import os\n"
+            "from ctypes import wintypes\n"
+            "from pathlib import Path\n"
+            "def test_windows_isolated_uid_and_original_tree_readonly():\n"
+            "    name = ctypes.create_unicode_buffer(256)\n"
+            "    size = wintypes.DWORD(256)\n"
+            "    assert ctypes.windll.advapi32.GetUserNameW(name, ctypes.byref(size))\n"
+            f"    assert name.value.lower() == {runner_user.lower()!r}\n"
+            "    original = Path(os.environ['USIT_ORIGINAL_PROJECT_ROOT'])\n"
+            "    target = original / 'tests' / 'test_smoke.py'\n"
+            "    try:\n"
+            "        target.write_text('tampered')\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('test process could write the original project tree')\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture proves Windows isolation identity and original tree readonly")
+        before = source.read_bytes()
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=120,
+            runner_user=runner_user, runner_password=runner_password,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(source.read_bytes(), before)
+
+    def test_windows_isolated_run_blocks_writes_into_staging_tree(self):
+        isolated = self._windows_runner_user_for_isolation()
+        if isolated is None:
+            self.skipTest("Windows isolation integration tests need an administrator parent and USIT_TEST_RUNNER_USER + USIT_RUNNER_PASSWORD")
+        runner_user, runner_password = isolated
+        self._write_authorization(runner_user=runner_user)
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "from pathlib import Path\n"
+            "def test_staging_tree_is_readonly():\n"
+            "    try:\n"
+            "        Path('generated-during-test.py').write_text('must fail')\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('test process could create a file in the staging root')\n"
+            "    target = Path('tests') / 'test_smoke.py'\n"
+            "    try:\n"
+            "        target.write_text('tampered')\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('test process could modify a staged source file')\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture proves Windows staging tree is readonly")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=120,
+            runner_user=runner_user, runner_password=runner_password,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["runner_isolation"], f"WINDOWS_USER:{runner_user}")
+        self.assertEqual(result["staging_source_mode"], "NOT_HARDENED")
+
+    def test_windows_isolated_run_still_produces_junit_and_runtime_imports(self):
+        isolated = self._windows_runner_user_for_isolation()
+        if isolated is None:
+            self.skipTest("Windows isolation integration tests need an administrator parent and USIT_TEST_RUNNER_USER + USIT_RUNNER_PASSWORD")
+        runner_user, runner_password = isolated
+        self._write_authorization(runner_user=runner_user)
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=120,
+            runner_user=runner_user, runner_password=runner_password,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        evidence = Path(result["evidence_dir"])
+        junit = evidence / "junit.xml"
+        self.assertTrue(junit.is_file())
+        self.assertGreater(junit.stat().st_size, 0)
+        runtime_imports = evidence / "runtime-imports.json"
+        self.assertTrue(runtime_imports.is_file())
+        self.assertGreater(runtime_imports.stat().st_size, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

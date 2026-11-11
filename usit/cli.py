@@ -1,5 +1,5 @@
 from __future__ import annotations
-import argparse, json, sys, tempfile
+import argparse, json, os, sys, tempfile
 from pathlib import Path
 from .scanner import scan_project
 from .safety import load_authorization_file, authorization_record, canonical_project, canonical_output
@@ -239,7 +239,8 @@ def main(argv=None):
     rp.add_argument('--authorization-file',required=True,help='External usit-test-execution-authorization-v1 record acknowledging project-code execution')
     rp.add_argument('--timeout',type=float,default=1800,help='Maximum execution seconds (default: 1800)')
     rp.add_argument('--pytest-arg',action='append',default=[],help='Allow-listed pytest selector/option; repeat as needed')
-    rp.add_argument('--runner-user',default=None,help='Optional dedicated POSIX user to run the test process as (UID isolation A, Linux only; parent must run as root, user must already exist, and the authorization file must name the same user)')
+    rp.add_argument('--runner-user',default=None,help='Optional dedicated user to run the test process as (UID isolation: Linux POSIX user, parent must run as root; Windows local user, parent must run as administrator and --runner-password is required; user must already exist, and the authorization file must name the same user)')
+    rp.add_argument('--runner-password',default=None,help='Logon password for --runner-user on Windows only; read from the USIT_RUNNER_PASSWORD environment variable when the flag is omitted; never printed or stored in evidence')
     ir=sub.add_parser('ingest-test-results',help='Import completed JUnit XML or pytest JSON results through an explicit mapping; never runs tests')
     ir.add_argument('--junit',required=True,help='JUnit XML report from an already completed test run')
     ir.add_argument('--mapping',required=True,help='Reviewed JSON mapping of exact testcase IDs to business_function_id')
@@ -687,10 +688,12 @@ def main(argv=None):
         if a.cmd=='run-pytest':
             if a.timeout <= 0 or a.timeout > 24*60*60:
                 raise ValueError('timeout must be greater than zero and no more than 24 hours')
+            runner_password = a.runner_password if a.runner_password is not None else os.environ.get('USIT_RUNNER_PASSWORD')
             result=run_controlled_pytest(
                 a.project,evidence_parent=a.evidence_parent,
                 authorization_file=a.authorization_file,pytest_args=a.pytest_arg,
                 timeout=a.timeout,runner_user=a.runner_user,
+                runner_password=runner_password,
             )
             print(json.dumps(result,ensure_ascii=False,indent=2))
             return 0 if result.get('status')=='PASS' else 1

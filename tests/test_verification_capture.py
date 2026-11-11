@@ -279,12 +279,56 @@ class VerificationCaptureTests(unittest.TestCase):
                 self.run_capture("pass", user="nobody")
             popen.assert_not_called()
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
+        # E1: on Windows isolation is a supported path (not a POSIX-only
+        # refusal); without a runner password it is refused before any
+        # process starts.
         with patch.object(os, "name", "nt"), \
              patch.object(capture.subprocess, "Popen") as popen:
-            with self.assertRaisesRegex(ValueError, "POSIX"):
+            with self.assertRaisesRegex(ValueError, "requires user_password"):
                 self.run_capture("pass", user="nobody")
             popen.assert_not_called()
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+    def test_runner_password_requires_user_and_windows(self):
+        secret = "E1-test-secret-password"
+        with self.assertRaisesRegex(ValueError, "requires a runner user"):
+            self.run_capture("pass", user_password=secret)
+        with self.assertRaisesRegex(ValueError, "only supported on Windows") as ctx:
+            self.run_capture("pass", user="nobody", user_password=secret)
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_windows_runner_user_resolution(self):
+        # Fake the Windows helper module so the resolution branches are
+        # exercised on any platform (the real module refuses to import
+        # off Windows).
+        fake = types.SimpleNamespace(
+            is_parent_admin=lambda: True,
+            user_exists=lambda name: name == "usit-runner",
+        )
+        with patch.object(os, "name", "nt"), \
+             patch.dict(sys.modules, {"usit.windows_runner": fake}), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            name, uid = capture._resolve_runner_user("usit-runner")
+            self.assertEqual((name, uid), ("usit-runner", None))
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                capture._resolve_runner_user("no-such-user")
+            with self.assertRaisesRegex(ValueError, "username string, not a UID"):
+                capture._resolve_runner_user(1234)
+            popen.assert_not_called()
+        fake_non_admin = types.SimpleNamespace(
+            is_parent_admin=lambda: False, user_exists=lambda name: True)
+        with patch.object(os, "name", "nt"), \
+             patch.dict(sys.modules, {"usit.windows_runner": fake_non_admin}):
+            with self.assertRaisesRegex(ValueError, "run as administrator"):
+                capture._resolve_runner_user("usit-runner")
+
+    def test_windows_runner_module_refuses_non_windows_import(self):
+        if os.name == "nt":
+            self.skipTest("windows_runner imports fine on Windows")
+        import importlib
+
+        with self.assertRaisesRegex(ValueError, "Windows platform"):
+            importlib.import_module("usit.windows_runner")
 
     def test_unknown_runner_user_is_rejected_without_starting_process(self):
         # Mock a root parent on POSIX plus a pwd stand-in whose lookups

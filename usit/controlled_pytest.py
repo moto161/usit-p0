@@ -654,6 +654,7 @@ def run_controlled_pytest(
     pytest_args: Sequence[str] = (),
     timeout: float = 1800,
     runner_user: str | None = None,
+    runner_password: str | None = None,
 ) -> dict[str, Any]:
     """Execute pytest against a clean, staged Git HEAD and produce bound evidence.
 
@@ -661,34 +662,72 @@ def run_controlled_pytest(
     explicitly acknowledge arbitrary project-code execution. Runner authenticity
     remains UNAUTHENTICATED until a platform-backed attestation is implemented.
 
-    ``runner_user`` optionally runs the test process as a dedicated POSIX user
-    (UID isolation A, Linux only): the parent must run as root, the user must
-    already exist, and the authorization file must name the same user. Any
-    refusal raises ValueError before execution; there is no silent fallback
-    to running as the parent user.
+    ``runner_user`` optionally runs the test process as a dedicated user
+    (UID isolation A on Linux: the parent must run as root, the user must
+    already exist, and the authorization file must name the same user;
+    Windows isolation E1: a dedicated local user, the parent must run as
+    administrator, and ``runner_password`` must supply that user's logon
+    password). Any refusal raises ValueError before execution; there is no
+    silent fallback to running as the parent user. ``runner_password`` is
+    never written to disk, never added to the child environment, and never
+    appears in provenance, logs or errors.
     """
-    project = _canonical_dir(project_root, "project root")
-    parent = _canonical_dir(evidence_parent, "evidence parent")
-    if parent == project or project.is_relative_to(parent) or parent.is_relative_to(project):
-        raise ValueError("evidence_parent and project_root must not overlap")
+    # Fail-fast validation first (before any path canonicalization):
+    # patching os.name to "nt" changes how pathlib.Path dispatches new
+    # path objects, so the isolation checks must not depend on paths
+    # already being canonicalized. Mirrors capture_run's ordering.
     if not math.isfinite(timeout) or timeout <= 0 or timeout > 24 * 60 * 60:
         raise ValueError("timeout must be finite, greater than zero and no more than 24 hours")
     if runner_user is not None and (not isinstance(runner_user, str) or not runner_user):
         raise ValueError("runner_user must be a non-empty username string")
+    if runner_password is not None:
+        if runner_user is None:
+            raise ValueError("runner_password requires a runner user")
+        if os.name != "nt":
+            raise ValueError("runner_password is only supported on Windows")
+        if not isinstance(runner_password, str) or not runner_password:
+            raise ValueError("runner_password must be a non-empty string")
+    if os.name == "nt" and runner_user is not None and not runner_password:
+        raise ValueError("running as a dedicated user on Windows requires runner_password")
+    project = _canonical_dir(project_root, "project root")
+    parent = _canonical_dir(evidence_parent, "evidence parent")
+    if parent == project or project.is_relative_to(parent) or parent.is_relative_to(project):
+        raise ValueError("evidence_parent and project_root must not overlap")
     authorization = _load_authorization(authorization_file, project, parent, runner_user=runner_user)
     # Resolve early (before any Git work or staging) so a refused isolation
     # request fails fast and never reaches execution.
     runner_user_name, runner_uid = _resolve_runner_user(runner_user)
-    runner_isolation = f"POSIX_USER:{runner_user_name}" if runner_user_name is not None else "NONE"
-    # A2: the staged source tree is read-only exactly when the run is
-    # isolated (see _make_staging_read_only); non-isolated runs keep a
-    # writable staging tree.
-    staging_source_mode = "READ_ONLY" if runner_user_name is not None else "WRITABLE"
+    if runner_user_name is None:
+        runner_isolation = "NONE"
+        # Non-isolated runs keep a writable staging tree.
+        staging_source_mode = "WRITABLE"
+    elif os.name == "nt":
+        runner_isolation = f"WINDOWS_USER:{runner_user_name}"
+        # E1: no explicit read-only hardening yet (E2 adds icacls ACLs);
+        # the tree is isolated only by cross-user ownership.
+        staging_source_mode = "NOT_HARDENED"
+    else:
+        runner_isolation = f"POSIX_USER:{runner_user_name}"
+        # A2: the staged source tree is read-only exactly when the run is
+        # isolated (see _make_staging_read_only).
+        staging_source_mode = "READ_ONLY"
     if runner_isolation == "NONE":
         isolation_limitation = (
             "No UID isolation was requested, so the test process ran as the parent user: "
             "it could read any parent-owned file the OS permits, and the HMAC key file was "
             "protected only by its 0600 mode and by being written after the test process exited."
+        )
+    elif os.name == "nt":
+        isolation_limitation = (
+            f"The test process ran as dedicated Windows user {runner_user_name}: it cannot write "
+            "the evidence directory, the HMAC key file, or the original project tree. The staged "
+            "source tree is isolated only by cross-user ownership in E1 (no explicit read-only "
+            "hardening yet; E2 adds icacls ACLs). Its JUnit report and runtime-imports manifest "
+            "travel through staging files (Windows has no parent-held pipe channel), so it can "
+            "still write false data into them, bounded by the stdout summary cross-check and the "
+            "snapshot binding, so provenance_authenticity_status stays UNAUTHENTICATED. It can "
+            "still read world-readable files, reach the network, and consume host resources, so "
+            "this is not a sandbox and provenance_authenticity_status stays UNAUTHENTICATED."
         )
     elif _PIPE_CHANNEL:
         isolation_limitation = (
@@ -824,11 +863,23 @@ def run_controlled_pytest(
             _chown_tree(staging, runner_uid)
             _make_staging_read_only(
                 staging, frozenset() if _PIPE_CHANNEL else _WRITABLE_STAGING_FILES)
+        if runner_user_name is not None and os.name == "nt":
+            # E1: the runner user must be able to write exactly the four
+            # paths it legitimately writes (the two pre-created output files
+            # and HOME/TMPDIR); everything else in staging stays owned by
+            # the parent (cross-user isolation until E2 adds icacls denies).
+            # Any icacls failure refuses the run (fail-closed).
+            from usit import windows_runner
+
+            windows_runner.grant_modify_access(
+                [staging / ".usit-junit.xml", staging / ".usit-runtime-imports.json",
+                 staging / ".usit-home", staging / ".usit-tmp"],
+                runner_user_name)
         capture = capture_run(
             command, project_root=staging, evidence_parent=parent,
             files=[item["path"] for item in source_files],
             approval_ref=authorization["approval_ref"], cwd=staging, env=env, timeout=timeout,
-            user=runner_user,
+            user=runner_user, user_password=runner_password,
             pipe_channels=[c for c in (junit_channel, imports_channel) if c is not None] or None,
         )
         evidence = Path(capture.evidence_dir)

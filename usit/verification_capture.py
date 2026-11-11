@@ -205,14 +205,36 @@ class CaptureResult:
 def _resolve_runner_user(user: str | int | None) -> tuple[str | None, int | None]:
     """Resolve a requested runner user to (name, uid); (None, None) when unset.
 
-    Fail-closed: a non-POSIX platform, a non-root parent, an unknown name,
-    or uid 0 is refused with ValueError. Callers must never silently fall
-    back to running as the parent UID when isolation was requested.
+    Fail-closed: an unknown name, uid 0, a non-root POSIX parent, a
+    non-administrator Windows parent, or a missing Windows password is
+    refused with ValueError. Callers must never silently fall back to
+    running as the parent user when isolation was requested.
+
+    On Windows the uid element is always None (Windows has no POSIX uid);
+    callers must tell the platforms apart with ``os.name``, never by
+    treating the second element as an identity.
     """
     if user is None:
         return None, None
     if isinstance(user, bool) or not isinstance(user, (str, int)):
         raise ValueError("runner user must be a username string or a UID integer")
+    if os.name == "nt":
+        # E1: Windows isolation runs the test process as a dedicated local
+        # user via LogonUser/CreateProcessAsUser (see usit.windows_runner).
+        # The password is supplied separately at spawn time (capture_run's
+        # user_password); resolution only checks the user exists and the
+        # parent can hand out a primary token.
+        if isinstance(user, int):
+            raise ValueError("Windows runner user must be a username string, not a UID integer")
+        if not user:
+            raise ValueError("runner user name must not be empty")
+        from usit import windows_runner
+
+        if not windows_runner.is_parent_admin():
+            raise ValueError("running as a dedicated user on Windows requires the parent process to run as administrator")
+        if not windows_runner.user_exists(user):
+            raise ValueError(f"runner user does not exist: {user}")
+        return user, None
     if os.name != "posix":
         raise ValueError("running as a dedicated user requires a POSIX platform")
     geteuid = getattr(os, "geteuid", None)
@@ -463,6 +485,7 @@ def capture_run(
     interrupt_event: threading.Event | None = None,
     poll_interval: float = 0.05,
     user: str | int | None = None,
+    user_password: str | None = None,
     pipe_channels: Sequence[PipeChannel] | None = None,
 ) -> CaptureResult:
     """Run one argv command and capture bounded, explicitly named evidence.
@@ -475,8 +498,12 @@ def capture_run(
 
     ``user`` optionally runs the command as a dedicated POSIX user
     (``subprocess.Popen(user=...)``): the parent must run as root, the user
-    must exist, and uid 0 is refused. Any refusal raises ValueError before
-    the process starts; there is no silent fallback to the parent UID.
+    must exist, and uid 0 is refused. On Windows (E1) ``user`` names a
+    dedicated local user and ``user_password`` (required, never logged, never
+    stored in provenance) supplies its logon password for
+    ``LogonUser``/``CreateProcessAsUser``; the parent must run as
+    administrator. Any refusal raises ValueError before the process starts;
+    there is no silent fallback to the parent identity.
 
     ``pipe_channels`` optionally hands the child parent-held pipe write ends
     (see :class:`PipeChannel`): the child writes its outputs to
@@ -520,6 +547,17 @@ def capture_run(
             if not isinstance(channel.max_bytes, int) or isinstance(channel.max_bytes, bool) or channel.max_bytes <= 0:
                 raise ValueError(f"pipe channel '{channel.name}' has an invalid max_bytes")
         drains = [_PipeDrain(channel) for channel in pipe_channels]
+    # E1: the Windows runner password is fail-closed validated here, before
+    # any spawning. It is never logged and never reaches provenance.
+    if user_password is not None:
+        if user is None:
+            raise ValueError("user_password requires a runner user")
+        if os.name != "nt":
+            raise ValueError("user_password is only supported on Windows")
+        if not isinstance(user_password, str) or not user_password:
+            raise ValueError("user_password must be a non-empty string")
+    if os.name == "nt" and user is not None and not user_password:
+        raise ValueError("running as a dedicated user on Windows requires user_password")
     runner_user, runner_uid = _resolve_runner_user(user)
 
     project = _canonical_directory(project_root, "project root")
@@ -562,13 +600,30 @@ def capture_run(
                 status = "NOT_VERIFIED"
             else:
                 try:
-                    process = subprocess.Popen(
-                        list(command), cwd=work, stdin=subprocess.DEVNULL,
-                        stdout=out_stream, stderr=err_stream, shell=False,
-                        close_fds=True, env=None if env is None else dict(env),
-                        user=runner_uid,
-                        pass_fds=tuple(drain.channel.write_fd for drain in drains),
-                    )
+                    if os.name == "nt" and runner_user is not None:
+                        # E1: Windows has no Popen(user=...); spawn through
+                        # LogonUser/CreateProcessAsUser. The token is the
+                        # parent's copy; it is closed once the child exists.
+                        from usit import windows_runner
+
+                        token = windows_runner.logon_user_primary_token(
+                            runner_user, user_password)
+                        try:
+                            process = windows_runner.spawn_as_user(
+                                list(command), cwd=work,
+                                env=None if env is None else dict(env),
+                                stdout_file=out_stream, stderr_file=err_stream,
+                                token=token)
+                        finally:
+                            windows_runner.close_handle(token)
+                    else:
+                        process = subprocess.Popen(
+                            list(command), cwd=work, stdin=subprocess.DEVNULL,
+                            stdout=out_stream, stderr=err_stream, shell=False,
+                            close_fds=True, env=None if env is None else dict(env),
+                            user=runner_uid,
+                            pass_fds=tuple(drain.channel.write_fd for drain in drains),
+                        )
                     process_started = True
                 except OSError as exc:
                     errors.append(f"startup failed: {type(exc).__name__}: {exc}")

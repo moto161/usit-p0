@@ -78,6 +78,50 @@ jobs:
       - name: Run required gate as root with dedicated runner user
         run: sudo USIT_TEST_RUNNER_USER=usit-runner "$(which python)" -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_test_result_importer tests.test_pytest_result_importer tests.test_test_report_adapters tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_business_evidence_loop tests.test_business_evidence_loop_b2 tests.test_test_plan_generation tests.test_verification_gap_analyzer tests.test_project_quality_assessment tests.test_business_traceability tests.test_traceability_cli_io tests.test_traceability_template tests.test_business_graph tests.test_graph_validation tests.test_graph_argument_bindings tests.test_database_access tests.test_permission_evidence tests.test_python_resolver tests.test_security_test_planner tests.test_identity_evidence tests.test_identity_graph tests.test_runtime_evidence tests.test_android_event_adapter tests.test_ai_gateway tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_ai_evidence_binding  tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_execution_provenance tests.test_evidence_signing tests.test_controlled_pytest tests.test_verification_capture tests.test_p074_identity_ctime tests.test_p0710zrf12_content_verification tests.test_p079_public_paths tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_js_ts_adapter_regressions -v
 
+  windows-isolation-regression:
+    # Optional (non-required) Windows job: runs the same Windows boundary
+    # list as windows-regression, but with USIT_TEST_RUNNER_USER set, so
+    # the Windows isolation (E1) integration tests in
+    # test_controlled_pytest.py actually run instead of skipping. The
+    # runner user is created with a random password that is masked and
+    # passed to the test step through GITHUB_ENV only; it is never
+    # printed, and the runner VM is discarded after the job. The parent
+    # (the Actions agent) runs as administrator, which
+    # LogonUser/CreateProcessAsUser requires.
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      USIT_TEST_RUNNER_USER: usit-runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install pinned Python runtime dependencies
+        run: python -m pip install 'cryptography==50.0.2' 'pytest==8.3.5'
+      - name: Install the pinned local TypeScript parser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Create dedicated runner user with a random password
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Web
+          $password = [System.Web.Security.Membership]::GeneratePassword(24, 4)
+          Write-Output "::add-mask::$password"
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "usit-runner" -Password $secure -Description "USIT isolated test runner" -PasswordNeverExpires
+          if (-not (Get-LocalGroupMember -Group "Users" -Member "usit-runner" -ErrorAction SilentlyContinue)) {
+            Add-LocalGroupMember -Group "Users" -Member "usit-runner"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "USIT_RUNNER_PASSWORD=$password"
+      - name: Run USIT self-test on Windows
+        run: python -m usit selftest
+      - name: Run Windows boundary tests with dedicated runner user
+        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_execution_provenance tests.test_evidence_signing tests.test_controlled_pytest tests.test_verification_capture tests.test_runtime_evidence tests.test_android_event_adapter tests.test_test_result_importer tests.test_traceability_cli_io tests.test_graph_validation tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_business_evidence_loop tests.test_business_evidence_loop_b2 tests.test_test_plan_generation tests.test_p0710zrf12_content_verification -v
+
   windows-regression:
     runs-on: windows-latest
     env:
