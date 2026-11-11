@@ -34,10 +34,16 @@ from ctypes import wintypes
 if os.name != "nt":  # pragma: no cover - import guard, exercised on POSIX by test
     raise ValueError("usit.windows_runner requires a Windows platform")
 
-_advapi32 = ctypes.WinDLL("advapi32", use_errno=True)
-_kernel32 = ctypes.WinDLL("kernel32", use_errno=True)
-_netapi32 = ctypes.WinDLL("netapi32", use_errno=True)
-_shell32 = ctypes.WinDLL("shell32", use_errno=True)
+# use_last_error=True is mandatory: _win32_error reads the Win32 last-error
+# value through ctypes.get_last_error(). With use_errno only, every failure
+# reported "Win32 error 0" (Run #1562) and the real cause was invisible.
+# argtypes/restype are equally mandatory: without them ctypes passes
+# Python str as ANSI bytes where LPWSTR is expected and truncates 64-bit
+# HANDLE values to 32-bit int.
+_advapi32 = ctypes.WinDLL("advapi32", use_errno=True, use_last_error=True)
+_kernel32 = ctypes.WinDLL("kernel32", use_errno=True, use_last_error=True)
+_netapi32 = ctypes.WinDLL("netapi32", use_errno=True, use_last_error=True)
+_shell32 = ctypes.WinDLL("shell32", use_errno=True, use_last_error=True)
 
 LOGON32_LOGON_INTERACTIVE = 2
 LOGON32_LOGON_BATCH = 4
@@ -55,6 +61,53 @@ HANDLE = wintypes.HANDLE
 DWORD = wintypes.DWORD
 BOOL = wintypes.BOOL
 LPWSTR = wintypes.LPWSTR
+
+TOKEN_ADJUST_PRIVILEGES = 0x00000020
+TOKEN_QUERY = 0x00000008
+SE_PRIVILEGE_ENABLED = 0x00000002
+ERROR_NOT_ALL_ASSIGNED = 1300
+
+
+class LUID(ctypes.Structure):
+    _fields_ = [("LowPart", DWORD), ("HighPart", ctypes.c_long)]
+
+
+class LUID_AND_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("Luid", LUID), ("Attributes", DWORD)]
+
+
+class TOKEN_PRIVILEGES(ctypes.Structure):
+    _fields_ = [("PrivilegeCount", DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
+
+_advapi32.LogonUserW.argtypes = [LPWSTR, LPWSTR, LPWSTR, DWORD, DWORD, ctypes.POINTER(HANDLE)]
+_advapi32.LogonUserW.restype = BOOL
+_advapi32.OpenProcessToken.argtypes = [HANDLE, DWORD, ctypes.POINTER(HANDLE)]
+_advapi32.OpenProcessToken.restype = BOOL
+_advapi32.LookupPrivilegeValueW.argtypes = [LPWSTR, LPWSTR, ctypes.POINTER(LUID)]
+_advapi32.LookupPrivilegeValueW.restype = BOOL
+_advapi32.AdjustTokenPrivileges.argtypes = [HANDLE, BOOL, ctypes.POINTER(TOKEN_PRIVILEGES), DWORD, ctypes.c_void_p, ctypes.c_void_p]
+_advapi32.AdjustTokenPrivileges.restype = BOOL
+_kernel32.CreateProcessAsUserW.argtypes = [HANDLE, LPWSTR, LPWSTR, ctypes.c_void_p, ctypes.c_void_p, BOOL, DWORD, ctypes.c_void_p, LPWSTR, ctypes.c_void_p, ctypes.c_void_p]
+_kernel32.CreateProcessAsUserW.restype = BOOL
+_kernel32.SetHandleInformation.argtypes = [HANDLE, DWORD, DWORD]
+_kernel32.SetHandleInformation.restype = BOOL
+_kernel32.WaitForSingleObject.argtypes = [HANDLE, DWORD]
+_kernel32.WaitForSingleObject.restype = DWORD
+_kernel32.GetExitCodeProcess.argtypes = [HANDLE, ctypes.POINTER(DWORD)]
+_kernel32.GetExitCodeProcess.restype = BOOL
+_kernel32.TerminateProcess.argtypes = [HANDLE, wintypes.UINT]
+_kernel32.TerminateProcess.restype = BOOL
+_kernel32.CloseHandle.argtypes = [HANDLE]
+_kernel32.CloseHandle.restype = BOOL
+_kernel32.GetCurrentProcess.argtypes = []
+_kernel32.GetCurrentProcess.restype = HANDLE
+_netapi32.NetUserGetInfo.argtypes = [LPWSTR, LPWSTR, DWORD, ctypes.POINTER(ctypes.c_void_p)]
+_netapi32.NetUserGetInfo.restype = DWORD
+_netapi32.NetApiBufferFree.argtypes = [ctypes.c_void_p]
+_netapi32.NetApiBufferFree.restype = DWORD
+_shell32.IsUserAnAdmin.argtypes = []
+_shell32.IsUserAnAdmin.restype = BOOL
 
 
 class STARTUPINFOW(ctypes.Structure):
@@ -248,6 +301,39 @@ def grant_modify_access(paths, username: str) -> None:
             raise ValueError(f"icacls grant failed for the runner user: {detail[:500]}")
 
 
+def _enable_privileges(names) -> None:
+    """Enable already-held privileges in the parent token (fail-closed).
+
+    CreateProcessAsUser needs SeAssignPrimaryTokenPrivilege and
+    SeIncreaseQuotaPrivilege enabled in the caller's token. An
+    administrator token holds both but has them disabled by default;
+    enabling only affects this process's own token. AdjustTokenPrivileges
+    returns TRUE even when a privilege was not assigned, so the last
+    error must be checked fresh (ERROR_NOT_ALL_ASSIGNED = 1300).
+    """
+    process = _kernel32.GetCurrentProcess()
+    token = HANDLE()
+    if not _advapi32.OpenProcessToken(process, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ctypes.byref(token)):
+        raise _win32_error("opening the parent process token")
+    try:
+        for name in names:
+            luid = LUID()
+            if not _advapi32.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+                raise _win32_error(f"looking up privilege {name}")
+            privileges = TOKEN_PRIVILEGES()
+            privileges.PrivilegeCount = 1
+            privileges.Privileges[0].Luid = luid
+            privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+            ctypes.set_last_error(0)
+            if not _advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(privileges), 0, None, None):
+                raise _win32_error(f"enabling privilege {name}")
+            if ctypes.get_last_error() == ERROR_NOT_ALL_ASSIGNED:
+                raise ValueError(
+                    f"enabling privilege {name} failed: Win32 error {ERROR_NOT_ALL_ASSIGNED} (privilege not held)")
+    finally:
+        _kernel32.CloseHandle(token)
+
+
 def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, token) -> WindowsProcess:
     """Spawn ``command`` (argv list) as the user behind ``token``.
 
@@ -262,12 +348,21 @@ def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, token) -> Wind
 
     command_line = ctypes.create_unicode_buffer(list2cmdline(list(command)))
     env_block = _environment_block(env)
-    stdin_handle = os.open(os.devnull, os.O_RDONLY)
+    # The stdin handle must be a real Windows HANDLE, not the CRT file
+    # descriptor os.open returns: STARTUPINFO takes HANDLEs, and a small
+    # integer fd is either invalid or, worse, a different kernel handle.
+    import msvcrt
+
+    stdin_fd = os.open(os.devnull, os.O_RDONLY)
     try:
+        stdin_handle = msvcrt.get_osfhandle(stdin_fd)
         if not _kernel32.SetHandleInformation(stdin_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT):
             raise _win32_error("marking the child stdin handle inheritable")
         stdout_handle = _inheritable_handle(stdout_file)
         stderr_handle = _inheritable_handle(stderr_file)
+        # CreateProcessAsUser needs these privileges enabled in the parent
+        # token (an administrator token holds them disabled by default).
+        _enable_privileges(("SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"))
         startup = STARTUPINFOW()
         startup.cb = ctypes.sizeof(startup)
         startup.dwFlags = STARTF_USESTDHANDLES
@@ -289,6 +384,6 @@ def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, token) -> Wind
         return WindowsProcess(info.hProcess, info.dwProcessId)
     finally:
         try:
-            os.close(stdin_handle)
+            os.close(stdin_fd)
         except OSError:
             pass
