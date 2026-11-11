@@ -152,16 +152,23 @@ def parser_availability(project_root: Path) -> dict[str, Any]:
     if not node:
         return {"available": False, "reason": "NODE_RUNTIME_MISSING", "parser_name": PARSER_NAME}
     trust = verify_ts_lib_trust(USIT_ROOT)
+    # P0.7.9: public capability output must not disclose absolute install paths.
+    # Report only the trust decision; detailed paths remain internal to the
+    # verifier and are never serialized into project-facing output.
+    load_status = {
+        "typescript_install": "PROJECT_LOCAL",
+        "typescript_install_path_status": (
+            "VERIFIED_WITHIN_USIT_ROOT" if trust["trusted"] else "NOT_VERIFIED"
+        ),
+    }
     if not trust["trusted"]:
         return {
             "available": False, "reason": trust["reason"], "node": node,
-            "ts_lib": trust["ts_lib"], "ts_lib_real_path": trust["real_path"],
-            "parser_name": PARSER_NAME,
+            "parser_name": PARSER_NAME, **load_status,
         }
     return {
         "available": True, "node": node, "version": trust["version"],
-        "ts_lib": trust["ts_lib"], "ts_lib_real_path": trust["real_path"],
-        "parser_name": PARSER_NAME,
+        "parser_name": PARSER_NAME, **load_status,
     }
 
 
@@ -186,6 +193,14 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
     root = project_root.resolve(strict=True)
     supervisor = supervisor if supervisor is not None else ParserTaskSupervisor()
     availability = parser_availability(root)
+    # Public parser output is a strict allow-list. Never forward verifier or
+    # adapter internals such as absolute TypeScript install paths.
+    public_availability = {
+        key: availability[key]
+        for key in ("available", "reason", "version", "parser_name",
+                    "typescript_install", "typescript_install_path_status")
+        if key in availability
+    }
     if js_ts_source is not None:
         # Memory mode (P0.7.5): the relative path set is derived from the
         # already-verified source map (project-relative strings).  We never
@@ -205,7 +220,7 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
             "parser_name": PARSER_NAME,
             "parser_version": "UNAVAILABLE",
             "available": False,
-            "availability": availability,
+            "availability": public_availability,
             "project_diagnostics": [{"code": availability["reason"], "severity": "UNKNOWN"}],
             "files": {}, "records": [],
         }
@@ -264,5 +279,5 @@ def analyze_js_ts_project(project_root: Path, source_paths: list[Path], *, super
             "project_diagnostics": [{"code": "ADAPTER_INVALID_JSON", "severity": "ERROR"}],
             "files": {}, "records": [],
         }
-    result["availability"] = availability
+    result["availability"] = public_availability
     return result

@@ -1,0 +1,16 @@
+{
+  "phase": "BEFORE fix",
+  "scenario": "A=200 lines captured; B=same-size 1 line at the path; identities=None",
+  "record": {
+    "line_count": 200,
+    "identity_source": "self_observed",
+    "identity_available": true
+  },
+  "verified_mapping": {
+    "app.py": 200
+  },
+  "strict_status": "VALID",
+  "strict_codes": [],
+  "accepts_A_count_as_trusted": true,
+  "provenance": "reconstructed verbatim from B3_BEFORE_FIX.log (the pre-fix run's raw stdout); the original JSON was accidentally overwritten by a post-fix re-run of the probe that used the default phase -- a test-harness mistake, disclosed in the ZRFX report"
+}

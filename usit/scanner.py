@@ -103,12 +103,14 @@ def is_sensitive(rel: str) -> bool:
     return False
 
 def discover_files(root: Path, *, deadline: float | None = None, clock=time.monotonic,
-                   identities: dict[str, tuple[int, int]] | None = None) -> list[Path]:
+                   identities: dict[str, tuple[int, ...]] | None = None) -> list[Path]:
     """Bounded, deterministic discovery. Any unsafe path or budget ambiguity blocks the scan.
 
-    P0.7.4: when ``identities`` is supplied it is filled with the ``(st_dev,
-    st_ino)`` identity of every accepted file, keyed by its project-relative
-    POSIX path.  A later open compares the *opened handle's* identity against
+    P0.7.4: when ``identities`` is supplied it is filled with a platform-aware
+    identity. Windows uses the stable file index ``(st_dev, st_ino)`` because
+    Windows ``st_ctime_ns`` is not a reliable cross-call identity field; POSIX
+    adds ctime, size and mtime to reduce inode-reuse ambiguity. A later open compares
+    the *opened handle's* identity against
     this discovery-time identity, which is what detects a path that was swapped
     for a link (including an intermediate directory junction) after discovery.
     """
@@ -170,7 +172,16 @@ def discover_files(root: Path, *, deadline: float | None = None, clock=time.mono
             total_bytes+=size
             out.append(path)
             if identities is not None:
-                identities[rel]=safeio.identity_of(info)
+                # Windows reports creation-time semantics for st_ctime and
+                # fstat/stat can differ across the handle boundary. Its file
+                # index is the stable identity; POSIX additionally records
+                # change time and content metadata to catch rapid inode reuse.
+                base_identity = safeio.identity_of(info)
+                if os.name == 'nt':
+                    identities[rel] = base_identity
+                else:
+                    identities[rel] = (*base_identity, int(info.st_ctime_ns),
+                                        int(info.st_size), int(info.st_mtime_ns))
     return sorted(out,key=lambda path:path.relative_to(root).as_posix().casefold())
 
 def lang_for(path: Path) -> str:
@@ -231,7 +242,7 @@ def _write_scan_status(directory: Path, exc: BaseException) -> None:
         pass
 
 
-def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int] | None = None,
+def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, ...] | None = None,
                     identity_out: dict[str, Any] | None = None) -> bytes:
     """Open a discovered input file and read it without following an escape.
 
@@ -245,7 +256,7 @@ def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int
     2. The descriptor requests read access only, so a concurrent write, rename or
        delete is denied while it is held.
     3. The descriptor's reparse attribute and hard-link count are checked, and its
-       identity ``(st_dev, st_ino)`` is compared against the identity recorded at
+       identity ``(st_dev, st_ino, st_ctime_ns)`` is compared against the identity recorded at
        discovery.  A mismatch means the path was substituted for a different file
        — including an *intermediate* directory junction, which the final-component
        no-follow cannot see — and the scan fails closed before reading.
@@ -292,9 +303,21 @@ def open_input_file(path: Path, limit: int, *, expected_identity: tuple[int, int
             raise ScanBlocked('REPARSE_POINT_REJECTED', 'Input path is a symbolic link, junction or reparse point.')
         if getattr(info, 'st_nlink', 1) > 1:
             raise ScanBlocked('HARD_LINK_REJECTED', 'Input file has multiple hard links; refusing to read a multiply-linked file.')
-        if expected_identity is not None and safeio.identity_of(info) != tuple(expected_identity):
-            raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
-                              'The opened file is not the file that was discovered; the input was substituted before reading.')
+        if expected_identity is not None:
+            expected = tuple(expected_identity)
+            if safeio.identity_of(info) != expected[:2]:
+                raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                  'The opened file is not the file that was discovered; the input was substituted before reading.')
+            if len(expected) >= 3:
+                try:
+                    opened_metadata = (int(info.st_ctime_ns), int(info.st_size),
+                                       int(info.st_mtime_ns))
+                except (AttributeError, TypeError, ValueError):
+                    raise ScanBlocked('FILE_IDENTITY_UNAVAILABLE',
+                                      'The opened file identity metadata is incomplete; refusing to read.')
+                if any(actual != wanted for actual, wanted in zip(opened_metadata, expected[2:5])):
+                    raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                      'The opened file metadata changed after discovery; refusing to read.')
         return os.read(fd, limit + 1)
     finally:
         try:
@@ -791,8 +814,31 @@ def scan_project(project: str, out_dir: str, force: bool = False, *, authorizati
             # a swapped or linked path (including an intermediate junction) is
             # detected at open time instead of being silently followed.
             rel=p.relative_to(root).as_posix()
+            expected_identity = identities.get(rel)
+            if expected_identity is None:
+                raise ScanBlocked('FILE_IDENTITY_UNAVAILABLE',
+                                  'Discovery did not provide a verifiable identity for an input file.')
+            # Recheck the path metadata immediately before opening, then let
+            # open_input_file compare the opened descriptor as well. This
+            # closes the POSIX unlink/recreate window even on filesystems that
+            # rapidly recycle inode numbers.
+            try:
+                pre_open_info = os.stat(p, follow_symlinks=False)
+            except OSError as exc:
+                raise ScanBlocked('FILE_STAT_FAILED',
+                                  'Input changed or became inaccessible before opening.') from exc
+            if safeio.identity_of(pre_open_info) != tuple(expected_identity[:2]):
+                raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                  'The input path no longer identifies the file recorded at discovery.')
+            if os.name != 'nt' and len(expected_identity) >= 5:
+                observed_metadata = (int(pre_open_info.st_ctime_ns),
+                                     int(pre_open_info.st_size),
+                                     int(pre_open_info.st_mtime_ns))
+                if observed_metadata != tuple(expected_identity[2:5]):
+                    raise ScanBlocked('FILE_SUBSTITUTED_DURING_SCAN',
+                                      'The input metadata changed after discovery; refusing to open it.')
             box: dict[str, Any] = {}
-            raw=open_input_file(p, MAX_FILE_BYTES, expected_identity=identities.get(rel),
+            raw=open_input_file(p, MAX_FILE_BYTES, expected_identity=expected_identity,
                                 identity_out=box)
             descriptor_ids[rel]=box.get('identity')
             if len(raw)>MAX_FILE_BYTES: raise ScanBlocked('MAX_FILE_SIZE_EXCEEDED','Input exceeded the per-file read limit.')

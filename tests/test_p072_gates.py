@@ -84,7 +84,9 @@ class AuthorizationAndPathGateTests(unittest.TestCase):
         self.assertEqual(summary["files_scanned"], 1)
         # Same directory expressed with a trailing separator, a "." segment and
         # different casing must resolve to the same authorized root.
-        variants = [str(project.root) + os.sep, str(project.root) + os.sep + ".", str(project.root).upper()]
+        variants = [str(project.root) + os.sep, str(project.root) + os.sep + "."]
+        if os.name == "nt":
+            variants.append(str(project.root).upper())
         for variant in variants:
             with self.subTest(variant=variant):
                 self.assertEqual(scanner.canonical_project(variant), scanner.canonical_project(project.root))
