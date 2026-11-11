@@ -83,6 +83,7 @@ jobs:
       - name: Run USIT self-test on Windows
         run: python -m usit selftest
       - name: Run main full regression suite on Windows (gating; same exclusion as Linux)
+        shell: bash
         run: |
           python - <<'PY'
           import unittest
