@@ -233,7 +233,9 @@ def verify_business_function_evidence(
                     })
                 cs = "UNKNOWN"
                 percent = None
-            elif all(item["source_binding_status"] == "SOURCE_BYTES_MATCHED" for item in source_evidence):
+            elif (not missing_files and all(
+                item["source_binding_status"] == "SOURCE_BYTES_MATCHED" for item in source_evidence
+            )):
                 coverage_source_verified = True
             else:
                 if cs != "UNKNOWN" or percent is not None:
