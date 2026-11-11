@@ -735,10 +735,11 @@ def run_controlled_pytest(
         staging_source_mode = "WRITABLE"
     elif os.name == "nt":
         runner_isolation = f"WINDOWS_USER:{runner_user_name}"
-        # E1: the tree is explicitly granted Read & Execute for the runner
-        # user (see the icacls grants below), but no explicit write deny
-        # yet -- that is E2, which flips this to READ_ONLY.
-        staging_source_mode = "NOT_HARDENED"
+        # E2: the tree is explicitly read-only for the runner user (deny
+        # Write on every entry except the four writable paths); only the
+        # JUnit report, the runtime-imports manifest and HOME/TMPDIR stay
+        # writable.
+        staging_source_mode = "READ_ONLY"
     else:
         runner_isolation = f"POSIX_USER:{runner_user_name}"
         # A2: the staged source tree is read-only exactly when the run is
@@ -755,9 +756,8 @@ def run_controlled_pytest(
             f"The test process ran as dedicated Windows user {runner_user_name}: it cannot write "
             "the evidence directory, the HMAC key file, or the original project tree. The staged "
             "source tree lives under %ProgramData% so the runner user can traverse into it, and "
-            "is explicitly granted read-only (Read & Execute) for the runner user in E1, with "
-            "only the JUnit report, the runtime-imports manifest and HOME/TMPDIR writable; "
-            "explicit write denies (E2) are still pending. Its JUnit report and runtime-imports manifest "
+            "is explicitly read-only for the runner user in E2 (Write denied on every entry "
+            "except the JUnit report, the runtime-imports manifest and HOME/TMPDIR). Its JUnit report and runtime-imports manifest "
             "travel through staging files (Windows has no parent-held pipe channel), so it can "
             "still write false data into them, bounded by the stdout summary cross-check and the "
             "snapshot binding, so provenance_authenticity_status stays UNAUTHENTICATED. It can "
@@ -910,10 +910,15 @@ def run_controlled_pytest(
             # read the staged sources (explicit recursive Read & Execute, so
             # the run does not depend on the ProgramData ACL alone), and to
             # write exactly the four paths it legitimately writes (the two
-            # pre-created output files and HOME/TMPDIR). Everything else in
-            # staging stays owned by the parent and unwritable by the runner
-            # user until E2 adds explicit icacls denies. Any icacls failure
-            # refuses the run (fail-closed).
+            # pre-created output files and HOME/TMPDIR).
+            # E2: explicitly deny the runner user Write on every other
+            # staging entry (recursive), so the tree is read-only even if
+            # some parent ACL ever grants write. A deny ACE beats any allow
+            # ACE, so the deny is per-entry, never inherited over the four
+            # writable paths -- and the staging root itself gets no deny:
+            # it carries no write ACE at all, so creating entries directly
+            # under it already fails. Any icacls failure refuses the run
+            # (fail-closed).
             from usit import windows_runner
 
             windows_runner.grant_read_access([staging], runner_user_name, recursive=True)
@@ -921,6 +926,10 @@ def run_controlled_pytest(
                 [staging / ".usit-junit.xml", staging / ".usit-runtime-imports.json",
                  staging / ".usit-home", staging / ".usit-tmp"],
                 runner_user_name)
+            writable = _WRITABLE_STAGING_FILES | _WRITABLE_STAGING_DIRS
+            deny_targets = [entry for entry in staging.iterdir() if entry.name not in writable]
+            if deny_targets:
+                windows_runner.deny_write_access(deny_targets, runner_user_name, recursive=True)
         capture = capture_run(
             command, project_root=staging, evidence_parent=parent,
             files=[item["path"] for item in source_files],

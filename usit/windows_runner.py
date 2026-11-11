@@ -288,6 +288,42 @@ def grant_read_access(paths, username: str, *, recursive: bool = False) -> None:
             raise ValueError(f"icacls grant failed for the runner user: {detail[:500]}")
 
 
+def deny_write_access(paths, username: str, *, recursive: bool = False) -> None:
+    """Deny a local user Write on the given paths via icacls (fail-closed).
+
+    E2 read-only hardening for the staging tree: an explicit deny ACE
+    beats any allow ACE, so a deny must never be placed on a path the
+    runner user legitimately writes, and never with inheritance over
+    such a path (see the design doc, section 14). Callers deny each
+    staging entry except the four writable paths, one by one. With
+    ``recursive=True`` the deny covers the whole existing subtree
+    (icacls ``/T``). Raises ValueError when icacls is unavailable or
+    exits non-zero; the username is not a secret and never appears in a
+    password context.
+    """
+    import subprocess
+
+    if not username or not isinstance(username, str):
+        raise ValueError("deny_write_access requires a non-empty username string")
+    targets = [str(path) for path in paths]
+    if not targets or any(not target for target in targets):
+        raise ValueError("deny_write_access requires at least one path")
+    for target in targets:
+        command = ["icacls", target, "/deny", f"{username}:(W)"]
+        if recursive:
+            command.append("/T")
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True, text=True, timeout=120,
+            )
+        except OSError as exc:
+            raise ValueError(f"icacls deny failed for the runner user: {type(exc).__name__}") from exc
+        if result.returncode != 0:
+            detail = (result.stdout.strip() + " " + result.stderr.strip()).strip()
+            raise ValueError(f"icacls deny failed for the runner user: {detail[:500]}")
+
+
 def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, username, password) -> WindowsProcess:
     """Spawn ``command`` (argv list) as a dedicated local Windows user.
 

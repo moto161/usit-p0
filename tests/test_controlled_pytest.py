@@ -1059,6 +1059,16 @@ class ControlledPytestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least one path"):
             windows_runner.grant_read_access([], "usit-runner")
 
+    def test_windows_deny_write_access_rejects_empty_arguments(self):
+        if os.name != "nt":
+            self.skipTest("deny_write_access needs the Windows runner module")
+        from usit import windows_runner
+
+        with self.assertRaisesRegex(ValueError, "non-empty username"):
+            windows_runner.deny_write_access([self.project], "")
+        with self.assertRaisesRegex(ValueError, "at least one path"):
+            windows_runner.deny_write_access([], "usit-runner")
+
     def test_windows_spawn_failure_names_the_working_directory(self):
         # A spawn that fails on its working directory must name that
         # directory: the bare Win32 code alone (Run #1564: error 267)
@@ -1095,7 +1105,7 @@ class ControlledPytestTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(result["runner_isolation"], f"WINDOWS_USER:{runner_user}")
-        self.assertEqual(result["staging_source_mode"], "NOT_HARDENED")
+        self.assertEqual(result["staging_source_mode"], "READ_ONLY")
         self.assertEqual(result["provenance_signature_status"], "VALID")
         self.assertEqual(result["evidence_manifest_signature_status"], "VALID")
         # Isolation does not authenticate the runner: the signature proves
@@ -1106,7 +1116,7 @@ class ControlledPytestTests(unittest.TestCase):
         evidence = Path(result["evidence_dir"])
         provenance = json.loads((evidence / "execution-provenance.json").read_text(encoding="utf-8"))
         self.assertEqual(provenance["runner_isolation"], f"WINDOWS_USER:{runner_user}")
-        self.assertEqual(provenance["staging_source_mode"], "NOT_HARDENED")
+        self.assertEqual(provenance["staging_source_mode"], "READ_ONLY")
         gate = json.loads((evidence / "final_gate_report.json").read_text(encoding="utf-8"))
         self.assertEqual(gate["runner_isolation"], f"WINDOWS_USER:{runner_user}")
         self.assertTrue(any("dedicated Windows user" in item for item in gate["limitations"]))
@@ -1189,7 +1199,41 @@ class ControlledPytestTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(result["runner_isolation"], f"WINDOWS_USER:{runner_user}")
-        self.assertEqual(result["staging_source_mode"], "NOT_HARDENED")
+        self.assertEqual(result["staging_source_mode"], "READ_ONLY")
+
+    def test_windows_isolated_run_can_write_home_and_tmp(self):
+        # E2: the explicit Write deny covers every staging entry except
+        # the four writable paths, so the runner user's HOME/TMPDIR stay
+        # usable -- the deny must not leak into them.
+        isolated = self._windows_runner_user_for_isolation()
+        if isolated is None:
+            self.skipTest("Windows isolation integration tests need an administrator parent and USIT_TEST_RUNNER_USER + USIT_RUNNER_PASSWORD")
+        runner_user, runner_password = isolated
+        self._write_authorization(runner_user=runner_user)
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "def test_home_and_tmp_are_writable():\n"
+            "    tmp = Path(os.environ['TMP']) / 'probe.txt'\n"
+            "    tmp.write_text('ok')\n"
+            "    assert tmp.read_text() == 'ok'\n"
+            "    home = Path(os.environ['HOME']) / 'probe.txt'\n"
+            "    home.write_text('ok')\n"
+            "    assert home.read_text() == 'ok'\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture proves Windows HOME and TMPDIR stay writable under E2 deny")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=120,
+            runner_user=runner_user, runner_password=runner_password,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["runner_isolation"], f"WINDOWS_USER:{runner_user}")
+        self.assertEqual(result["staging_source_mode"], "READ_ONLY")
 
     def test_windows_isolated_run_still_produces_junit_and_runtime_imports(self):
         isolated = self._windows_runner_user_for_isolation()
