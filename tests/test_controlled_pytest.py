@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from usit.controlled_pytest import (
     AUTH_SCHEMA, MAX_REPORT_BYTES, MAX_RUNTIME_IMPORTS_BYTES,
-    _read_execution_artifact, run_controlled_pytest,
+    _make_staging_read_only, _read_execution_artifact, run_controlled_pytest,
 )
 from usit.verification_capture import verify_manifest
 from usit.test_result_importer import ingest_junit_results
@@ -680,6 +680,45 @@ class ControlledPytestTests(unittest.TestCase):
             auth["runner_user"] = runner_user
         self.authorization.write_text(json.dumps(auth), encoding="utf-8")
 
+    def test_make_staging_read_only_sets_modes_and_keeps_outputs_writable(self):
+        staging = self.base / "staging"
+        (staging / "tests").mkdir(parents=True)
+        source = staging / "tests" / "test_smoke.py"
+        source.write_text("def test_x(): assert True\n", encoding="utf-8")
+        script = staging / "run.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(script, 0o755)
+        target = self.base / "outside.txt"
+        target.write_text("outside\n", encoding="utf-8")
+        target_mode = stat.S_IMODE(target.stat().st_mode)
+        link = staging / "outside-link"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        for name in (".usit-junit.xml", ".usit-runtime-imports.json"):
+            (staging / name).write_text("", encoding="utf-8")
+        for name in (".usit-home", ".usit-tmp"):
+            (staging / name).mkdir()
+        _make_staging_read_only(staging)
+        self.assertEqual(stat.S_IMODE(staging.stat().st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE((staging / "tests").stat().st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o444)
+        self.assertEqual(stat.S_IMODE(script.stat().st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE((staging / ".usit-junit.xml").stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE((staging / ".usit-runtime-imports.json").stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE((staging / ".usit-home").stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((staging / ".usit-tmp").stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), target_mode)
+
+    def test_make_staging_read_only_failure_is_fail_closed(self):
+        staging = self.base / "staging"
+        staging.mkdir()
+        (staging / "test_smoke.py").write_text("def test_x(): assert True\n", encoding="utf-8")
+        with patch("usit.controlled_pytest.os.chmod", side_effect=OSError("cannot chmod")):
+            with self.assertRaisesRegex(ValueError, "read-only hardening failed"):
+                _make_staging_read_only(staging)
+
     def test_isolated_run_passes_and_records_runner_isolation(self):
         runner_user = self._runner_user_for_isolation()
         if runner_user is None:
@@ -744,6 +783,70 @@ class ControlledPytestTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(source.read_bytes(), before)
+
+    def test_isolated_run_blocks_writes_into_staging_tree(self):
+        runner_user = self._runner_user_for_isolation()
+        if runner_user is None:
+            self.skipTest("UID isolation integration tests need root and USIT_TEST_RUNNER_USER pointing at an existing user")
+        self._write_authorization(runner_user=runner_user)
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "from pathlib import Path\n"
+            "def test_staging_tree_is_readonly():\n"
+            "    try:\n"
+            "        Path('generated-during-test.py').write_text('must fail')\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('test process could create a file in the staging root')\n"
+            "    target = Path('tests') / 'test_smoke.py'\n"
+            "    try:\n"
+            "        target.write_text('tampered')\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('test process could modify a staged source file')\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture proves staging tree is readonly")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+            runner_user=runner_user,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["runner_isolation"], f"POSIX_USER:{runner_user}")
+        self.assertEqual(result["staging_source_mode"], "READ_ONLY")
+        self.assertEqual(result["source_tree_inventory_status"], "CLEAN")
+        evidence = Path(result["evidence_dir"])
+        provenance = json.loads((evidence / "execution-provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["staging_source_mode"], "READ_ONLY")
+        gate = json.loads((evidence / "final_gate_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(gate["staging_source_mode"], "READ_ONLY")
+        self.assertTrue(any("read-only" in item for item in gate["limitations"]))
+
+    def test_isolated_run_still_produces_junit_and_runtime_imports(self):
+        runner_user = self._runner_user_for_isolation()
+        if runner_user is None:
+            self.skipTest("UID isolation integration tests need root and USIT_TEST_RUNNER_USER pointing at an existing user")
+        self._write_authorization(runner_user=runner_user)
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+            runner_user=runner_user,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["staging_source_mode"], "READ_ONLY")
+        evidence = Path(result["evidence_dir"])
+        junit = evidence / "junit.xml"
+        self.assertTrue(junit.is_file())
+        self.assertGreater(junit.stat().st_size, 0)
+        runtime_imports = evidence / "runtime-imports.json"
+        self.assertTrue(runtime_imports.is_file())
+        self.assertGreater(runtime_imports.stat().st_size, 0)
 
     def test_runner_user_authorization_mismatch_is_rejected(self):
         runner_user = self._runner_user_for_isolation()

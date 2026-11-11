@@ -15,6 +15,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -573,6 +574,51 @@ def _chown_tree(root: Path, uid: int) -> None:
         raise ValueError(f"staging ownership transfer failed: {type(exc).__name__}: {exc}") from exc
 
 
+# Staging paths the test process legitimately writes. Everything else in
+# staging becomes read-only under A2 (see _make_staging_read_only).
+_WRITABLE_STAGING_FILES = frozenset({".usit-junit.xml", ".usit-runtime-imports.json"})
+_WRITABLE_STAGING_DIRS = frozenset({".usit-home", ".usit-tmp"})
+
+
+def _make_staging_read_only(root: Path) -> None:
+    """Make a staging tree read-only for the runner user (A2).
+
+    Only called for isolated runs (the caller checks runner_uid). Sources
+    become 0444 and directories 0555, including the staging top itself, so
+    the test process can neither modify existing sources nor create new
+    files in the tree. Files that were executable in the archive keep
+    their execute bit (0555) so scripts in the tree still run. The four
+    output locations the test process legitimately writes stay writable
+    (see _WRITABLE_STAGING_FILES / _WRITABLE_STAGING_DIRS). Symlinks are
+    skipped: chmod follows links on Linux, so touching one could change a
+    file outside staging. Any failure is fail-closed: the caller must
+    refuse the run rather than execute it with a writable tree.
+    """
+    try:
+        for current, directories, filenames in os.walk(root, topdown=False, followlinks=False):
+            current_path = Path(current)
+            for name in filenames:
+                path = current_path / name
+                if path.is_symlink():
+                    continue
+                if current_path == root and name in _WRITABLE_STAGING_FILES:
+                    os.chmod(path, 0o644)
+                    continue
+                mode = 0o555 if stat.S_IMODE(path.stat().st_mode) & 0o111 else 0o444
+                os.chmod(path, mode)
+            for name in directories:
+                path = current_path / name
+                if path.is_symlink():
+                    continue
+                if current_path == root and name in _WRITABLE_STAGING_DIRS:
+                    os.chmod(path, 0o755)
+                    continue
+                os.chmod(path, 0o555)
+        os.chmod(root, 0o555)
+    except OSError as exc:
+        raise ValueError(f"staging read-only hardening failed: {type(exc).__name__}: {exc}") from exc
+
+
 def _minimal_environment(staging: Path) -> dict[str, str]:
     env: dict[str, str] = {}
     for key in ("PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "LANG", "LC_ALL", "TZ"):
@@ -625,6 +671,10 @@ def run_controlled_pytest(
     # request fails fast and never reaches execution.
     runner_user_name, runner_uid = _resolve_runner_user(runner_user)
     runner_isolation = f"POSIX_USER:{runner_user_name}" if runner_user_name is not None else "NONE"
+    # A2: the staged source tree is read-only exactly when the run is
+    # isolated (see _make_staging_read_only); non-isolated runs keep a
+    # writable staging tree.
+    staging_source_mode = "READ_ONLY" if runner_user_name is not None else "WRITABLE"
     if runner_isolation == "NONE":
         isolation_limitation = (
             "No UID isolation was requested, so the test process ran as the parent user: "
@@ -634,11 +684,11 @@ def run_controlled_pytest(
     else:
         isolation_limitation = (
             f"The test process ran as dedicated POSIX user {runner_user_name}: it cannot write "
-            "the evidence directory, the HMAC key file, or the original project tree. It can "
-            "still read world-readable files, reach the network, write inside staging "
-            "(including the JUnit report and runtime-imports manifest), and consume host "
-            "resources, so this is not a sandbox and provenance_authenticity_status stays "
-            "UNAUTHENTICATED."
+            "the evidence directory, the HMAC key file, the original project tree, or the "
+            "staged source tree (staging is read-only except for the JUnit report, the "
+            "runtime-imports manifest, and its HOME/TMPDIR inside staging). It can still "
+            "read world-readable files, reach the network, and consume host resources, so "
+            "this is not a sandbox and provenance_authenticity_status stays UNAUTHENTICATED."
         )
     selected_args = _validate_pytest_args(pytest_args)
     status = _git(project, "status", "--porcelain=v1", "--untracked-files=all", limit=4 * 1024 * 1024)
@@ -669,6 +719,14 @@ def run_controlled_pytest(
             "--assert=plain", "-p", "no:cacheprovider", *selected_args,
         ]
         env = _minimal_environment(staging)
+        # A2: pre-create the two output files the test process writes, so
+        # they exist (and are owned by the runner user after the chown
+        # below) before the tree is made read-only. Both are opened with
+        # "w" by pytest / the runner plugin, so an empty pre-created file
+        # is truncated and rewritten; if the run crashes before that, the
+        # parent reads an empty file and records an error, never a pass.
+        (staging / ".usit-junit.xml").write_text("", encoding="utf-8")
+        (staging / ".usit-runtime-imports.json").write_text("", encoding="utf-8")
         module_roots = set()
         for source_item in source_files:
             source_path = PurePosixPath(source_item["path"])
@@ -710,8 +768,13 @@ def run_controlled_pytest(
         # 0700, now owned by the runner user) before the test process
         # starts, so it can write its reports inside staging but nothing
         # outside it. Any chown failure refuses the run (fail-closed).
+        # A2: then make the staged source tree read-only for the runner
+        # user (sources 0444, directories 0555, top 0555), keeping only
+        # the pre-created output files and HOME/TMPDIR writable. Any
+        # chmod failure refuses the run (fail-closed).
         if runner_uid is not None:
             _chown_tree(staging, runner_uid)
+            _make_staging_read_only(staging)
         capture = capture_run(
             command, project_root=staging, evidence_parent=parent,
             files=[item["path"] for item in source_files],
@@ -854,10 +917,15 @@ def run_controlled_pytest(
             # UID isolation A: "POSIX_USER:<name>" when the test process ran
             # as a dedicated POSIX user, else "NONE". Isolation keeps the
             # test process out of the evidence directory, the HMAC key file,
-            # and the original project tree, but staging outputs remain
-            # writable by the test process, so authenticity stays
-            # UNAUTHENTICATED (see limitations).
+            # and the original project tree. A2 additionally makes the
+            # staged source tree read-only for isolated runs (see
+            # staging_source_mode); the JUnit report and runtime-imports
+            # manifest stay writable by the test process, so authenticity
+            # stays UNAUTHENTICATED (see limitations).
             "runner_isolation": runner_isolation,
+            # A2: "READ_ONLY" when the staged source tree was made
+            # read-only for an isolated run, else "WRITABLE".
+            "staging_source_mode": staging_source_mode,
             "source_snapshot": {
                 "manifest_schema_version": source_manifest["schema_version"],
                 "manifest_sha256": manifest_hash,
@@ -901,6 +969,7 @@ def run_controlled_pytest(
         gate["source_manifest_sha256"] = validation["source_manifest_sha256"]
         gate["pytest_exit_status"] = capture.status
         gate["runner_isolation"] = runner_isolation
+        gate["staging_source_mode"] = staging_source_mode
         gate.setdefault("limitations", []).append(isolation_limitation)
         gate["source_tree_inventory_status"] = "CLEAN" if not inventory_errors else "CHANGED_OR_UNSAFE"
         gate["source_tree_inventory_errors"] = inventory_errors
@@ -967,6 +1036,7 @@ def run_controlled_pytest(
             "execution_source_binding_status": "STAGED_SNAPSHOT_USED_UNAUTHENTICATED",
             "execution_provenance_validation": "STRUCTURE_AND_DIGESTS_VALIDATED",
             "runner_isolation": runner_isolation,
+            "staging_source_mode": staging_source_mode,
             "runtime_import_binding_status": (
                 "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT" if not runtime_imports_errors
                 else "RUNTIME_IMPORTS_NOT_BOUND"
