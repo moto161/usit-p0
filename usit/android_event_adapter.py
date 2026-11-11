@@ -49,6 +49,11 @@ def adapt_android_jsonl(
 ) -> dict[str, Any]:
     if not isinstance(raw, bytes):
         raise ValueError("Android event input must be bytes")
+    # The file adapter enforces this limit while reading from disk. Enforce the
+    # same contract here because callers may invoke this public in-memory API
+    # directly and otherwise bypass the bounded file reader.
+    if len(raw) > MAX_INPUT_BYTES:
+        raise ValueError(f"Android event input exceeds size limit ({MAX_INPUT_BYTES} bytes)")
     if not isinstance(graph, dict) or graph.get("schema_version") != "usit-graph-v1":
         raise ValueError("business graph must use usit-graph-v1")
     understanding = graph.get("business_understanding")
