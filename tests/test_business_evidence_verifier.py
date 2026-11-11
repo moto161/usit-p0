@@ -74,6 +74,87 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         self.assertTrue(all(x["business_correctness"]=="NOT_PROVEN" for x in by_id.values()))
         self.assertEqual(result["evidence_conflict_count"],0)
 
+    def test_matching_execution_ids_keep_combined_conclusion(self):
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
+            "execution_provenance":{"execution_id":"run-1"},
+            "business_function_results":[
+                {"business_function_id":"bf-upload","execution_status":"PASSED","mapped_test_case_count":3,"failed":0,"skipped":0},
+                {"business_function_id":"bf-delete","execution_status":"FAILED","mapped_test_case_count":2,"failed":1,"skipped":0}]}
+        coverage={"schema_version":"usit-code-coverage-results-v1",
+            "execution_id":"run-1",
+            "source_hashes":{"coverage_report_sha256":"3"*64,"mapping_json_sha256":"4"*64,"business_graph_sha256":self.graph_hash},
+            "business_function_coverage":[
+                {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0,"source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/upload.py","line_start":1,"line_end":5}]},
+                {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0,"source_binding_evidence":[{"source_file":"src/delete.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/delete.py","line_start":1,"line_end":5}]}]}
+        result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
+        by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED")
+        self.assertEqual(by_id["bf-upload"]["execution_binding_status"],"MATCHED")
+        self.assertEqual(by_id["bf-upload"]["test_execution_id"],"run-1")
+        self.assertEqual(by_id["bf-upload"]["coverage_execution_id"],"run-1")
+        self.assertEqual(result["evidence_conflict_count"],0)
+
+    def test_mismatched_execution_ids_downgrade_combined_conclusion(self):
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
+            "execution_provenance":{"execution_id":"run-1"},
+            "business_function_results":[
+                {"business_function_id":"bf-upload","execution_status":"PASSED","mapped_test_case_count":3,"failed":0,"skipped":0},
+                {"business_function_id":"bf-delete","execution_status":"FAILED","mapped_test_case_count":2,"failed":1,"skipped":0}]}
+        coverage={"schema_version":"usit-code-coverage-results-v1",
+            "execution_id":"run-2",
+            "source_hashes":{"coverage_report_sha256":"3"*64,"mapping_json_sha256":"4"*64,"business_graph_sha256":self.graph_hash},
+            "business_function_coverage":[
+                {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0,"source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/upload.py","line_start":1,"line_end":5}]},
+                {"business_function_id":"bf-delete","code_coverage_status":"PARTIAL","line_coverage_percent":50.0,"source_binding_evidence":[{"source_file":"src/delete.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/delete.py","line_start":1,"line_end":5}]}]}
+        result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
+        by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
+        # Both functions combine test and coverage from different runs.
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"EVIDENCE_CONFLICT")
+        self.assertEqual(by_id["bf-upload"]["execution_binding_status"],"MISMATCH")
+        self.assertEqual(by_id["bf-delete"]["verification_conclusion"],"EVIDENCE_CONFLICT")
+        # A function with neither side keeps its own conclusion.
+        self.assertEqual(by_id["bf-share"]["verification_conclusion"],"NO_RUNTIME_TEST_EVIDENCE")
+        self.assertEqual(by_id["bf-share"]["execution_binding_status"],"NOT_APPLICABLE")
+        self.assertIn("TEST_COVERAGE_EXECUTION_MISMATCH",
+                      {item["kind"] for item in result["evidence_conflicts"]})
+
+    def test_coverage_unbound_against_bound_test_downgrades(self):
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
+            "execution_provenance":{"execution_id":"run-1"},
+            "business_function_results":[
+                {"business_function_id":"bf-upload","execution_status":"PASSED","mapped_test_case_count":3,"failed":0,"skipped":0}]}
+        coverage={"schema_version":"usit-code-coverage-results-v1",
+            "source_hashes":{"coverage_report_sha256":"3"*64,"mapping_json_sha256":"4"*64,"business_graph_sha256":self.graph_hash},
+            "business_function_coverage":[
+                {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0,"source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/upload.py","line_start":1,"line_end":5}]}]}
+        result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
+        by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"EVIDENCE_CONFLICT")
+        self.assertEqual(by_id["bf-upload"]["execution_binding_status"],"COVERAGE_UNBOUND")
+        self.assertIsNone(by_id["bf-upload"]["coverage_execution_id"])
+        self.assertIn("COVERAGE_EXECUTION_UNBOUND",
+                      {item["kind"] for item in result["evidence_conflicts"]})
+
+    def test_neither_side_bound_keeps_old_behavior(self):
+        # Both sides unbound: no false claim of a shared execution, and no
+        # conflict -- the old behavior, with the gap visible as NOT_PROVIDED.
+        tests={"schema_version":"usit-test-execution-results-v1",
+            "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
+            "business_function_results":[
+                {"business_function_id":"bf-upload","execution_status":"PASSED","mapped_test_case_count":3,"failed":0,"skipped":0}]}
+        coverage={"schema_version":"usit-code-coverage-results-v1",
+            "source_hashes":{"coverage_report_sha256":"3"*64,"mapping_json_sha256":"4"*64,"business_graph_sha256":self.graph_hash},
+            "business_function_coverage":[
+                {"business_function_id":"bf-upload","code_coverage_status":"COVERED","line_coverage_percent":100.0,"source_binding_evidence":[{"source_file":"src/upload.py","source_binding_status":"SOURCE_BYTES_MATCHED","expected_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actual_source_file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_line_count":5,"line_start":1,"line_end":5}],"mapping_ranges":[{"source_file":"src/upload.py","line_start":1,"line_end":5}]}]}
+        result=verify_business_function_evidence(self.graph,tests,coverage,self.graph_hash)
+        by_id={x["business_function_id"]:x for x in result["business_function_evidence"]}
+        self.assertEqual(by_id["bf-upload"]["verification_conclusion"],"TEST_PASS_AND_CODE_LINES_COVERED")
+        self.assertEqual(by_id["bf-upload"]["execution_binding_status"],"NOT_PROVIDED")
+        self.assertEqual(result["evidence_conflict_count"],0)
+
     def test_graph_hash_mismatch_is_global_conflict(self):
         tests={"schema_version":"usit-test-execution-results-v1",
             "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":"0"*64},"business_function_results":[]}

@@ -87,28 +87,17 @@ def _utc_timestamp(value: Any, field: str) -> datetime:
     return parsed
 
 
-def validate_execution_provenance(
-    record_bytes: bytes,
-    report_bytes: bytes,
-    source_manifest_bytes: bytes,
-    hmac_key: bytes | None = None,
-) -> dict[str, Any]:
-    """Validate record shape and digest consistency without asserting authenticity.
+def _validate_record_identity(
+    record: dict[str, Any], hmac_key: bytes | None
+) -> tuple[str, str]:
+    """Check a parsed provenance record's identity fields and signature.
 
-    The returned trust state is deliberately UNAUTHENTICATED: integrity hashes
-    cannot prove who created the record or which files the test process loaded.
-    When ``hmac_key`` is given, the record's HMAC signature is also verified:
-    a VALID signature proves the parent process produced this record and it
-    has not changed since signing -- it still does not prove the test process
-    actually executed the reported tests. An INVALID / WRONG_KEY / MALFORMED
-    signature is a hard integrity failure; a missing signature on an old
-    record is reported as MISSING, not an error.
+    Returns ``(execution_id, signature_status)``. An INVALID / WRONG_KEY /
+    MALFORMED signature is a hard failure; a missing signature on an old
+    record is reported as MISSING, not an error. A VALID signature proves
+    the parent process produced this record; it does not prove the test
+    process actually executed the reported tests.
     """
-    record = _json_object(record_bytes, "execution provenance record", MAX_RECORD_BYTES)
-    if not isinstance(report_bytes, bytes):
-        raise ValueError("test report must be bytes")
-    if len(report_bytes) > MAX_REPORT_BYTES:
-        raise ValueError(f"test report exceeds size limit ({MAX_REPORT_BYTES} bytes)")
     if record.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {SCHEMA_VERSION}")
 
@@ -134,6 +123,76 @@ def validate_execution_provenance(
             or not isinstance(runner.get("name"), str) or not runner["name"].strip()
             or not isinstance(runner.get("version"), str) or not runner["version"].strip()):
         raise ValueError("runner must contain non-empty name and version")
+
+    return execution_id, signature_status
+
+
+def validate_provenance_record_identity(
+    record_bytes: bytes,
+    source_manifest_bytes: bytes | None = None,
+    hmac_key: bytes | None = None,
+) -> dict[str, Any]:
+    """Validate a provenance record's identity without a test report.
+
+    Used by importers that bind a secondary artifact (e.g. a coverage
+    report) to an execution: they need the record's execution_id and
+    signature status, but they do not hold the JUnit report the record's
+    report_sha256 refers to, so the full report-bound validation does not
+    apply. When a source manifest is supplied, its hash must match the
+    record's declared snapshot hash.
+    """
+    record = _json_object(record_bytes, "execution provenance record", MAX_RECORD_BYTES)
+    execution_id, signature_status = _validate_record_identity(record, hmac_key)
+    manifest_status = "NOT_CHECKED"
+    if source_manifest_bytes is not None:
+        snapshot = record.get("source_snapshot")
+        if not isinstance(snapshot, dict):
+            raise ValueError("source_snapshot must be an object")
+        manifest_schema = snapshot.get("manifest_schema_version")
+        if not isinstance(manifest_schema, str) or not manifest_schema.strip():
+            raise ValueError("source_snapshot.manifest_schema_version is required")
+        declared_manifest_hash = _require_hash(
+            snapshot.get("manifest_sha256"), "source_snapshot.manifest_sha256"
+        )
+        manifest = _json_object(source_manifest_bytes, "source manifest", MAX_MANIFEST_BYTES)
+        if manifest.get("schema_version") != manifest_schema:
+            raise ValueError("source manifest schema_version does not match provenance record")
+        actual_manifest_hash = sha256_hex(canonical_json_bytes(manifest))
+        if declared_manifest_hash != actual_manifest_hash:
+            raise ValueError("source_snapshot.manifest_sha256 does not match canonical manifest")
+        manifest_status = "MATCHED"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "execution_id": execution_id,
+        "provenance_signature_status": signature_status,
+        "source_manifest_integrity_status": manifest_status,
+        "provenance_authenticity_status": "UNAUTHENTICATED",
+    }
+
+
+def validate_execution_provenance(
+    record_bytes: bytes,
+    report_bytes: bytes,
+    source_manifest_bytes: bytes,
+    hmac_key: bytes | None = None,
+) -> dict[str, Any]:
+    """Validate record shape and digest consistency without asserting authenticity.
+
+    The returned trust state is deliberately UNAUTHENTICATED: integrity hashes
+    cannot prove who created the record or which files the test process loaded.
+    When ``hmac_key`` is given, the record's HMAC signature is also verified:
+    a VALID signature proves the parent process produced this record and it
+    has not changed since signing -- it still does not prove the test process
+    actually executed the reported tests. An INVALID / WRONG_KEY / MALFORMED
+    signature is a hard integrity failure; a missing signature on an old
+    record is reported as MISSING, not an error.
+    """
+    record = _json_object(record_bytes, "execution provenance record", MAX_RECORD_BYTES)
+    if not isinstance(report_bytes, bytes):
+        raise ValueError("test report must be bytes")
+    if len(report_bytes) > MAX_REPORT_BYTES:
+        raise ValueError(f"test report exceeds size limit ({MAX_REPORT_BYTES} bytes)")
+    execution_id, signature_status = _validate_record_identity(record, hmac_key)
 
     report_format = record.get("report_format")
     if not isinstance(report_format, str) or report_format not in {"PYTEST_JSON", "JUNIT_XML"}:

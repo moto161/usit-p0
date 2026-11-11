@@ -93,6 +93,23 @@ def verify_business_function_evidence(
                                 "business_function_id","business_function_coverage")
 
     known = set(views)
+    # Execution binding: the test results carry their execution_id inside
+    # the validated provenance record; the coverage results carry it at the
+    # top level when the importer was given a provenance record. Either side
+    # may legitimately have none (old unbound reports); only a present-but-
+    # different pair, or one bound side against an unbound other, is a
+    # conflict -- and only for functions that combine both sides.
+    test_execution_id = None
+    test_provenance = test_results.get("execution_provenance") if test_results is not None else None
+    if isinstance(test_provenance, dict):
+        candidate = test_provenance.get("execution_id")
+        if isinstance(candidate, str) and candidate:
+            test_execution_id = candidate
+    coverage_execution_id = None
+    if coverage_results is not None:
+        candidate = coverage_results.get("execution_id")
+        if isinstance(candidate, str) and candidate:
+            coverage_execution_id = candidate
     for source, records in (("test_results",test_by_id),("coverage_results",coverage_by_id)):
         for function_id in sorted(set(records)-known):
             conflicts.append({"kind":"UNKNOWN_BUSINESS_FUNCTION","source":source,
@@ -104,6 +121,42 @@ def verify_business_function_evidence(
         ts=test.get("execution_status","NOT_MEASURED") if test else "NOT_MEASURED"
         reported_test_status = ts
         cs=cov.get("code_coverage_status","NOT_MEASURED") if cov else "NOT_MEASURED"
+        # Execution binding is checked per function that combines both sides:
+        # a mismatch (or one side bound while the other is unbound) means
+        # the test and coverage evidence may come from different runs, so the
+        # combined conclusion for this function is invalid. When neither side
+        # is bound there is nothing to compare -- the old unbound behavior,
+        # reported as NOT_PROVIDED rather than rejected.
+        if test is not None and cov is not None:
+            if test_execution_id is not None and coverage_execution_id is not None:
+                if test_execution_id == coverage_execution_id:
+                    execution_binding_status = "MATCHED"
+                else:
+                    execution_binding_status = "MISMATCH"
+                    conflicts.append({
+                        "kind": "TEST_COVERAGE_EXECUTION_MISMATCH",
+                        "business_function_id": function_id,
+                        "test_execution_id": test_execution_id,
+                        "coverage_execution_id": coverage_execution_id,
+                    })
+            elif test_execution_id is not None:
+                execution_binding_status = "COVERAGE_UNBOUND"
+                conflicts.append({
+                    "kind": "COVERAGE_EXECUTION_UNBOUND",
+                    "business_function_id": function_id,
+                    "test_execution_id": test_execution_id,
+                })
+            elif coverage_execution_id is not None:
+                execution_binding_status = "TEST_UNBOUND"
+                conflicts.append({
+                    "kind": "TEST_EXECUTION_UNBOUND",
+                    "business_function_id": function_id,
+                    "coverage_execution_id": coverage_execution_id,
+                })
+            else:
+                execution_binding_status = "NOT_PROVIDED"
+        else:
+            execution_binding_status = "NOT_APPLICABLE"
         coverage_source_verified = False
         if cov is not None:
             percent = cov.get("line_coverage_percent")
@@ -711,6 +764,9 @@ def verify_business_function_evidence(
             } if cov else None,
             "verification_conclusion":conclusion,"business_correctness":"NOT_PROVEN",
             "evidence_conflict":False,
+            "test_execution_id":test_execution_id,
+            "coverage_execution_id":coverage_execution_id,
+            "execution_binding_status":execution_binding_status,
         })
     global_hash_conflict=any(x["kind"]=="GRAPH_HASH_MISMATCH" for x in conflicts)
     conflict_ids={x.get("business_function_id") for x in conflicts if x.get("business_function_id")}
@@ -733,6 +789,7 @@ def verify_business_function_evidence(
             "代码行覆盖率不证明断言有效、分支覆盖完整、权限正确或端到端用户流程可用。",
             "静态业务功能视图仍是 STATIC_INFERENCE；本报告不会把它升级为 VERIFIED_FACT。",
             "测试结果与覆盖率必须引用同一份业务图；图哈希不一致时标记证据冲突。",
+            "测试与覆盖率必须来自同一次执行（execution_id 一致）；不一致、或一方已绑定而另一方未绑定时，相关功能的组合结论降级为证据冲突；双方均未绑定时标记 NOT_PROVIDED，不直接拒掉旧数据。",
             "已映射 testcase 的报告完整性会被单独保留；缺失预期 testcase 的 PASSED 工件会被标记为证据冲突。",
             "测试与覆盖率报告、映射文件和业务图的 SHA-256 来源哈希会保留；覆盖率行范围与缺失源文件会随功能证据输出。",
             "覆盖率百分比、行计数和映射范围会执行结构校验；无效值产生证据冲突，不得作为可信覆盖结论。",

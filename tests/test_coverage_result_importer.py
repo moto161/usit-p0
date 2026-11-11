@@ -35,7 +35,169 @@ def _write_graph_and_mapping(base: Path, function_ids: list[str], mappings: list
     return mapping, graph
 
 
+def _write_provenance(base: Path, execution_id: str, manifest: dict, key=None) -> tuple[Path, Path]:
+    """Write a minimal valid provenance record + source manifest pair."""
+    from usit.test_execution_provenance import SCHEMA_VERSION, canonical_json_bytes, sha256_hex
+
+    manifest_bytes = canonical_json_bytes(manifest)
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "execution_id": execution_id,
+        "started_at": "2026-11-03T10:00:00Z",
+        "completed_at": "2026-11-03T10:00:01Z",
+        "runner": {"name": "pytest", "version": "8.3.5"},
+        "report_format": "JUNIT_XML",
+        "report_relative_path": "junit.xml",
+        "report_sha256": "a" * 64,
+        "source_snapshot": {
+            "manifest_schema_version": manifest["schema_version"],
+            "manifest_sha256": sha256_hex(manifest_bytes),
+            "file_count": len(manifest["files"]),
+            "capture_method": "GIT_ARCHIVE_HEAD_STAGED_COPY",
+        },
+        "working_tree_state": {"state": "CLEAN", "untracked_files": "INCLUDED"},
+        "command_fingerprint": "b" * 64,
+        "environment_fingerprint": "c" * 64,
+    }
+    if key is not None:
+        from usit.evidence_signing import sign_document
+
+        record["signature"] = sign_document(record, key)
+    prov_path = base / "execution-provenance.json"
+    manifest_path = base / "source-manifest.json"
+    prov_path.write_text(json.dumps(record), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return prov_path, manifest_path
+
+
 class CoverageImporterTests(unittest.TestCase):
+    def test_coverage_without_provenance_is_not_provided(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {"src/a.py": {
+                "executed_lines": [4, 5], "missing_lines": [6]
+            }}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [
+                {"business_function_id": "bf-a", "source_file": "src/a.py", "line_start": 4, "line_end": 6}
+            ])
+            result = ingest_coverage_results(report, mapping, graph, "coverage-py-json", base / "project")
+            self.assertEqual(result["execution_binding"], "NOT_PROVIDED")
+            self.assertIsNone(result["execution_id"])
+            self.assertEqual(result["provenance_signature_status"], "NOT_CHECKED")
+            # The measurement still stands; only the execution binding is unclaimed.
+            by_id = {item["business_function_id"]: item for item in result["business_function_coverage"]}
+            self.assertEqual(by_id["bf-a"]["code_coverage_status"], "PARTIAL")
+
+    def test_coverage_with_provenance_records_execution_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {"src/a.py": {
+                "executed_lines": [4, 5], "missing_lines": [6]
+            }}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [
+                {"business_function_id": "bf-a", "source_file": "src/a.py", "line_start": 4, "line_end": 6}
+            ])
+            manifest = {"schema_version": "usit-manifest-v1", "files": [
+                {"path": "src/a.py", "sha256": "a" * 64}
+            ]}
+            prov_path, manifest_path = _write_provenance(base, "run_20261111T000000Z_" + "a" * 32, manifest)
+            result = ingest_coverage_results(
+                report, mapping, graph, "coverage-py-json", base / "project",
+                provenance_record_path=prov_path, source_manifest_path=manifest_path,
+            )
+            self.assertEqual(result["execution_binding"], "PROVIDED")
+            self.assertEqual(result["execution_id"], "run_20261111T000000Z_" + "a" * 32)
+            self.assertEqual(result["provenance_signature_status"], "NOT_CHECKED")
+
+    def test_coverage_with_signed_provenance_reports_valid_signature(self):
+        from usit.evidence_signing import generate_run_key
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {"src/a.py": {
+                "executed_lines": [4, 5], "missing_lines": [6]
+            }}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [
+                {"business_function_id": "bf-a", "source_file": "src/a.py", "line_start": 4, "line_end": 6}
+            ])
+            manifest = {"schema_version": "usit-manifest-v1", "files": [
+                {"path": "src/a.py", "sha256": "a" * 64}
+            ]}
+            key = generate_run_key()
+            prov_path, manifest_path = _write_provenance(
+                base, "run_20261111T000000Z_" + "a" * 32, manifest, key=key
+            )
+            result = ingest_coverage_results(
+                report, mapping, graph, "coverage-py-json", base / "project",
+                provenance_record_path=prov_path, source_manifest_path=manifest_path,
+                hmac_key=key,
+            )
+            self.assertEqual(result["execution_binding"], "PROVIDED")
+            self.assertEqual(result["provenance_signature_status"], "VALID")
+
+    def test_coverage_provenance_and_manifest_must_be_provided_together(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [])
+            manifest = {"schema_version": "usit-manifest-v1", "files": []}
+            prov_path, manifest_path = _write_provenance(base, "run-x", manifest)
+            with self.assertRaisesRegex(ValueError, "provided together"):
+                ingest_coverage_results(
+                    report, mapping, graph, "coverage-py-json",
+                    provenance_record_path=prov_path,
+                )
+            with self.assertRaisesRegex(ValueError, "provided together"):
+                ingest_coverage_results(
+                    report, mapping, graph, "coverage-py-json",
+                    source_manifest_path=manifest_path,
+                )
+
+    def test_coverage_provenance_manifest_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [])
+            manifest = {"schema_version": "usit-manifest-v1", "files": [
+                {"path": "src/a.py", "sha256": "a" * 64}
+            ]}
+            prov_path, manifest_path = _write_provenance(base, "run-x", manifest)
+            # Replace the manifest with different content after the record
+            # was built, so the declared hash no longer matches.
+            manifest["files"] = [{"path": "src/a.py", "sha256": "b" * 64}]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "manifest_sha256"):
+                ingest_coverage_results(
+                    report, mapping, graph, "coverage-py-json",
+                    provenance_record_path=prov_path, source_manifest_path=manifest_path,
+                )
+
+    def test_coverage_tampered_signed_provenance_is_rejected(self):
+        from usit.evidence_signing import generate_run_key
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report = base / "coverage.json"
+            report.write_text(json.dumps({"files": {}}), encoding="utf-8")
+            mapping, graph = _write_graph_and_mapping(base, ["bf-a"], [])
+            manifest = {"schema_version": "usit-manifest-v1", "files": []}
+            key = generate_run_key()
+            prov_path, manifest_path = _write_provenance(base, "run-x", manifest, key=key)
+            record = json.loads(prov_path.read_text(encoding="utf-8"))
+            record["execution_id"] = "run-forged"
+            prov_path.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "signature is INVALID"):
+                ingest_coverage_results(
+                    report, mapping, graph, "coverage-py-json",
+                    provenance_record_path=prov_path, source_manifest_path=manifest_path,
+                    hmac_key=key,
+                )
+
     def test_coverage_mapping_rejects_duplicate_business_function_ids_in_graph(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

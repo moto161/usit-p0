@@ -95,6 +95,50 @@ class TestExecutionProvenanceTests(unittest.TestCase):
                 hmac_key=generate_run_key(),
             )
 
+    def test_record_identity_validates_without_report(self):
+        from usit.test_execution_provenance import validate_provenance_record_identity
+
+        result = validate_provenance_record_identity(
+            json.dumps(self.record).encode(), self.manifest_bytes
+        )
+        self.assertEqual(result["execution_id"], "run-001")
+        self.assertEqual(result["provenance_signature_status"], "NOT_CHECKED")
+        self.assertEqual(result["source_manifest_integrity_status"], "MATCHED")
+
+    def test_record_identity_without_manifest_skips_manifest_check(self):
+        from usit.test_execution_provenance import validate_provenance_record_identity
+
+        result = validate_provenance_record_identity(json.dumps(self.record).encode())
+        self.assertEqual(result["execution_id"], "run-001")
+        self.assertEqual(result["source_manifest_integrity_status"], "NOT_CHECKED")
+
+    def test_record_identity_rejects_manifest_mismatch(self):
+        from usit.test_execution_provenance import validate_provenance_record_identity
+
+        other_manifest = {"schema_version": "usit-manifest-v1", "files": [
+            {"path": "tests/test_x.py", "sha256": "b" * 64}
+        ]}
+        with self.assertRaisesRegex(ValueError, "manifest_sha256"):
+            validate_provenance_record_identity(
+                json.dumps(self.record).encode(), json.dumps(other_manifest).encode()
+            )
+
+    def test_record_identity_verifies_signature_with_key(self):
+        from usit.evidence_signing import generate_run_key, sign_document
+        from usit.test_execution_provenance import validate_provenance_record_identity
+
+        key = generate_run_key()
+        self.record["signature"] = sign_document(self.record, key)
+        result = validate_provenance_record_identity(
+            json.dumps(self.record).encode(), self.manifest_bytes, hmac_key=key
+        )
+        self.assertEqual(result["provenance_signature_status"], "VALID")
+        self.record["execution_id"] = "run-002"
+        with self.assertRaisesRegex(ValueError, "signature is INVALID"):
+            validate_provenance_record_identity(
+                json.dumps(self.record).encode(), self.manifest_bytes, hmac_key=key
+            )
+
     def test_report_input_must_be_bounded_bytes(self):
         from unittest.mock import patch
         for invalid in ("not-bytes", bytearray(self.report)):

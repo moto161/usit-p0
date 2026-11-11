@@ -9,6 +9,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .safeio import is_reparse, open_no_follow
+from .test_execution_provenance import (
+    MAX_MANIFEST_BYTES, MAX_RECORD_BYTES, validate_provenance_record_identity,
+)
 from .test_report_adapters import parse_coverage_py_json, parse_jacoco_xml, map_line_coverage_to_functions, strict_json_loads
 
 MAX_COVERAGE_BYTES = 50 * 1024 * 1024
@@ -138,7 +141,35 @@ def _verify_source_bindings(mapping: dict[str, Any], project_root: str | Path) -
 
 def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
                             graph_path: str | Path, report_format: str,
-                            project_root: str | Path | None = None) -> dict[str, Any]:
+                            project_root: str | Path | None = None,
+                            provenance_record_path: str | Path | None = None,
+                            source_manifest_path: str | Path | None = None,
+                            hmac_key: bytes | None = None) -> dict[str, Any]:
+    """Import a coverage report and bind it to a test execution when possible.
+
+    When ``provenance_record_path`` and ``source_manifest_path`` are given,
+    the execution provenance record of the run that produced this coverage
+    is validated (identity, source-manifest hash, and HMAC signature when
+    ``hmac_key`` is given) and its execution_id is recorded, so a verifier
+    can require the test results and the coverage to come from the same
+    execution. Without provenance the report is still accepted -- old
+    reports predate execution binding -- but ``execution_binding`` is
+    NOT_PROVIDED and no execution_id is claimed.
+    """
+    if (provenance_record_path is None) != (source_manifest_path is None):
+        raise ValueError("provenance_record_path and source_manifest_path must be provided together")
+    execution_id: str | None = None
+    execution_binding = "NOT_PROVIDED"
+    provenance_signature_status = "NOT_CHECKED"
+    if provenance_record_path is not None and source_manifest_path is not None:
+        provenance_bytes = _read(provenance_record_path, MAX_RECORD_BYTES)
+        source_manifest_bytes = _read(source_manifest_path, MAX_MANIFEST_BYTES)
+        identity = validate_provenance_record_identity(
+            provenance_bytes, source_manifest_bytes, hmac_key=hmac_key
+        )
+        execution_id = identity["execution_id"]
+        execution_binding = "PROVIDED"
+        provenance_signature_status = identity["provenance_signature_status"]
     report = _read(report_path, MAX_COVERAGE_BYTES)
     mapping_bytes = _read(mapping_path, MAX_MAPPING_BYTES)
     graph_bytes = _read(graph_path, MAX_GRAPH_BYTES)
@@ -173,6 +204,9 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
     return {
         "schema_version": "usit-code-coverage-results-v1",
         "source_format": report_format.upper().replace("-", "_"),
+        "execution_id": execution_id,
+        "execution_binding": execution_binding,
+        "provenance_signature_status": provenance_signature_status,
         "source_hashes": {
             "coverage_report_sha256": hashlib.sha256(report).hexdigest(),
             "mapping_json_sha256": hashlib.sha256(mapping_bytes).hexdigest(),
@@ -191,5 +225,6 @@ def ingest_coverage_results(report_path: str | Path, mapping_path: str | Path,
             "JaCoCo package/sourcefile 路径必须与 mapping 中的项目相对路径完全一致。",
             "代码行覆盖率不等于业务需求覆盖、分支覆盖或功能正确性。",
             "只有 source_file_sha256 与显式 project_root 下真实源码字节匹配且行范围有效时，覆盖率才保留已测状态；否则降级 UNKNOWN。",
+            "未提供执行来源记录时 execution_binding 为 NOT_PROVIDED：覆盖率仍是报告的测量值，但无法确认它与测试结果来自同一次执行，验证器不得据此得出组合结论。",
         ],
     }
