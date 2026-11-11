@@ -187,24 +187,40 @@ def build_business_traceability(
             event_ids = correlation.get("observed_event_ids_by_timestamp", [])
             if not isinstance(event_ids, list) or any(not isinstance(value, str) for value in event_ids):
                 raise ValueError("runtime evidence validation contains malformed observed_event_ids_by_timestamp")
+            multi_function_correlation = len(observed_ids) > 1
             for observed_id in observed_ids:
                 runtime_correlations_by_function.setdefault(observed_id, []).append({
                     "correlation_id": correlation_id,
-                    "event_count": correlation.get("event_count"),
-                    "observed_stages": correlation.get("observed_stages", []),
-                    "observed_event_ids_by_timestamp": list(event_ids),
-                    "explicit_parent_edges": [
+                    # A shared correlation can contain events owned by different
+                    # business functions. The summary has no per-event ownership
+                    # map, so never copy its full stages/topology onto each function.
+                    "function_ids_in_correlation": list(observed_ids),
+                    "function_attribution_status": (
+                        "SHARED_CORRELATION_EVENT_OWNERSHIP_UNRESOLVED"
+                        if multi_function_correlation else "SINGLE_FUNCTION_CORRELATION"
+                    ),
+                    "event_count": None if multi_function_correlation else correlation.get("event_count"),
+                    "observed_stages": [] if multi_function_correlation else correlation.get("observed_stages", []),
+                    "observed_event_ids_by_timestamp": [] if multi_function_correlation else list(event_ids),
+                    "explicit_parent_edges": [] if multi_function_correlation else [
                         {"parent_event_id": edge["parent_event_id"], "child_event_id": edge["child_event_id"]}
                         for edge in parent_edges
                     ],
-                    "parent_topology_status": correlation.get("parent_topology_status", "NOT_PROVIDED"),
-                    "parent_link_coverage_ratio": correlation.get("parent_link_coverage_ratio"),
-                    "root_event_ids": correlation.get("root_event_ids", []),
-                    "leaf_event_ids": correlation.get("leaf_event_ids", []),
-                    "branching_parent_event_ids": correlation.get("branching_parent_event_ids", []),
-                    "isolated_event_ids": correlation.get("isolated_event_ids", []),
-                    "cycle_event_ids": correlation.get("cycle_event_ids", []),
-                    "interpretation": "仅复用同一 correlation 中显式 business_function_id；父子边来自采集端声明，时间排序不代表因果。",
+                    "parent_topology_status": (
+                        "NOT_ATTRIBUTABLE_ACROSS_FUNCTIONS" if multi_function_correlation
+                        else correlation.get("parent_topology_status", "NOT_PROVIDED")
+                    ),
+                    "parent_link_coverage_ratio": None if multi_function_correlation else correlation.get("parent_link_coverage_ratio"),
+                    "root_event_ids": [] if multi_function_correlation else correlation.get("root_event_ids", []),
+                    "leaf_event_ids": [] if multi_function_correlation else correlation.get("leaf_event_ids", []),
+                    "branching_parent_event_ids": [] if multi_function_correlation else correlation.get("branching_parent_event_ids", []),
+                    "isolated_event_ids": [] if multi_function_correlation else correlation.get("isolated_event_ids", []),
+                    "cycle_event_ids": [] if multi_function_correlation else correlation.get("cycle_event_ids", []),
+                    "interpretation": (
+                        "该 correlation 显式关联多个业务功能，但当前摘要没有逐事件功能归属；不将阶段、事件或父子拓扑归属到单个功能。"
+                        if multi_function_correlation else
+                        "仅复用同一 correlation 中显式 business_function_id；父子边来自采集端声明，时间排序不代表因果。"
+                    ),
                 })
         correlation_ids_all = set(runtime_correlations_by_function)
         correlation_observed_ids = correlation_ids_all & set(functions)
