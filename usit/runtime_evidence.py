@@ -75,7 +75,7 @@ def validate_runtime_evidence(
     # to callers that provide an already-decoded document directly.
     try:
         encoded_size = len(json.dumps(
-            document, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            document, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8"))
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("runtime evidence document must be JSON-serializable") from exc
