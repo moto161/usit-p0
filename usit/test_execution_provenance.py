@@ -182,11 +182,26 @@ def validate_execution_provenance(
     for field in ("command_fingerprint", "environment_fingerprint"):
         _require_hash(record.get(field), field)
 
+    # Parent-observed pytest outcome, when the runner records it. Importers
+    # must treat a non-zero exit code as overriding any PASSED in the report:
+    # the exit code is observed by the parent process, while the report file
+    # can be rewritten by the test process.
+    exit_code = record.get("pytest_exit_code")
+    if exit_code is not None and (
+        not isinstance(exit_code, int) or isinstance(exit_code, bool)
+    ):
+        raise ValueError("pytest_exit_code must be an integer or absent")
+    exit_status = record.get("pytest_exit_status")
+    if exit_status is not None and not isinstance(exit_status, str):
+        raise ValueError("pytest_exit_status must be a string or absent")
+
     return {
         "schema_version": SCHEMA_VERSION,
         "execution_id": execution_id,
         "report_integrity_status": "MATCHED",
         "source_manifest_integrity_status": "MATCHED",
+        "pytest_exit_code": exit_code,
+        "pytest_exit_status": exit_status,
         "working_tree_state": tree["state"],
         "untracked_files": tree["untracked_files"],
         "execution_reproducibility_status": (

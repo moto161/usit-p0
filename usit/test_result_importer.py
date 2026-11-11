@@ -656,6 +656,16 @@ def ingest_junit_results(
         else:
             execution_status = "PASSED"
             execution_status_reason = "ALL_MAPPED_TEST_CASES_PASSED"
+        # The exit code is parent-observed and cannot be rewritten by the
+        # test process. A non-zero exit code overrides a PASSED report: the
+        # report file lives in staging and may have been forged after pytest
+        # wrote it. No provenance (exit code unknown) leaves the report
+        # status as-is; the absence is recorded in the limitations.
+        if execution_status == "PASSED" and execution_provenance is not None:
+            exit_code = execution_provenance.get("pytest_exit_code")
+            if exit_code is not None and exit_code != 0:
+                execution_status = "UNKNOWN"
+                execution_status_reason = "REPORT_PASSED_BUT_RUNNER_EXIT_CODE_NONZERO"
         function_results.append({
             "business_function_id": function_id,
             "endpoint_id": view.get("endpoint_id"),

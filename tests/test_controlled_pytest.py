@@ -352,6 +352,119 @@ class ControlledPytestTests(unittest.TestCase):
             )
 
 
+    def test_modify_execute_restore_is_detected_by_ctime(self):
+        """Modify-then-restore must fail the gate even with bytes+mtime restored.
+
+        A test that rewrites an already-imported source file, executes the
+        modified code, then restores the original bytes and mtime (os.utime)
+        leaves no content trace -- but ctime cannot be reset by a
+        non-privileged process, so the pre/post snapshot diff must catch it.
+        """
+        impl = self.project / "impl.py"
+        impl.write_text("VALUE = 'original'\n", encoding="utf-8")
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "import impl\n"
+            "def test_modify_execute_restore():\n"
+            "    target = Path(impl.__file__)\n"
+            "    original = target.read_bytes()\n"
+            "    stat = target.stat()\n"
+            "    target.write_bytes(b\"VALUE = 'tampered'\\n\")\n"
+            "    assert impl.VALUE == 'original'\n"
+            "    target.write_bytes(original)\n"
+            "    os.utime(target, (stat.st_atime_ns, stat.st_mtime_ns), ns=(stat.st_atime_ns, stat.st_mtime_ns))\n",
+            encoding="utf-8",
+        )
+        self.git("add", "impl.py", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture modifies and restores source")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "FAIL", result)
+        gate = json.loads((Path(result["evidence_dir"]) / "final_gate_report.json").read_text(encoding="utf-8"))
+        self.assertTrue(gate["changes"])
+        self.assertTrue(any(
+            change["path"] == "impl.py" for change in gate["changes"]
+        ))
+
+    def test_forged_junit_counts_fail_terminal_summary_cross_check(self):
+        """A JUnit file rewritten after pytest must not survive the cross-check.
+
+        The fixture test really passes (exit code 0), but a conftest
+        sessionfinish hook overwrites the JUnit report claiming two passed
+        tests instead of one. The parent-captured stdout summary still says
+        "1 passed", so the counts disagree and the gate must fail.
+        """
+        conftest = self.project / "tests" / "conftest.py"
+        conftest.write_text(
+            "import pytest\n"
+            "from pathlib import Path\n"
+            "@pytest.hookimpl(trylast=True)\n"
+            "def pytest_sessionfinish(session, exitstatus):\n"
+            "    junit = Path(session.config.rootpath) / '.usit-junit.xml'\n"
+            "    junit.write_text(\n"
+            "        '<?xml version=\"1.0\" encoding=\"utf-8\"?>'\n"
+            "        '<testsuites><testsuite name=\"pytest\" tests=\"2\" failures=\"0\" errors=\"0\" skipped=\"0\">'\n"
+            "        '<testcase classname=\"tests.test_smoke\" name=\"test_snapshot_execution\" />'\n"
+            "        '<testcase classname=\"tests.test_smoke\" name=\"test_phantom\" />'\n"
+            "        '</testsuite></testsuites>', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/conftest.py")
+        self.git("commit", "-q", "-m", "fixture forges junit after pytest")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "FAIL", result)
+        self.assertTrue(any(
+            "JUnit counts disagree with pytest terminal summary" in item
+            for item in result["source_tree_inventory_errors"]
+        ))
+
+    def test_staging_parent_does_not_expose_evidence_dir(self):
+        """The test process must not see the evidence run directory via '..'.
+
+        Staging is created in the system temp root, not inside
+        evidence_parent, so listing the staging parent must not reveal any
+        run_* evidence directory.
+        """
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "from pathlib import Path\n"
+            "def test_parent_has_no_evidence_run_dir():\n"
+            "    entries = {p.name for p in Path.cwd().parent.iterdir()}\n"
+            "    assert not any(name.startswith('run_') for name in entries)\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture checks staging parent isolation")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+
+    def test_provenance_records_parent_observed_exit_code(self):
+        """Provenance must carry the parent-observed pytest exit code."""
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        provenance = json.loads(
+            (Path(result["evidence_dir"]) / "execution-provenance.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(provenance["pytest_exit_code"], 0)
+        self.assertEqual(provenance["pytest_exit_status"], "PASS")
+
     def test_execution_artifact_reader_enforces_size_limit(self):
         artifact = self.base / "oversized-artifact.bin"
         artifact.write_bytes(b"12345")

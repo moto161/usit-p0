@@ -15,6 +15,42 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         self.graph_bytes=json.dumps(self.graph,ensure_ascii=False,indent=2).encode()
         self.graph_hash=hashlib.sha256(self.graph_bytes).hexdigest()
 
+    def test_passed_without_any_source_binding_downgrades_to_unknown(self):
+        """PASSED with mapped cases but no byte-level source binding is UNKNOWN.
+
+        A report may claim PASSED while none of its mapped testcases was ever
+        tied to exact test-source bytes (binding NOT_PROVIDED / NOT_CHECKED).
+        Such a claim must not reach a TEST_PASS_* conclusion.
+        """
+        tests = {"schema_version": "usit-test-execution-results-v1",
+            "source_hashes": {"test_report_sha256": "1" * 64, "mapping_json_sha256": "2" * 64,
+                              "business_graph_sha256": self.graph_hash},
+            "business_function_results": [{
+                "business_function_id": "bf-upload",
+                "execution_status": "PASSED",
+                "mapped_test_case_count": 1, "failed": 0, "skipped": 0,
+                "expected_mapped_test_case_count": 1,
+                "reported_mapped_test_case_count": 1,
+                "mapped_case_completeness": "COMPLETE",
+                "mapped_test_cases": [{
+                    "test_case_id": "tests/test_upload.py::test_upload",
+                    "status": "PASSED",
+                    "test_source_binding_status": "TEST_SOURCE_BINDING_NOT_CHECKED",
+                }],
+            }]}
+        result = verify_business_function_evidence(
+            self.graph, tests, business_graph_sha256=self.graph_hash
+        )
+        upload = next(x for x in result["business_function_evidence"]
+                      if x["business_function_id"] == "bf-upload")
+        self.assertEqual(upload["test_execution_status"], "UNKNOWN")
+        self.assertEqual(upload["verification_conclusion"], "EVIDENCE_CONFLICT")
+        self.assertTrue(upload["evidence_conflict"])
+        self.assertIn(
+            "TEST_PASS_WITHOUT_SOURCE_BINDING",
+            {item["kind"] for item in result["evidence_conflicts"]},
+        )
+
     def test_cross_checks_test_and_coverage_without_claiming_business_correctness(self):
         tests={"schema_version":"usit-test-execution-results-v1",
             "source_hashes":{"test_report_sha256":"1"*64,"mapping_json_sha256":"2"*64,"business_graph_sha256":self.graph_hash},
@@ -504,6 +540,18 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
                 "mapped_test_cases": [{
                     "test_case_id": "tests/test_upload.py::test_upload",
                     "status": "PASSED",
+                    "test_source_binding_status": "TEST_SOURCE_BYTES_MATCHED",
+                    "test_source_binding_evidence": {
+                        "status": "TEST_SOURCE_BYTES_MATCHED",
+                        "expected_sha256": "a" * 64,
+                        "actual_sha256": "a" * 64,
+                        "declared_test_source_file_sha256": "a" * 64,
+                        "test_source_file": "tests/test_upload.py",
+                        "declared_test_source_file": "tests/test_upload.py",
+                        "test_source_line": 4,
+                        "declared_test_source_line": 4,
+                        "source_line_count": 10,
+                    },
                     "test_source_snapshot_binding_status": snapshot["status"],
                     "test_source_snapshot_binding_evidence": snapshot,
                     "test_source_report_locator_status": locator["status"],

@@ -45,6 +45,71 @@ def _read_execution_artifact(path: str | os.PathLike[str], limit: int, label: st
     except (OSError, ValueError) as exc:
         detail = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
         raise ValueError(f"{label} is not a bounded regular file: {detail}") from exc
+
+
+# pytest terminal summary line: "=== 3 passed, 1 failed in 0.42s ===" (normal;
+# pytest pads the '=' run to terminal width, so match one-or-more '=')
+# or "3 passed, 1 failed in 0.42s" (quiet, -q). Only the final summary line
+# is used. Counts that pytest reports separately from JUnit (xfailed/xpassed
+# are folded into JUnit "skipped"/"passed") are normalised before comparing.
+_SUMMARY_RE = re.compile(
+    r"(?:^|\n)=+\s+(?P<body>.+?)\s+in\s+[\d.]+s\s+=+"
+    r"|(?:^|\n)(?P<quiet>(?:\d+\s+\w+(?:,\s*)?)+)\s+in\s+[\d.]+s\s*$",
+    re.MULTILINE,
+)
+_SUMMARY_COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|errors?|xfailed|xpassed|deselected)")
+_COUNT_KEYS = ("passed", "failed", "skipped", "errors", "xfailed", "xpassed", "deselected")
+
+
+def _pytest_terminal_summary_counts(stdout_bytes: bytes) -> dict[str, int] | None:
+    """Parse the last pytest terminal summary line, or None when absent.
+
+    Returns a normalised count dict. A missing summary is not an error: some
+    invocations (collection errors, crashes, -q edge cases) print none, and
+    the exit code already covers those paths.
+    """
+    try:
+        text = stdout_bytes.decode("utf-8", "replace")
+    except Exception:
+        return None
+    matches = list(_SUMMARY_RE.finditer(text))
+    if not matches:
+        return None
+    body = matches[-1].group("body") or matches[-1].group("quiet") or ""
+    counts: dict[str, int] = {key: 0 for key in _COUNT_KEYS}
+    for number, label in _SUMMARY_COUNT_RE.findall(body):
+        key = "errors" if label in {"error", "errors"} else label
+        counts[key] += int(number)
+    # pytest folds xfailed into JUnit "skipped" and xpassed into JUnit
+    # "passed", so normalise to JUnit's view for comparison.
+    counts["skipped"] += counts["xfailed"]
+    counts["passed"] += counts["xpassed"]
+    return counts
+
+
+def _junit_counts(root: ET.Element) -> dict[str, int] | None:
+    """Sum tests/failures/errors/skipped across JUnit testsuite elements."""
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    if not suites:
+        return None
+    total = failed = errors = skipped = 0
+    try:
+        for suite in suites:
+            total += int(suite.attrib.get("tests", "0"))
+            failed += int(suite.attrib.get("failures", "0"))
+            errors += int(suite.attrib.get("errors", "0"))
+            skipped += int(suite.attrib.get("skipped", "0"))
+    except ValueError:
+        return None
+    return {
+        "tests": total,
+        "failed": failed,
+        "errors": errors,
+        "skipped": skipped,
+        "passed": total - failed - errors - skipped,
+    }
+
+
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 
@@ -390,7 +455,12 @@ def run_controlled_pytest(
         raise ValueError("Git submodules are not supported by the staged snapshot runner")
     head = _git(project, "rev-parse", "HEAD", limit=4096).decode("ascii").strip()
     archive = _git(project, "archive", "--format=tar", "HEAD")
-    staging = Path(tempfile.mkdtemp(prefix=".usit-stage-", dir=parent)).resolve()
+    # Staging lives in the system temp root, NOT inside evidence_parent: the
+    # test process runs with cwd=staging, so a staging dir sibling to the
+    # evidence dir would let it enumerate ".." and reach run_* evidence.
+    # (Depth-in-depth only: /proc can still reveal the parent, so this does
+    # not replace UID isolation; it just closes the trivial enumeration path.)
+    staging = Path(tempfile.mkdtemp(prefix=".usit-stage-")).resolve()
     try:
         source_files = _extract_archive(archive, staging)
         source_manifest = {"schema_version": "usit-manifest-v1", "git_commit": head, "files": source_files}
@@ -505,6 +575,36 @@ def run_controlled_pytest(
                 "evidence_dir": str(evidence), "reason": f"JUnit report is invalid: {exc}",
                 "provenance_authenticity_status": "UNAUTHENTICATED",
             }
+        # Cross-check the JUnit counts against the pytest terminal summary in
+        # the parent-captured stdout.log. The JUnit file lives in staging and
+        # can be rewritten by test code after pytest writes it; stdout.log is
+        # written by the parent process, so a forged JUnit that disagrees
+        # with the terminal summary is caught here. A missing summary line
+        # (collection error, crash) is not itself a failure: the exit code
+        # already covers those paths.
+        try:
+            stdout_bytes = _read_execution_artifact(
+                evidence / "stdout.log", MAX_EXECUTION_ARTIFACT_BYTES, "pytest stdout log"
+            )
+            terminal = _pytest_terminal_summary_counts(stdout_bytes)
+            junit = _junit_counts(root)
+            if terminal is not None and junit is not None:
+                terminal_total = (
+                    terminal["passed"] + terminal["failed"] + terminal["skipped"]
+                    + terminal["errors"]
+                )
+                if (terminal["failed"] != junit["failed"]
+                        or terminal["errors"] != junit["errors"]
+                        or terminal_total != junit["tests"]):
+                    inventory_errors.append(
+                        "JUnit counts disagree with pytest terminal summary: "
+                        f"terminal(passed={terminal['passed']}, failed={terminal['failed']}, "
+                        f"skipped={terminal['skipped']}, errors={terminal['errors']}) vs "
+                        f"JUnit(tests={junit['tests']}, failures={junit['failed']}, "
+                        f"errors={junit['errors']}, skipped={junit['skipped']})"
+                    )
+        except (OSError, ValueError) as exc:
+            inventory_errors.append(f"pytest terminal summary cannot be cross-checked: {type(exc).__name__}")
         snapshot_root = evidence / "source_snapshot"
         snapshot_root.mkdir(mode=0o700, exist_ok=False)
         archived_files = _extract_archive(archive, snapshot_root)
@@ -530,6 +630,11 @@ def run_controlled_pytest(
             "report_format": "JUNIT_XML",
             "report_relative_path": "junit.xml",
             "report_sha256": sha256_hex(report_bytes),
+            # Parent-observed process outcome, independent of the JUnit file
+            # the test process could rewrite: importers must require exit
+            # code 0 before treating any PASSED in the report as executed.
+            "pytest_exit_code": capture.exit_code,
+            "pytest_exit_status": capture.status,
             "source_snapshot": {
                 "manifest_schema_version": source_manifest["schema_version"],
                 "manifest_sha256": manifest_hash,

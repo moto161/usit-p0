@@ -126,7 +126,7 @@ def _read_snapshot(path: Path, rel: str) -> dict[str, Any]:
     try:
         before = os.lstat(path)
     except FileNotFoundError:
-        return {"path": rel, "state": "MISSING", "size": None, "sha256": None}
+        return {"path": rel, "state": "MISSING", "size": None, "sha256": None, "ctime_ns": None}
     if not stat.S_ISREG(before.st_mode):
         raise OSError(f"snapshot target is not a regular file: {rel}")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
@@ -154,7 +154,11 @@ def _read_snapshot(path: Path, rel: str) -> dict[str, Any]:
     path_identity = (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns)
     if identity_before != identity_after or identity_after != path_identity or size != after_fd.st_size:
         raise OSError(f"snapshot target changed during read: {rel}")
-    return {"path": rel, "state": "PRESENT", "size": size, "sha256": digest.hexdigest()}
+    # ctime_ns is recorded so a modify-then-restore cycle is detectable:
+    # content and mtime can both be restored (os.utime), but a non-privileged
+    # process cannot reset ctime, so any write leaves an irreversible mark.
+    return {"path": rel, "state": "PRESENT", "size": size, "sha256": digest.hexdigest(),
+            "ctime_ns": int(after_path.st_ctime_ns)}
 
 
 def _snapshot(root: Path, relative_paths: Sequence[str]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -165,7 +169,7 @@ def _snapshot(root: Path, relative_paths: Sequence[str]) -> tuple[list[dict[str,
             path = _safe_relative_file(root, rel)
             entries.append(_read_snapshot(path, rel))
         except (OSError, ValueError, TypeError) as exc:
-            entries.append({"path": rel, "state": "ERROR", "size": None, "sha256": None})
+            entries.append({"path": rel, "state": "ERROR", "size": None, "sha256": None, "ctime_ns": None})
             errors.append(f"{rel}: {type(exc).__name__}: {exc}")
     return entries, errors
 
@@ -366,7 +370,7 @@ def capture_run(
         pre_by_path = {entry["path"]: entry for entry in pre}
         for after in post:
             before = pre_by_path.get(after["path"], {})
-            if (before.get("state"), before.get("sha256"), before.get("size")) != (after.get("state"), after.get("sha256"), after.get("size")):
+            if (before.get("state"), before.get("sha256"), before.get("size"), before.get("ctime_ns")) != (after.get("state"), after.get("sha256"), after.get("size"), after.get("ctime_ns")):
                 diff.append({"path": after["path"], "before": before, "after": after})
         if post_errors:
             status = "NOT_VERIFIED"

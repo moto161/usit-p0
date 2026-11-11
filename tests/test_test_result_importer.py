@@ -583,6 +583,66 @@ def test_delete():
                     source_manifest_path=manifest_path,
                 )
 
+    def test_nonzero_exit_code_downgrades_passed_report_to_unknown(self):
+        """A PASSED report with a non-zero parent-observed exit code is UNKNOWN.
+
+        The exit code is observed by the parent process and cannot be
+        rewritten by the test process, while the JUnit file lives in staging
+        and may have been forged after pytest wrote it.
+        """
+        from usit.test_execution_provenance import (
+            SCHEMA_VERSION, canonical_json_bytes, sha256_hex,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(
+                base,
+                '<testsuite><testcase classname="tests.PhotoTests" name="test_upload"/></testsuite>',
+            )
+            report_bytes = report.read_bytes()
+            manifest = {
+                "schema_version": "usit-manifest-v1",
+                "files": [{"path": "tests/test_photo.py", "sha256": "a" * 64}],
+            }
+            manifest_path = base / "source-manifest.json"
+            manifest_path.write_bytes(json.dumps(manifest).encode("utf-8"))
+            provenance = {
+                "schema_version": SCHEMA_VERSION,
+                "execution_id": "ci-run-124",
+                "started_at": "2026-11-03T10:00:00Z",
+                "completed_at": "2026-11-03T10:00:02Z",
+                "runner": {"name": "pytest", "version": "8.3.5"},
+                "report_format": "JUNIT_XML",
+                "report_relative_path": "reports/junit.xml",
+                "report_sha256": sha256_hex(report_bytes),
+                "pytest_exit_code": 1,
+                "pytest_exit_status": "FAIL",
+                "source_snapshot": {
+                    "manifest_schema_version": "usit-manifest-v1",
+                    "manifest_sha256": sha256_hex(canonical_json_bytes(manifest)),
+                    "file_count": 1,
+                    "capture_method": "PRE_EXECUTION_READ_ONLY_CAPTURE",
+                },
+                "working_tree_state": {"state": "CLEAN", "untracked_files": "INCLUDED"},
+                "command_fingerprint": "b" * 64,
+                "environment_fingerprint": "c" * 64,
+            }
+            record_path = base / "execution-provenance.json"
+            record_path.write_text(json.dumps(provenance), encoding="utf-8")
+            result = ingest_junit_results(
+                report, mapping, graph,
+                provenance_record_path=record_path,
+                source_manifest_path=manifest_path,
+            )
+            self.assertEqual(result["execution_provenance"]["pytest_exit_code"], 1)
+            upload = next(x for x in result["business_function_results"]
+                          if x["business_function_id"] == "bf-upload")
+            self.assertEqual(upload["execution_status"], "UNKNOWN")
+            self.assertEqual(
+                upload["execution_status_reason"],
+                "REPORT_PASSED_BUT_RUNNER_EXIT_CODE_NONZERO",
+            )
+
     def test_evidence_bundle_rejects_symlinked_evidence_directory(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

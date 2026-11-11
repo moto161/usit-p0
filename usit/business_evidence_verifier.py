@@ -631,6 +631,18 @@ def verify_business_function_evidence(
             test_source_binding_status = "PARTIALLY_SOURCE_BYTES_MATCHED_AT_IMPORT"
         else:
             test_source_binding_status = "SOURCE_BINDING_NOT_VERIFIED"
+        # A PASSED claim without any verified test-source binding is just a
+        # report assertion: no mapped testcase was ever tied to exact source
+        # bytes, so the function cannot be reported as passed. Downgrade to
+        # UNKNOWN rather than letting an unbound PASSED reach a conclusion.
+        if ts == "PASSED" and test_case_evidence and not any(
+            status == "TEST_SOURCE_BYTES_MATCHED" for status in binding_states
+        ):
+            conflicts.append({
+                "kind": "TEST_PASS_WITHOUT_SOURCE_BINDING",
+                "business_function_id": function_id,
+            })
+            ts = "UNKNOWN"
         snapshot_states = [item.get("test_source_snapshot_binding_status") for item in test_case_evidence]
         if not snapshot_states:
             test_source_snapshot_binding_status = "NOT_PROVIDED"
