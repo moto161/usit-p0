@@ -35,7 +35,7 @@ AUTH_SCHEMA = "usit-test-execution-authorization-v1"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_FILES = 50_000
 MAX_RUNTIME_IMPORTS_BYTES = 50 * 1024 * 1024
-MAX_EXECUTION_ARTIFACT_BYTES = 50 * 1024 * 1024
+MAX_EXECUTION_ARTIFACT_BYTES = 100 * 1024 * 1024
 
 
 def _read_execution_artifact(path: str | os.PathLike[str], limit: int, label: str) -> bytes:
