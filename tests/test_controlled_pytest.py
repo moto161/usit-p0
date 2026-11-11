@@ -11,7 +11,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from usit.controlled_pytest import AUTH_SCHEMA, run_controlled_pytest
+from usit.controlled_pytest import (
+    AUTH_SCHEMA, MAX_REPORT_BYTES, MAX_RUNTIME_IMPORTS_BYTES,
+    _read_execution_artifact, run_controlled_pytest,
+)
 from usit.verification_capture import verify_manifest
 from usit.test_result_importer import ingest_junit_results
 
@@ -347,6 +350,26 @@ class ControlledPytestTests(unittest.TestCase):
                 source_manifest_path=evidence / "source-manifest.json",
                 evidence_dir=evidence,
             )
+
+
+    def test_execution_artifact_reader_enforces_size_limit(self):
+        artifact = self.base / "oversized-artifact.bin"
+        artifact.write_bytes(b"12345")
+        with self.assertRaisesRegex(ValueError, "size limit"):
+            _read_execution_artifact(artifact, 4, "test artifact")
+        self.assertEqual(MAX_REPORT_BYTES, 50 * 1024 * 1024)
+        self.assertEqual(MAX_RUNTIME_IMPORTS_BYTES, 50 * 1024 * 1024)
+
+    def test_execution_artifact_reader_rejects_symlink(self):
+        target = self.base / "artifact-target.bin"
+        target.write_bytes(b"safe")
+        link = self.base / "artifact-link.bin"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        with self.assertRaisesRegex(ValueError, "bounded regular file"):
+            _read_execution_artifact(link, 1024, "test artifact")
 
 
 if __name__ == "__main__":
