@@ -43,7 +43,8 @@ def _read_execution_artifact(path: str | os.PathLike[str], limit: int, label: st
     try:
         return read_bounded_no_follow(path, limit)
     except (OSError, ValueError) as exc:
-        raise ValueError(f"{label} is not a bounded regular file: {type(exc).__name__}") from exc
+        detail = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        raise ValueError(f"{label} is not a bounded regular file: {detail}") from exc
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 
