@@ -385,8 +385,14 @@ def ingest_junit_results(
     provenance_record_path: str | Path | None = None,
     source_manifest_path: str | Path | None = None,
     evidence_dir: str | Path | None = None,
+    hmac_key: bytes | None = None,
 ) -> dict[str, Any]:
     """Parse JUnit and compute function status using explicit testcase mappings.
+
+    When ``hmac_key`` is given, the execution provenance signature is
+    verified during import; an INVALID / WRONG_KEY / MALFORMED signature
+    rejects the import, while a missing signature on an old record is
+    reported as MISSING in the validation result.
 
     Mapping JSON is bound to the exact graph bytes:
       {"schema_version":"usit-test-result-mapping-v1",
@@ -534,7 +540,7 @@ def ingest_junit_results(
         provenance_bytes = _read_regular(provenance_record_path, MAX_RECORD_BYTES)
         source_manifest_bytes = _read_regular(source_manifest_path, MAX_MANIFEST_BYTES)
         execution_provenance = validate_execution_provenance(
-            provenance_bytes, report_bytes, source_manifest_bytes
+            provenance_bytes, report_bytes, source_manifest_bytes, hmac_key=hmac_key
         )
         expected_format = {"junit-xml": "JUNIT_XML", "pytest-json": "PYTEST_JSON"}.get(report_format)
         try:

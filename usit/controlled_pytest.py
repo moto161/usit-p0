@@ -24,6 +24,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 from xml.etree import ElementTree as ET
 
+from .evidence_signing import (
+    generate_run_key, key_file_name, sign_document, verify_document_signature,
+    write_key_file,
+)
 from .safeio import read_bounded_no_follow
 from .test_execution_provenance import (
     MAX_REPORT_BYTES, SCHEMA_VERSION, canonical_json_bytes, sha256_hex,
@@ -506,6 +510,12 @@ def run_controlled_pytest(
             runner_version = importlib.metadata.version("pytest")
         except importlib.metadata.PackageNotFoundError:
             runner_version = "NOT_INSTALLED"
+        # One random HMAC key for this run, held in parent memory only. It
+        # is never passed to the test process (not in env, not on disk) and
+        # is written to a 0600 key file outside the evidence directory only
+        # after the test process has exited, so the test process cannot read
+        # it and forge signatures during the run.
+        run_key = generate_run_key()
         capture = capture_run(
             command, project_root=staging, evidence_parent=parent,
             files=[item["path"] for item in source_files],
@@ -617,6 +627,11 @@ def run_controlled_pytest(
         (evidence / "source-manifest.json").write_bytes(
             (json.dumps(source_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
         )
+        # The test process has exited (capture_run returned), so the run key
+        # can now be persisted outside the evidence directory for post-hoc
+        # verification. Written before signing so a later failure cannot
+        # leave signed evidence without its key.
+        key_path = write_key_file(parent / key_file_name(capture.run_id), capture.run_id, run_key)
         gate_path = evidence / "final_gate_report.json"
         gate = json.loads(_read_execution_artifact(
             gate_path, MAX_EXECUTION_ARTIFACT_BYTES, "final gate report"
@@ -651,9 +666,17 @@ def run_controlled_pytest(
                 "status": runtime_imports.get("status") if runtime_imports is not None else "NOT_AVAILABLE",
             },
         }
+        # Sign the provenance record with the parent-held run key, then
+        # validate structure AND signature. A VALID signature proves the
+        # parent produced this record; runner authenticity stays
+        # UNAUTHENTICATED (a signature does not prove the test process
+        # actually executed the reported tests).
+        provenance["signature"] = sign_document(provenance, run_key)
         validation = validate_execution_provenance(
             json.dumps(provenance).encode("utf-8"), report_bytes, source_manifest_bytes,
+            hmac_key=run_key,
         )
+        provenance_signature_status = validation["provenance_signature_status"]
         provenance_path = evidence / "execution-provenance.json"
         provenance_path.write_text(json.dumps(provenance, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         gate["git_commit"] = head
@@ -661,6 +684,8 @@ def run_controlled_pytest(
         gate["provenance_authenticity_status"] = "UNAUTHENTICATED"
         gate["execution_source_binding_status"] = "STAGED_SNAPSHOT_USED_UNAUTHENTICATED"
         gate["provenance_record_validation"] = "STRUCTURE_AND_DIGESTS_VALIDATED"
+        gate["provenance_signature_status"] = provenance_signature_status
+        gate["hmac_key_file"] = f"../{key_file_name(capture.run_id)}"
         gate["pytest_report"] = "junit.xml"
         gate["pytest_report_sha256"] = validation["report_sha256"]
         gate["source_manifest"] = "source-manifest.json"
@@ -693,8 +718,20 @@ def run_controlled_pytest(
             if item["path"] == "final_gate_report.json":
                 item.update(_artifact_record(evidence, "final_gate_report.json"))
         manifest["artifacts"].sort(key=lambda item: item["path"])
+        # Sign the completed manifest and verify the signature in memory so
+        # its status can be recorded in the gate report. The gate report is
+        # rewritten below with that status, which changes its hash, so the
+        # manifest is re-signed after refreshing its gate-report record.
+        manifest["signature"] = sign_document(manifest, run_key)
+        manifest_signature_status = verify_document_signature(manifest, run_key)
+        gate["evidence_manifest_signature_status"] = manifest_signature_status
+        gate_path.write_text(json.dumps(gate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        for item in manifest["artifacts"]:
+            if item["path"] == "final_gate_report.json":
+                item.update(_artifact_record(evidence, "final_gate_report.json"))
+        manifest["signature"] = sign_document(manifest, run_key)
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        verified = verify_manifest(evidence)
+        verified = verify_manifest(evidence, hmac_key=run_key)
         final_status = capture.status if verified["valid"] else "NOT_VERIFIED"
         if (inventory_errors or runtime_imports_errors) and final_status == "PASS":
             final_status = "FAIL"
@@ -711,6 +748,9 @@ def run_controlled_pytest(
             "source_snapshot_root": str(snapshot_root),
             "evidence_manifest_valid": verified["valid"],
             "evidence_manifest_errors": verified["errors"],
+            "evidence_manifest_signature_status": manifest_signature_status,
+            "provenance_signature_status": provenance_signature_status,
+            "hmac_key_file": str(key_path),
             "source_tree_inventory_status": "CLEAN" if not inventory_errors else "CHANGED_OR_UNSAFE",
             "source_tree_inventory_errors": inventory_errors,
             "provenance_authenticity_status": "UNAUTHENTICATED",
@@ -728,6 +768,7 @@ def run_controlled_pytest(
                 "The test process runs from a staged Git archive, not the original project directory.",
                 "Runtime import paths and hashes are collected but remain unauthenticated; OS-level isolation and runner authenticity are not established.",
                 "A passing pytest report does not establish business-function correctness without reviewed mappings and independent evidence verification.",
+                "HMAC signatures prove the parent process produced the provenance record and evidence manifest, not that the test process executed the reported tests. The per-run key is held in parent memory during the run and stored in a 0600 key file outside the evidence directory after the test process exits; a same-user test process that can read parent memory could steal it, so signatures raise the forgery bar but do not replace UID isolation.",
             ],
         }
     finally:

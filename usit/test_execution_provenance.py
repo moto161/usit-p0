@@ -91,11 +91,18 @@ def validate_execution_provenance(
     record_bytes: bytes,
     report_bytes: bytes,
     source_manifest_bytes: bytes,
+    hmac_key: bytes | None = None,
 ) -> dict[str, Any]:
     """Validate record shape and digest consistency without asserting authenticity.
 
     The returned trust state is deliberately UNAUTHENTICATED: integrity hashes
     cannot prove who created the record or which files the test process loaded.
+    When ``hmac_key`` is given, the record's HMAC signature is also verified:
+    a VALID signature proves the parent process produced this record and it
+    has not changed since signing -- it still does not prove the test process
+    actually executed the reported tests. An INVALID / WRONG_KEY / MALFORMED
+    signature is a hard integrity failure; a missing signature on an old
+    record is reported as MISSING, not an error.
     """
     record = _json_object(record_bytes, "execution provenance record", MAX_RECORD_BYTES)
     if not isinstance(report_bytes, bytes):
@@ -104,6 +111,14 @@ def validate_execution_provenance(
         raise ValueError(f"test report exceeds size limit ({MAX_REPORT_BYTES} bytes)")
     if record.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {SCHEMA_VERSION}")
+
+    signature_status = "NOT_CHECKED"
+    if hmac_key is not None:
+        from .evidence_signing import verify_document_signature
+
+        signature_status = verify_document_signature(record, hmac_key)
+        if signature_status in {"INVALID", "WRONG_KEY", "MALFORMED"}:
+            raise ValueError(f"execution provenance signature is {signature_status}")
 
     execution_id = record.get("execution_id")
     if not isinstance(execution_id, str) or not execution_id.strip() or len(execution_id) > 128:
@@ -200,6 +215,7 @@ def validate_execution_provenance(
         "execution_id": execution_id,
         "report_integrity_status": "MATCHED",
         "source_manifest_integrity_status": "MATCHED",
+        "provenance_signature_status": signature_status,
         "pytest_exit_code": exit_code,
         "pytest_exit_status": exit_status,
         "working_tree_state": tree["state"],

@@ -49,6 +49,51 @@ class TestExecutionProvenanceTests(unittest.TestCase):
         self.assertEqual(result["source_manifest_integrity_status"], "MATCHED")
         self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
         self.assertEqual(result["execution_reproducibility_status"], "CANDIDATE_ONLY")
+        self.assertEqual(result["provenance_signature_status"], "NOT_CHECKED")
+
+    def test_signed_record_validates_with_key(self):
+        from usit.evidence_signing import generate_run_key, sign_document
+
+        key = generate_run_key()
+        self.record["signature"] = sign_document(self.record, key)
+        result = validate_execution_provenance(
+            json.dumps(self.record).encode(), self.report, self.manifest_bytes,
+            hmac_key=key,
+        )
+        self.assertEqual(result["provenance_signature_status"], "VALID")
+        # A signature authenticates the document's producer, not the runner.
+        self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
+
+    def test_unsigned_record_reports_missing_signature_with_key(self):
+        from usit.evidence_signing import generate_run_key
+
+        result = validate_execution_provenance(
+            json.dumps(self.record).encode(), self.report, self.manifest_bytes,
+            hmac_key=generate_run_key(),
+        )
+        self.assertEqual(result["provenance_signature_status"], "MISSING")
+
+    def test_tampered_signed_record_is_rejected_with_key(self):
+        from usit.evidence_signing import generate_run_key, sign_document
+
+        key = generate_run_key()
+        self.record["signature"] = sign_document(self.record, key)
+        self.record["execution_id"] = "run-002"
+        with self.assertRaisesRegex(ValueError, "signature is INVALID"):
+            validate_execution_provenance(
+                json.dumps(self.record).encode(), self.report, self.manifest_bytes,
+                hmac_key=key,
+            )
+
+    def test_wrong_key_is_rejected_with_key(self):
+        from usit.evidence_signing import generate_run_key, sign_document
+
+        self.record["signature"] = sign_document(self.record, generate_run_key())
+        with self.assertRaisesRegex(ValueError, "signature is WRONG_KEY"):
+            validate_execution_provenance(
+                json.dumps(self.record).encode(), self.report, self.manifest_bytes,
+                hmac_key=generate_run_key(),
+            )
 
     def test_report_input_must_be_bounded_bytes(self):
         from unittest.mock import patch

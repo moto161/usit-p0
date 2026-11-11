@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -108,6 +109,51 @@ class ControlledPytestTests(unittest.TestCase):
         self.assertEqual(checked["provenance_authenticity_status"], "UNAUTHENTICATED")
         self.assertEqual(provenance["source_snapshot"]["capture_method"], "GIT_ARCHIVE_HEAD_STAGED_COPY")
         self.assertEqual(result["git_commit"], self.git("rev-parse", "HEAD").stdout.decode().strip())
+
+    def test_controlled_run_signs_provenance_and_manifest_with_hmac(self):
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["provenance_signature_status"], "VALID")
+        self.assertEqual(result["evidence_manifest_signature_status"], "VALID")
+        # Runner authenticity is unchanged by signing: the signature proves
+        # the parent produced the documents, not that the tests executed.
+        self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
+        evidence = Path(result["evidence_dir"])
+        provenance = json.loads((evidence / "execution-provenance.json").read_text(encoding="utf-8"))
+        manifest = json.loads((evidence / "evidence_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["signature"]["algorithm"], "HMAC-SHA256")
+        self.assertEqual(manifest["signature"]["algorithm"], "HMAC-SHA256")
+        self.assertEqual(
+            provenance["signature"]["key_fingerprint"],
+            manifest["signature"]["key_fingerprint"],
+        )
+        # The key file lives OUTSIDE the evidence dir, mode 0600.
+        key_path = Path(result["hmac_key_file"])
+        self.assertTrue(key_path.is_file())
+        self.assertNotEqual(key_path.parent.resolve(), evidence.resolve())
+        self.assertEqual(key_path.parent.resolve(), self.evidence.resolve())
+        self.assertEqual(stat.S_IMODE(os.stat(key_path).st_mode), 0o600)
+        # Post-hoc verification with the key file re-checks both signatures
+        # and every manifest artifact, without the parent process.
+        from usit.evidence_signing import read_key_file, verify_evidence_directory
+
+        run_id, key = read_key_file(key_path)
+        self.assertEqual(run_id, Path(result["evidence_dir"]).name)
+        checked = verify_evidence_directory(evidence, key)
+        self.assertEqual(checked["provenance_signature_status"], "VALID")
+        self.assertEqual(checked["evidence_manifest_signature_status"], "VALID")
+        self.assertTrue(checked["manifest_valid"])
+        # Tampering with the provenance after the run is caught post-hoc.
+        provenance["execution_id"] = "run-forged"
+        (evidence / "execution-provenance.json").write_text(
+            json.dumps(provenance), encoding="utf-8"
+        )
+        checked = verify_evidence_directory(evidence, key)
+        self.assertEqual(checked["provenance_signature_status"], "INVALID")
 
     def test_dirty_worktree_is_refused_before_test_execution(self):
         (self.project / "tests" / "test_smoke.py").write_text("def test_changed(): assert True\n", encoding="utf-8")

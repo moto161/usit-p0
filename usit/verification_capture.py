@@ -212,10 +212,21 @@ def _artifact_record(root: Path, name: str) -> dict[str, Any]:
     return {"path": name, "size": size, "sha256": digest.hexdigest()}
 
 
-def verify_manifest(evidence_dir: str | os.PathLike[str]) -> dict[str, Any]:
-    """Verify every artifact listed by an evidence manifest, without mutation."""
+def verify_manifest(
+    evidence_dir: str | os.PathLike[str], hmac_key: bytes | None = None
+) -> dict[str, Any]:
+    """Verify every artifact listed by an evidence manifest, without mutation.
+
+    When ``hmac_key`` is given, the manifest's HMAC signature is also
+    verified: INVALID / WRONG_KEY / MALFORMED makes the manifest invalid
+    (fail-closed), while a missing signature on an old manifest is reported
+    as MISSING rather than an error. Without a key the signature is
+    NOT_CHECKED. A VALID signature proves the parent process produced this
+    manifest; it does not prove the test process executed the reported tests.
+    """
     errors: list[str] = []
     checked = 0
+    signature_status = "NOT_CHECKED"
     try:
         root = _canonical_directory(evidence_dir, "evidence directory")
         manifest_path = root / _MANIFEST_NAME
@@ -223,6 +234,12 @@ def verify_manifest(evidence_dir: str | os.PathLike[str]) -> dict[str, Any]:
         manifest = json.loads(read_bounded_no_follow(manifest_path, 50 * 1024 * 1024).decode("utf-8"))
         if manifest.get("schema_version") != 1 or not _RUN_ID_RE.fullmatch(str(manifest.get("run_id", ""))):
             raise ValueError("unsupported or invalid manifest identity")
+        if hmac_key is not None:
+            from .evidence_signing import verify_document_signature
+
+            signature_status = verify_document_signature(manifest, hmac_key)
+            if signature_status in {"INVALID", "WRONG_KEY", "MALFORMED"}:
+                errors.append(f"evidence manifest signature is {signature_status}")
         artifacts = manifest.get("artifacts")
         if not isinstance(artifacts, list) or not artifacts:
             raise ValueError("manifest artifacts must be a non-empty list")
@@ -255,7 +272,12 @@ def verify_manifest(evidence_dir: str | os.PathLike[str]) -> dict[str, Any]:
             errors.append("manifest omits required artifacts: " + ", ".join(sorted(missing)))
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         errors.append(f"{type(exc).__name__}: {exc}")
-    return {"valid": not errors, "artifacts_checked": checked, "errors": errors}
+    return {
+        "valid": not errors,
+        "artifacts_checked": checked,
+        "errors": errors,
+        "signature_status": signature_status,
+    }
 
 
 def capture_run(

@@ -187,6 +187,35 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertFalse(verified["valid"])
         self.assertTrue(any("mismatch" in error for error in verified["errors"]))
 
+    def test_manifest_signature_status_without_key_is_not_checked(self):
+        result = self.run_capture("pass")
+        verified = capture.verify_manifest(result.evidence_dir)
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["signature_status"], "NOT_CHECKED")
+
+    def test_signed_manifest_verifies_with_key_and_tamper_is_invalid(self):
+        from usit.evidence_signing import generate_run_key, sign_document
+
+        result = self.run_capture("pass")
+        manifest_path = Path(result.manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        key = generate_run_key()
+        manifest["signature"] = sign_document(manifest, key)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        verified = capture.verify_manifest(result.evidence_dir, hmac_key=key)
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["signature_status"], "VALID")
+        # Tampering with an artifact after signing breaks the artifact hash
+        # and the signature is computed over the manifest content, so the
+        # manifest itself is unchanged here; instead tamper the manifest's
+        # recorded hash to break the signature.
+        manifest["artifacts"][0]["sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        verified = capture.verify_manifest(result.evidence_dir, hmac_key=key)
+        self.assertFalse(verified["valid"])
+        self.assertEqual(verified["signature_status"], "INVALID")
+        self.assertTrue(any("signature is INVALID" in error for error in verified["errors"]))
+
     def test_manifest_omitting_required_artifact_is_detected(self):
         result = self.run_capture("pass")
         manifest_path = Path(result.manifest_path)
