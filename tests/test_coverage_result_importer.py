@@ -144,6 +144,8 @@ class CoverageImporterTests(unittest.TestCase):
             self.assertEqual(result["business_function_coverage"][0]["code_coverage_status"], "UNKNOWN")
 
     def test_invalid_source_line_ranges_never_receive_matched_status(self):
+        from usit.coverage_result_importer import _verify_source_bindings
+
         invalid_ranges = [
             (0, 1),
             (3, 2),
@@ -167,16 +169,15 @@ class CoverageImporterTests(unittest.TestCase):
                     doc["mappings"][0]["line_start"] = line_start
                     doc["mappings"][0]["line_end"] = line_end
                     mapping.write_text(json.dumps(doc), encoding="utf-8")
-                    result = ingest_coverage_results(
-                        report, mapping, graph, "coverage-py-json", base / "project"
-                    )
-                    row = result["business_function_coverage"][0]
+                    evidence = _verify_source_bindings(doc, base / "project")["bf-a"][0]
                     self.assertEqual(
-                        row["source_binding_evidence"][0]["source_binding_status"],
+                        evidence["source_binding_status"],
                         "SOURCE_LINE_RANGE_OUT_OF_BOUNDS",
                     )
-                    self.assertEqual(row["code_coverage_status"], "UNKNOWN")
-                    self.assertIsNone(row["line_coverage_percent"])
+                    with self.assertRaisesRegex(ValueError, "invalid line range"):
+                        ingest_coverage_results(
+                            report, mapping, graph, "coverage-py-json", base / "project"
+                        )
 
     def test_coverage_without_project_root_is_never_verified(self):
         with tempfile.TemporaryDirectory() as td:
