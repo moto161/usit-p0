@@ -286,6 +286,110 @@ class ControlledPytestTests(unittest.TestCase):
             for item in runtime_doc["modules"]
         ))
 
+    def test_deleted_staged_import_is_still_recorded_by_audit_hook(self):
+        package = self.project / "audit_pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("VALUE = 'staged'\n", encoding="utf-8")
+        self.git("add", "audit_pkg/__init__.py")
+        self.git("commit", "-q", "-m", "add audit package fixture")
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parent.parent))\n"
+            "import audit_pkg\n"
+            "def test_import_then_delete_from_sys_modules():\n"
+            "    assert audit_pkg.VALUE == 'staged'\n"
+            "    del sys.modules['audit_pkg']\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture deletes staged import mid-run")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["runtime_import_binding_status"], "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT", result)
+        runtime_doc = json.loads(Path(result["runtime_imports_manifest"]).read_text(encoding="utf-8"))
+        self.assertEqual(runtime_doc["audit_hook"], "ACTIVE")
+        self.assertGreaterEqual(runtime_doc["audit_hook_only_module_count"], 1)
+        self.assertTrue(any(
+            item["module"] == "audit_pkg" and item["status"] == "STAGED_SOURCE"
+            for item in runtime_doc["modules"]
+        ))
+
+    def test_deleted_outside_import_is_still_reported_outside_snapshot(self):
+        # Without the audit hook this import would vanish from the
+        # session-end sys.modules snapshot and the gate would wrongly pass.
+        package = self.project / "shadow_pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("VALUE = 'original-worktree'\n", encoding="utf-8")
+        self.git("add", "shadow_pkg/__init__.py")
+        self.git("commit", "-q", "-m", "add shadow package fixture")
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(self.project)!r})\n"
+            "import shadow_pkg\n"
+            "def test_imports_then_deletes_outside_module():\n"
+            "    assert shadow_pkg.VALUE == 'original-worktree'\n"
+            "    del sys.modules['shadow_pkg']\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture deletes outside import mid-run")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["runtime_import_binding_status"], "RUNTIME_IMPORTS_NOT_BOUND")
+        runtime_doc = json.loads(Path(result["runtime_imports_manifest"]).read_text(encoding="utf-8"))
+        self.assertEqual(runtime_doc["outside_snapshot_module_count"], 1)
+        self.assertTrue(any(
+            item["module"] == "shadow_pkg" and item["status"] == "OUTSIDE_SNAPSHOT"
+            for item in runtime_doc["modules"]
+        ))
+
+    def test_deleted_import_is_caught_even_when_finder_is_removed(self):
+        # The meta path finder can be removed by test code, but the
+        # append-only audit hook still has the module name, so sessionfinish
+        # resolves it again and the outside import is still reported.
+        package = self.project / "shadow_pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("VALUE = 'original-worktree'\n", encoding="utf-8")
+        self.git("add", "shadow_pkg/__init__.py")
+        self.git("commit", "-q", "-m", "add shadow package fixture")
+        source = self.project / "tests" / "test_smoke.py"
+        source.write_text(
+            "import sys\n"
+            "def test_imports_after_removing_finder_then_deletes():\n"
+            f"    sys.path.insert(0, {str(self.project)!r})\n"
+            "    sys.meta_path[:] = [f for f in sys.meta_path if type(f).__name__ != '_UsitImportRecorder']\n"
+            "    import shadow_pkg\n"
+            "    assert shadow_pkg.VALUE == 'original-worktree'\n"
+            "    del sys.modules['shadow_pkg']\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/test_smoke.py")
+        self.git("commit", "-q", "-m", "fixture removes finder then deletes outside import")
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["runtime_import_binding_status"], "RUNTIME_IMPORTS_NOT_BOUND")
+        runtime_doc = json.loads(Path(result["runtime_imports_manifest"]).read_text(encoding="utf-8"))
+        self.assertEqual(runtime_doc["outside_snapshot_module_count"], 1)
+        self.assertTrue(any(
+            item["module"] == "shadow_pkg" and item["status"] == "OUTSIDE_SNAPSHOT"
+            for item in runtime_doc["modules"]
+        ))
+
     def test_untracked_file_created_during_test_fails_gate(self):
         source = self.project / "tests" / "test_smoke.py"
         source.write_text(

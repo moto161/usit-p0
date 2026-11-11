@@ -125,6 +125,70 @@ import os
 import sys
 import pytest
 
+# Two complementary import trails, both recorded as imports happen:
+# - _AUDIT_HOOK_NAMES: module names from sys.addaudithook("import"). Audit
+#   hooks are append-only (test code cannot unregister one), so a name
+#   recorded here survives a later `del sys.modules[name]`. NOTE: the import
+#   event fires BEFORE the finder resolves the file, so its filename is
+#   always None on CPython 3.12 -- the hook is a name tripwire only, and the
+#   resolved path comes from the finder below.
+# - _FINDER_IMPORTS: module name -> resolved file, recorded by the meta path
+#   finder at resolution time. A finder CAN be removed from sys.meta_path,
+#   so if it is gone the audit-hook names are resolved again at
+#   sessionfinish instead (see pytest_sessionfinish).
+_AUDIT_HOOK_NAMES = []
+_FINDER_IMPORTS = {}
+_AUDIT_HOOK_ACTIVE = False
+
+def _audit_import_hook(event, args):
+    # The hook must never raise -- an exception would abort the import it
+    # observes.
+    if event != "import":
+        return
+    try:
+        name = args[0]
+    except (IndexError, TypeError):
+        return
+    if not isinstance(name, str):
+        return
+    try:
+        _AUDIT_HOOK_NAMES.append(name)
+    except Exception:
+        return
+
+try:
+    sys.addaudithook(_audit_import_hook)
+    _AUDIT_HOOK_ACTIVE = True
+except Exception:
+    _AUDIT_HOOK_ACTIVE = False
+
+
+class _UsitImportRecorder:
+    # A meta path finder that records the resolved file of every import as
+    # it happens. It delegates to PathFinder and returns its spec unchanged,
+    # so import behaviour is identical; it only observes. Any failure falls
+    # through to the next finder (return None) so recording can never break
+    # an import; the audit hook still has the module name in that case.
+    def find_spec(self, fullname, path, target=None):
+        try:
+            import importlib.machinery
+            spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        except Exception:
+            return None
+        try:
+            if spec is not None:
+                origin = getattr(spec, "origin", None)
+                if isinstance(origin, str) and origin not in {"built-in", "frozen"}:
+                    _FINDER_IMPORTS.setdefault(fullname, origin)
+        except Exception:
+            pass
+        return spec
+
+try:
+    sys.meta_path.insert(0, _UsitImportRecorder())
+except Exception:
+    pass
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
     if call.when == "call":
@@ -150,6 +214,47 @@ def pytest_runtest_makereport(item, call):
     if call.when == "call":
         report.user_properties = list(getattr(item, "user_properties", []))
 
+def _classify_runtime_module(name, origin, root, roots, original_root):
+    # Classify one imported module against the staged snapshot. Returns an
+    # entry dict, or None when the module is not a project module (stdlib /
+    # third-party / built-in) and carries no project evidence. A module whose
+    # file cannot be read is reported SOURCE_UNREADABLE, never silently
+    # dropped: an import that cannot be verified must fail binding.
+    if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+        return None
+    try:
+        source = Path(origin).resolve(strict=True)
+        if not source.is_file():
+            return None
+        declared_project_module = name.split(".", 1)[0] in roots
+        loaded_from_original_project = False
+        if original_root is not None:
+            try:
+                source.relative_to(original_root)
+                loaded_from_original_project = True
+            except ValueError:
+                pass
+        if not declared_project_module and not loaded_from_original_project:
+            return None
+        raw = source.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        try:
+            relative = source.relative_to(root).as_posix()
+            status = "STAGED_SOURCE"
+        except ValueError:
+            relative = None
+            status = "OUTSIDE_SNAPSHOT"
+        return {
+            "module": name, "status": status, "path": relative,
+            "origin_basename": source.name, "sha256": digest, "size": len(raw),
+        }
+    except (OSError, RuntimeError):
+        return {
+            "module": name, "status": "SOURCE_UNREADABLE", "path": None,
+            "origin_basename": Path(origin).name, "sha256": None, "size": None,
+        }
+
+
 def pytest_sessionfinish(session, exitstatus):
     root = Path(str(session.config.rootpath)).resolve()
     roots = set(json.loads(os.environ.get("USIT_SOURCE_MODULE_ROOTS", "[]")))
@@ -164,39 +269,58 @@ def pytest_sessionfinish(session, exitstatus):
             continue
         spec = getattr(module, "__spec__", None)
         origin = getattr(module, "__file__", None) or getattr(spec, "origin", None)
-        if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+        entry = _classify_runtime_module(name, origin, root, roots, original_root)
+        if entry is not None:
+            entries.append(entry)
+    # Audit-trail merge: the session-end sys.modules snapshot misses modules
+    # imported and then removed (del sys.modules[name]). Two trails cover
+    # that: the meta path finder recorded the resolved file at import time,
+    # and the audit hook recorded every import's module name. Modules
+    # already in the snapshot keep their snapshot entry; trail-only modules
+    # are classified the same way, so a smuggled import deleted mid-run is
+    # still reported OUTSIDE_SNAPSHOT instead of vanishing.
+    seen_modules = {item["module"] for item in entries}
+    audit_only = 0
+    for audited_name, audited_origin in sorted(_FINDER_IMPORTS.items()):
+        if audited_name in seen_modules or audited_name == "_usit_runner_plugin":
             continue
+        seen_modules.add(audited_name)
+        entry = _classify_runtime_module(audited_name, audited_origin, root, roots, original_root)
+        if entry is not None:
+            entries.append(entry)
+            audit_only += 1
+    # Fallback for names the audit hook saw but the finder did not record
+    # (e.g. the finder was removed from sys.meta_path mid-run): resolve the
+    # top-level name now. A project-root name that cannot be resolved to a
+    # file is reported SOURCE_UNREADABLE -- an import the hook observed but
+    # that cannot be verified must fail binding, not vanish. Only top-level
+    # names are resolved here: resolving a submodule could execute its
+    # parent package, and the parent name is in the hook log as well.
+    for audited_name in _AUDIT_HOOK_NAMES:
+        if audited_name in seen_modules or audited_name == "_usit_runner_plugin":
+            continue
+        if "." in audited_name or audited_name.split(".", 1)[0] not in roots:
+            continue
+        seen_modules.add(audited_name)
+        origin = None
         try:
-            source = Path(origin).resolve(strict=True)
-            if not source.is_file():
-                continue
-            declared_project_module = name.split(".", 1)[0] in roots
-            loaded_from_original_project = False
-            if original_root is not None:
-                try:
-                    source.relative_to(original_root)
-                    loaded_from_original_project = True
-                except ValueError:
-                    pass
-            if not declared_project_module and not loaded_from_original_project:
-                continue
-            raw = source.read_bytes()
-            digest = hashlib.sha256(raw).hexdigest()
-            try:
-                relative = source.relative_to(root).as_posix()
-                status = "STAGED_SOURCE"
-            except ValueError:
-                relative = None
-                status = "OUTSIDE_SNAPSHOT"
-            entries.append({
-                "module": name, "status": status, "path": relative,
-                "origin_basename": source.name, "sha256": digest, "size": len(raw),
-            })
-        except (OSError, RuntimeError):
-            entries.append({
-                "module": name, "status": "SOURCE_UNREADABLE", "path": None,
-                "origin_basename": Path(origin).name, "sha256": None, "size": None,
-            })
+            import importlib.util
+            spec = importlib.util.find_spec(audited_name)
+            if spec is not None:
+                origin = getattr(spec, "origin", None)
+        except Exception:
+            origin = None
+        if isinstance(origin, str) and origin not in {"built-in", "frozen"}:
+            entry = _classify_runtime_module(audited_name, origin, root, roots, original_root)
+        else:
+            entry = {
+                "module": audited_name, "status": "SOURCE_UNREADABLE", "path": None,
+                "origin_basename": None, "sha256": None, "size": None,
+            }
+        if entry is not None:
+            entries.append(entry)
+            audit_only += 1
+    entries.sort(key=lambda item: item["module"])
     staged = sum(item["status"] == "STAGED_SOURCE" for item in entries)
     outside = sum(item["status"] == "OUTSIDE_SNAPSHOT" for item in entries)
     unreadable = sum(item["status"] == "SOURCE_UNREADABLE" for item in entries)
@@ -206,6 +330,15 @@ def pytest_sessionfinish(session, exitstatus):
         "project_module_roots": sorted(roots), "module_count": len(entries),
         "staged_module_count": staged, "outside_snapshot_module_count": outside,
         "unreadable_module_count": unreadable, "modules": entries,
+        "audit_hook": "ACTIVE" if _AUDIT_HOOK_ACTIVE else "NOT_REGISTERED",
+        "audit_hook_import_event_count": len(_AUDIT_HOOK_NAMES),
+        "audit_hook_only_module_count": audit_only,
+        "limitations": [
+            "The import audit event fires before the finder resolves the file, so it carries the module name only; the resolved path is recorded by the meta path finder. If test code removes that finder from sys.meta_path, trail-only names are resolved again at sessionfinish against the then-current sys.path and file bytes.",
+            "Code loaded without the import system (ctypes/CDLL, exec() of a string that imports nothing, importlib loader APIs used without registering in sys.modules) raises no import event and remains invisible.",
+            "The hook is registered when the runner plugin loads; imports during pytest startup before that point are visible only through the session-end sys.modules snapshot.",
+            "The hook itself cannot be unregistered by test code, but the in-memory audit log lives in the same process as the tests; only OS-level UID isolation would make this evidence authenticated.",
+        ],
     }
     Path(os.environ["USIT_RUNTIME_IMPORTS_PATH"]).write_text(
         json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\\n",
