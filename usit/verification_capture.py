@@ -28,7 +28,7 @@ except ImportError:  # Non-POSIX platforms have no pwd module.
 
 from .safeio import read_bounded_no_follow
 
-__all__ = ["STATUSES", "CaptureResult", "capture_run", "verify_manifest"]
+__all__ = ["STATUSES", "CaptureResult", "PipeChannel", "open_pipe_channel", "capture_run", "verify_manifest"]
 
 STATUSES = frozenset({
     "PASS", "FAIL", "NOT_TESTED", "NOT_VERIFIED", "INTERRUPTED",
@@ -41,6 +41,95 @@ _REQUIRED_ARTIFACTS = frozenset({
 })
 _RUN_ID_RE = re.compile(r"^run_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{32}$")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+@dataclass(frozen=True)
+class PipeChannel:
+    """One parent-held pipe output channel for a child process.
+
+    The parent creates the pipe (see :func:`open_pipe_channel`) and
+    hands the write end to the child; the child writes its output to
+    ``/dev/fd/<write_fd>`` (POSIX). The parent drains the read end
+    concurrently and keeps the bytes. Because the child never sees a
+    filesystem path for its output, it cannot rewrite the bytes after
+    writing them -- the silent post-hoc forgery window of a staging
+    file is closed. The child still controls what it writes, so this
+    is a channel guarantee, not authentication.
+    """
+
+    name: str
+    read_fd: int
+    write_fd: int
+    max_bytes: int
+
+
+def open_pipe_channel(name: str, max_bytes: int) -> PipeChannel:
+    """Create a parent-held pipe channel. POSIX only; refuses on
+    other platforms so callers must choose the staging-file channel
+    there instead of silently falling back."""
+    if os.name != "posix":
+        raise ValueError("parent-held pipe channels require a POSIX platform")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("pipe channel name must be a non-empty string")
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise ValueError("pipe channel max_bytes must be a positive integer")
+    read_fd, write_fd = os.pipe()
+    return PipeChannel(name=name, read_fd=read_fd, write_fd=write_fd, max_bytes=max_bytes)
+
+
+class _PipeDrain:
+    """Concurrent reader for one pipe channel.
+
+    Drains the read end in a daemon thread while the child runs (a
+    pipe buffer is only 64 KiB; without concurrent draining a large
+    output deadlocks the child). Bytes past max_bytes keep being
+    drained and discarded -- closing early would SIGPIPE the child
+    and hide the real failure -- and the overrun is reported so the
+    caller refuses the run instead of trusting truncated bytes.
+    """
+
+    def __init__(self, channel: PipeChannel):
+        self.channel = channel
+        self.buffer = bytearray()
+        self.total_bytes = 0
+        self.error: str | None = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        try:
+            while True:
+                chunk = os.read(self.channel.read_fd, 65536)
+                if not chunk:
+                    break
+                self.total_bytes += len(chunk)
+                room = self.channel.max_bytes - len(self.buffer)
+                if room > 0:
+                    self.buffer.extend(chunk[:room])
+        except OSError as exc:
+            self.error = (
+                f"pipe '{self.channel.name}' read failed: {type(exc).__name__}"
+            )
+        finally:
+            try:
+                os.close(self.channel.read_fd)
+            except OSError:
+                pass
+
+    def finish(self, timeout: float) -> tuple[bytes, str | None]:
+        self.thread.join(timeout=timeout)
+        if self.thread.is_alive():
+            return bytes(self.buffer), (
+                f"pipe '{self.channel.name}' reader did not finish: "
+                "a child process may still hold the write end"
+            )
+        if self.error is not None:
+            return bytes(self.buffer), self.error
+        if self.total_bytes > self.channel.max_bytes:
+            return bytes(self.buffer), (
+                f"pipe '{self.channel.name}' exceeded {self.channel.max_bytes} bytes "
+                f"({self.total_bytes} received)"
+            )
+        return bytes(self.buffer), None
 
 
 @dataclass(frozen=True)
@@ -60,6 +149,11 @@ class CaptureResult:
     errors: tuple[str, ...] = field(default_factory=tuple)
     runner_user: str | None = None
     runner_uid: int | None = None
+    # D1: bytes received through parent-held pipe channels, keyed by
+    # channel name, and any channel errors. Empty when no pipe
+    # channels were requested.
+    pipe_outputs: dict[str, bytes] = field(default_factory=dict)
+    pipe_errors: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +170,12 @@ class CaptureResult:
             "errors": list(self.errors),
             "runner_user": self.runner_user,
             "runner_uid": self.runner_uid,
+            "pipe_outputs": {
+                name: {"bytes": len(data),
+                       "sha256": hashlib.sha256(data).hexdigest()}
+                for name, data in self.pipe_outputs.items()
+            },
+            "pipe_errors": list(self.pipe_errors),
         }
 
 
@@ -340,6 +440,7 @@ def capture_run(
     interrupt_event: threading.Event | None = None,
     poll_interval: float = 0.05,
     user: str | int | None = None,
+    pipe_channels: Sequence[PipeChannel] | None = None,
 ) -> CaptureResult:
     """Run one argv command and capture bounded, explicitly named evidence.
 
@@ -353,6 +454,13 @@ def capture_run(
     (``subprocess.Popen(user=...)``): the parent must run as root, the user
     must exist, and uid 0 is refused. Any refusal raises ValueError before
     the process starts; there is no silent fallback to the parent UID.
+
+    ``pipe_channels`` optionally hands the child parent-held pipe write ends
+    (see :class:`PipeChannel`): the child writes its outputs to
+    ``/dev/fd/<write_fd>`` and the parent drains them concurrently. Any
+    channel error (overrun, unreadable pipe, a reader that never finishes)
+    is recorded in ``CaptureResult.pipe_errors`` and downgrades a PASS to
+    NOT_VERIFIED; the bytes are never trusted truncated.
     """
     if isinstance(command, (str, bytes)) or not command or not all(isinstance(x, str) and x for x in command):
         raise ValueError("command must be a non-empty sequence of non-empty strings")
@@ -365,6 +473,30 @@ def capture_run(
         raise ValueError("timeout must be greater than zero")
     if poll_interval <= 0:
         raise ValueError("poll_interval must be greater than zero")
+    # D1: validate pipe channels before anything is spawned. A bad
+    # channel spec refuses the run; it never silently falls back to
+    # no channel (the caller chose the pipe output deliberately).
+    drains: list[_PipeDrain] = []
+    if pipe_channels is not None:
+        if os.name != "posix":
+            raise ValueError("parent-held pipe channels require a POSIX platform")
+        seen_names: set[str] = set()
+        seen_fds: set[int] = set()
+        for channel in pipe_channels:
+            if not isinstance(channel, PipeChannel):
+                raise ValueError("pipe_channels must contain PipeChannel values")
+            if channel.name in seen_names:
+                raise ValueError(f"duplicate pipe channel name: {channel.name}")
+            seen_names.add(channel.name)
+            for fd in (channel.read_fd, channel.write_fd):
+                if not isinstance(fd, int) or isinstance(fd, bool) or fd <= 2:
+                    raise ValueError(f"pipe channel '{channel.name}' has an invalid fd")
+                if fd in seen_fds:
+                    raise ValueError(f"pipe channel fd {fd} is shared between channels")
+                seen_fds.add(fd)
+            if not isinstance(channel.max_bytes, int) or isinstance(channel.max_bytes, bool) or channel.max_bytes <= 0:
+                raise ValueError(f"pipe channel '{channel.name}' has an invalid max_bytes")
+        drains = [_PipeDrain(channel) for channel in pipe_channels]
     runner_user, runner_uid = _resolve_runner_user(user)
 
     project = _canonical_directory(project_root, "project root")
@@ -389,10 +521,16 @@ def capture_run(
     timed_out = False
     interrupted = False
     status = "NOT_TESTED"
+    pipe_outputs: dict[str, bytes] = {}
+    pipe_errors: list[str] = []
     pre, pre_errors = _snapshot(project, files)
     evidence_complete = False
     manifest_valid = False
     process_started = False
+    # D1: start the pipe drains before spawning so a fast child can
+    # never fill the 64 KiB pipe buffer before the parent is reading.
+    for drain in drains:
+        drain.thread.start()
     try:
         _write_json_file(evidence / "pre_snapshot.json", {"run_id": run_id, "captured_at": started, "files": pre, "errors": pre_errors})
         with stdout_path.open("xb") as out_stream, stderr_path.open("xb") as err_stream:
@@ -406,11 +544,21 @@ def capture_run(
                         stdout=out_stream, stderr=err_stream, shell=False,
                         close_fds=True, env=None if env is None else dict(env),
                         user=runner_uid,
+                        pass_fds=tuple(drain.channel.write_fd for drain in drains),
                     )
                     process_started = True
                 except OSError as exc:
                     errors.append(f"startup failed: {type(exc).__name__}: {exc}")
                     status = "INFRASTRUCTURE_ERROR"
+                finally:
+                    # D1: close the parent's copies of the pipe write ends
+                    # as soon as the child has (or failed to) inherit them,
+                    # so the drains observe EOF when the child exits.
+                    for drain in drains:
+                        try:
+                            os.close(drain.channel.write_fd)
+                        except OSError:
+                            pass
                 if process_started:
                     deadline = None if timeout is None else time.monotonic() + timeout
                     try:
@@ -443,6 +591,17 @@ def capture_run(
                         errors.append(f"command returned non-zero exit code {exit_code}")
                     else:
                         status = "PASS"
+                    # D1: collect the pipe outputs now that the child has
+                    # exited. A reader that never finishes means a
+                    # descendant still holds a write end: refuse the run.
+                    # The errors join the run's error list here so the
+                    # final gate report (built below) carries them.
+                    for drain in drains:
+                        data, drain_error = drain.finish(timeout=5.0)
+                        pipe_outputs[drain.channel.name] = data
+                        if drain_error is not None:
+                            pipe_errors.append(drain_error)
+                    errors.extend(pipe_errors)
 
         post, post_errors = _snapshot(project, files) if not pre_errors else ([], [])
         errors.extend(post_errors)
@@ -498,17 +657,31 @@ def capture_run(
         if not manifest_valid:
             status = "NOT_VERIFIED"
             errors.extend(verification["errors"])
+        # D1: a pipe channel error means the bytes cannot be trusted
+        # (overrun, unreadable, or a descendant still holding the write
+        # end). Never report PASS on them.
+        if pipe_errors and status == "PASS":
+            status = "NOT_VERIFIED"
         if status == "PASS" and (not evidence_complete or not manifest_valid or diff):
             status = "NOT_VERIFIED"
         return CaptureResult(run_id, status, exit_code, timed_out, interrupted,
                              str(evidence), str(manifest_path), str(report_path),
                              manifest_valid, evidence_complete, tuple(errors),
-                             runner_user, runner_uid)
+                             runner_user, runner_uid,
+                             dict(pipe_outputs), tuple(pipe_errors))
     except (OSError, ValueError, TypeError) as exc:
         errors.append(f"evidence capture failed: {type(exc).__name__}: {exc}")
         # Do not fabricate a manifest or PASS when evidence writing is incomplete.
+        # D1: close any pipe write ends the parent still holds so the
+        # drain threads observe EOF instead of blocking forever.
+        for drain in drains:
+            try:
+                os.close(drain.channel.write_fd)
+            except OSError:
+                pass
         return CaptureResult(run_id, "INFRASTRUCTURE_ERROR", exit_code, timed_out,
                              interrupted, str(evidence),
                              str(manifest_path) if manifest_path.exists() else None,
                              str(report_path) if report_path.exists() else None,
-                             False, False, tuple(errors), runner_user, runner_uid)
+                             False, False, tuple(errors), runner_user, runner_uid,
+                             dict(pipe_outputs), tuple(pipe_errors))

@@ -337,5 +337,102 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
 
 
+class PipeChannelTests(unittest.TestCase):
+    """D1: parent-held pipe output channels (POSIX only)."""
+
+    def setUp(self) -> None:
+        if os.name != "posix":
+            self.skipTest("pipe channels require a POSIX platform")
+        self.temp = tempfile.TemporaryDirectory(prefix="usit-vcapture-pipe-")
+        self.base = Path(self.temp.name)
+        self.project = self.base / "project"
+        self.evidence_parent = self.base / "evidence"
+        self.project.mkdir()
+        self.evidence_parent.mkdir()
+        (self.project / "input.txt").write_text("before\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def run_pipe_capture(self, code: str, channels, **kwargs):
+        return capture.capture_run(
+            [sys.executable, "-c", code],
+            project_root=self.project,
+            evidence_parent=self.evidence_parent,
+            files=["input.txt"],
+            approval_ref="unit-test-authorization",
+            pipe_channels=channels,
+            **kwargs,
+        )
+
+    def test_pipe_channel_delivers_child_output(self):
+        junit = capture.open_pipe_channel("junit", 1024 * 1024)
+        imports = capture.open_pipe_channel("runtime_imports", 1024 * 1024)
+        # Mirror production: the child writes via /dev/fd/<N> paths.
+        code = (
+            f"open('/dev/fd/{junit.write_fd}', 'wb').write(b'<testsuites/>');"
+            f"open('/dev/fd/{imports.write_fd}', 'wb').write(b'{{\"ok\": true}}')"
+        )
+        result = self.run_pipe_capture(code, [junit, imports])
+        self.assertEqual(result.status, "PASS", result.errors)
+        self.assertEqual(result.pipe_errors, ())
+        self.assertEqual(result.pipe_outputs["junit"], b"<testsuites/>")
+        self.assertEqual(result.pipe_outputs["runtime_imports"], b'{"ok": true}')
+        summary = result.to_dict()["pipe_outputs"]
+        self.assertEqual(summary["junit"]["bytes"], len(b"<testsuites/>"))
+
+    def test_pipe_channel_drains_more_than_pipe_buffer(self):
+        # 200 KiB exceeds the 64 KiB pipe buffer: without concurrent
+        # draining the child would block forever.
+        channel = capture.open_pipe_channel("big", 1024 * 1024)
+        code = (
+            f"import os; os.write({channel.write_fd}, b'x' * 200 * 1024)"
+        )
+        result = self.run_pipe_capture(code, [channel], timeout=30)
+        self.assertEqual(result.status, "PASS", result.errors)
+        self.assertEqual(result.pipe_errors, ())
+        self.assertEqual(len(result.pipe_outputs["big"]), 200 * 1024)
+
+    def test_pipe_channel_overrun_is_refused(self):
+        channel = capture.open_pipe_channel("small", 16)
+        code = f"import os; os.write({channel.write_fd}, b'y' * 1024)"
+        result = self.run_pipe_capture(code, [channel], timeout=30)
+        self.assertEqual(result.status, "NOT_VERIFIED", result.errors)
+        self.assertTrue(any("exceeded 16 bytes" in item for item in result.pipe_errors))
+        # Only the capped prefix is kept; the run is refused, never trusted.
+        self.assertEqual(result.pipe_outputs["small"], b"y" * 16)
+
+    def test_pipe_channel_empty_output_is_recorded(self):
+        channel = capture.open_pipe_channel("empty", 1024)
+        result = self.run_pipe_capture("pass", [channel])
+        self.assertEqual(result.status, "PASS", result.errors)
+        self.assertEqual(result.pipe_outputs["empty"], b"")
+        self.assertEqual(result.pipe_errors, ())
+
+    def test_pipe_channel_rejects_invalid_specs(self):
+        first = capture.open_pipe_channel("a", 1024)
+        second = capture.open_pipe_channel("b", 1024)
+        with self.assertRaisesRegex(ValueError, "duplicate pipe channel name"):
+            self.run_pipe_capture("pass", [first, capture.PipeChannel(
+                "a", second.read_fd, second.write_fd, 1024)])
+        with self.assertRaisesRegex(ValueError, "invalid fd"):
+            self.run_pipe_capture("pass", [capture.PipeChannel("x", 1, 99, 1024)])
+        with self.assertRaisesRegex(ValueError, "invalid max_bytes"):
+            self.run_pipe_capture("pass", [capture.PipeChannel("x", 40, 41, 0)])
+        with self.assertRaisesRegex(ValueError, "PipeChannel"):
+            self.run_pipe_capture("pass", [("not-a-channel", 40, 41, 1024)])
+        for channel in (first, second):
+            for fd in (channel.read_fd, channel.write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def test_open_pipe_channel_refuses_non_posix(self):
+        with patch.object(os, "name", "nt"):
+            with self.assertRaisesRegex(ValueError, "POSIX"):
+                capture.open_pipe_channel("x", 1024)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

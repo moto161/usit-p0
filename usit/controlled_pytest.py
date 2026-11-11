@@ -34,7 +34,9 @@ from .test_execution_provenance import (
     MAX_REPORT_BYTES, SCHEMA_VERSION, canonical_json_bytes, sha256_hex,
     validate_execution_provenance,
 )
-from .verification_capture import _resolve_runner_user, capture_run, verify_manifest
+from .verification_capture import (
+    _resolve_runner_user, capture_run, open_pipe_channel, verify_manifest,
+)
 
 AUTH_SCHEMA = "usit-test-execution-authorization-v1"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -580,19 +582,26 @@ _WRITABLE_STAGING_FILES = frozenset({".usit-junit.xml", ".usit-runtime-imports.j
 _WRITABLE_STAGING_DIRS = frozenset({".usit-home", ".usit-tmp"})
 
 
-def _make_staging_read_only(root: Path) -> None:
+# D1: the parent-held pipe output channel is POSIX-only (/dev/fd/<N>
+# does not exist on Windows). Windows keeps the staging-file channel.
+_PIPE_CHANNEL = os.name == "posix"
+
+
+def _make_staging_read_only(root: Path, writable_files: frozenset[str] = _WRITABLE_STAGING_FILES) -> None:
     """Make a staging tree read-only for the runner user (A2).
 
     Only called for isolated runs (the caller checks runner_uid). Sources
     become 0444 and directories 0555, including the staging top itself, so
     the test process can neither modify existing sources nor create new
     files in the tree. Files that were executable in the archive keep
-    their execute bit (0555) so scripts in the tree still run. The four
-    output locations the test process legitimately writes stay writable
-    (see _WRITABLE_STAGING_FILES / _WRITABLE_STAGING_DIRS). Symlinks are
-    skipped: chmod follows links on Linux, so touching one could change a
-    file outside staging. Any failure is fail-closed: the caller must
-    refuse the run rather than execute it with a writable tree.
+    their execute bit (0555) so scripts in the tree still run. The output
+    locations the test process legitimately writes stay writable
+    (see _WRITABLE_STAGING_FILES / _WRITABLE_STAGING_DIRS); the D1 pipe
+    channel passes an empty writable_files set, so staging is fully
+    read-only except HOME/TMPDIR. Symlinks are skipped: chmod follows
+    links on Linux, so touching one could change a file outside staging.
+    Any failure is fail-closed: the caller must refuse the run rather than
+    execute it with a writable tree.
     """
     try:
         for current, directories, filenames in os.walk(root, topdown=False, followlinks=False):
@@ -601,7 +610,7 @@ def _make_staging_read_only(root: Path) -> None:
                 path = current_path / name
                 if path.is_symlink():
                     continue
-                if current_path == root and name in _WRITABLE_STAGING_FILES:
+                if current_path == root and name in writable_files:
                     os.chmod(path, 0o644)
                     continue
                 mode = 0o555 if stat.S_IMODE(path.stat().st_mode) & 0o111 else 0o444
@@ -681,6 +690,16 @@ def run_controlled_pytest(
             "it could read any parent-owned file the OS permits, and the HMAC key file was "
             "protected only by its 0600 mode and by being written after the test process exited."
         )
+    elif _PIPE_CHANNEL:
+        isolation_limitation = (
+            f"The test process ran as dedicated POSIX user {runner_user_name}: it cannot write "
+            "the evidence directory, the HMAC key file, the original project tree, or the "
+            "staged source tree (staging is fully read-only except HOME/TMPDIR). Its JUnit "
+            "report and runtime-imports manifest travel through parent-held pipes, so it "
+            "cannot rewrite them after writing; it can still write false data into the "
+            "pipes, bounded by the stdout summary cross-check and the snapshot binding, "
+            "so provenance_authenticity_status stays UNAUTHENTICATED."
+        )
     else:
         isolation_limitation = (
             f"The test process ran as dedicated POSIX user {runner_user_name}: it cannot write "
@@ -714,19 +733,38 @@ def run_controlled_pytest(
         plugin_path = staging / "_usit_runner_plugin.py"
         plugin_path.write_text(_RUNNER_PLUGIN, encoding="utf-8")
         plugin_digest = sha256_hex(plugin_path.read_bytes())
+        # D1: on POSIX the JUnit report and the runtime-imports manifest
+        # travel through parent-held pipes, not staging files: the child
+        # writes to /dev/fd/<N> and the parent drains the pipes, so the
+        # child cannot rewrite the outputs after pytest wrote them. On
+        # Windows (/dev/fd does not exist) the staging-file channel
+        # stays, with the existing stdout cross-check.
+        output_channel = "PARENT_PIPE" if _PIPE_CHANNEL else "STAGING_FILE"
+        junit_channel = None
+        imports_channel = None
+        if _PIPE_CHANNEL:
+            junit_channel = open_pipe_channel("junit", MAX_REPORT_BYTES)
+            imports_channel = open_pipe_channel("runtime_imports", MAX_RUNTIME_IMPORTS_BYTES)
+            junit_target = f"/dev/fd/{junit_channel.write_fd}"
+            imports_target = f"/dev/fd/{imports_channel.write_fd}"
+        else:
+            junit_target = str(pytest_report)
+            imports_target = str(staging / ".usit-runtime-imports.json")
         command = [
-            sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin", "--junitxml", str(pytest_report),
+            sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin", "--junitxml", junit_target,
             "--assert=plain", "-p", "no:cacheprovider", *selected_args,
         ]
         env = _minimal_environment(staging)
-        # A2: pre-create the two output files the test process writes, so
-        # they exist (and are owned by the runner user after the chown
-        # below) before the tree is made read-only. Both are opened with
-        # "w" by pytest / the runner plugin, so an empty pre-created file
-        # is truncated and rewritten; if the run crashes before that, the
-        # parent reads an empty file and records an error, never a pass.
-        (staging / ".usit-junit.xml").write_text("", encoding="utf-8")
-        (staging / ".usit-runtime-imports.json").write_text("", encoding="utf-8")
+        if not _PIPE_CHANNEL:
+            # File channel only: pre-create the two output files the test
+            # process writes, so they exist (and are owned by the runner
+            # user after the chown below) before the tree is made
+            # read-only. Both are opened with "w" by pytest / the runner
+            # plugin, so an empty pre-created file is truncated and
+            # rewritten; if the run crashes before that, the parent reads
+            # an empty file and records an error, never a pass.
+            (staging / ".usit-junit.xml").write_text("", encoding="utf-8")
+            (staging / ".usit-runtime-imports.json").write_text("", encoding="utf-8")
         module_roots = set()
         for source_item in source_files:
             source_path = PurePosixPath(source_item["path"])
@@ -736,10 +774,10 @@ def run_controlled_pytest(
                 module_roots.add(source_path.stem)
         env["USIT_SOURCE_MODULE_ROOTS"] = json.dumps(sorted(module_roots))
         env["USIT_ORIGINAL_PROJECT_ROOT"] = str(project)
-        env["USIT_RUNTIME_IMPORTS_PATH"] = str(staging / ".usit-runtime-imports.json")
+        env["USIT_RUNTIME_IMPORTS_PATH"] = imports_target
         normalized_command = [
             sys.executable, "-m", "pytest", "-p", "_usit_runner_plugin",
-            "--junitxml", "<STAGING>/.usit-junit.xml",
+            "--junitxml", "<PIPE>/junit" if _PIPE_CHANNEL else "<STAGING>/.usit-junit.xml",
             "--assert=plain", "-p", "no:cacheprovider", *selected_args,
         ]
         command_fingerprint = sha256_hex(canonical_json_bytes(normalized_command))
@@ -747,6 +785,10 @@ def run_controlled_pytest(
             key: value.replace(str(staging), "<STAGING>")
             for key, value in env.items()
         }
+        if _PIPE_CHANNEL:
+            # D1: fd numbers vary per run; normalize them out of the
+            # fingerprint so identical runs fingerprint identically.
+            normalized_env["USIT_RUNTIME_IMPORTS_PATH"] = "<PIPE>/runtime-imports"
         environment_fingerprint = sha256_hex(canonical_json_bytes({
             "python": sys.version, "platform": platform.platform(),
             "environment_sha256": sha256_hex(canonical_json_bytes(normalized_env)),
@@ -771,15 +813,19 @@ def run_controlled_pytest(
         # A2: then make the staged source tree read-only for the runner
         # user (sources 0444, directories 0555, top 0555), keeping only
         # the pre-created output files and HOME/TMPDIR writable. Any
-        # chmod failure refuses the run (fail-closed).
+        # chmod failure refuses the run (fail-closed). D1: on the pipe
+        # channel there are no writable output files in staging, so the
+        # whole tree is read-only except HOME/TMPDIR.
         if runner_uid is not None:
             _chown_tree(staging, runner_uid)
-            _make_staging_read_only(staging)
+            _make_staging_read_only(
+                staging, frozenset() if _PIPE_CHANNEL else _WRITABLE_STAGING_FILES)
         capture = capture_run(
             command, project_root=staging, evidence_parent=parent,
             files=[item["path"] for item in source_files],
             approval_ref=authorization["approval_ref"], cwd=staging, env=env, timeout=timeout,
             user=runner_user,
+            pipe_channels=[c for c in (junit_channel, imports_channel) if c is not None] or None,
         )
         evidence = Path(capture.evidence_dir)
         inventory_errors = _staging_inventory_errors(staging, source_files)
@@ -796,22 +842,52 @@ def run_controlled_pytest(
                     inventory_errors.append(f"pre-execution snapshot does not match Git archive: {item['path']}")
         except (OSError, ValueError, TypeError) as exc:
             inventory_errors.append(f"pre-execution snapshot cannot be verified: {type(exc).__name__}")
-        report_source = pytest_report
-        if not report_source.is_file():
-            return {
-                "status": "NOT_VERIFIED", "capture": capture.to_dict(),
-                "evidence_dir": str(evidence), "reason": "pytest did not produce a JUnit report",
-                "provenance_authenticity_status": "UNAUTHENTICATED",
-            }
-        report_bytes = _read_execution_artifact(report_source, MAX_REPORT_BYTES, "JUnit report")
-        runtime_path = staging / ".usit-runtime-imports.json"
+        # D1: where the outputs come from depends on the channel. On
+        # the pipe channel the bytes are what the parent drained from
+        # the pipes (a child-side post-hoc rewrite is impossible: there
+        # is no staging file to rewrite). A pipe error already refused
+        # the run in capture_run (PASS downgraded); here an empty pipe
+        # still means "no report was produced".
         runtime_imports = None
         runtime_imports_bytes = b""
         runtime_imports_errors: list[str] = []
+        if _PIPE_CHANNEL:
+            if capture.pipe_errors:
+                return {
+                    "status": "NOT_VERIFIED", "capture": capture.to_dict(),
+                    "evidence_dir": str(evidence),
+                    "reason": "pipe output channel failed: " + "; ".join(capture.pipe_errors),
+                    "provenance_authenticity_status": "UNAUTHENTICATED",
+                }
+            report_bytes = capture.pipe_outputs.get("junit", b"")
+            runtime_imports_bytes = capture.pipe_outputs.get("runtime_imports", b"")
+            if not report_bytes:
+                return {
+                    "status": "NOT_VERIFIED", "capture": capture.to_dict(),
+                    "evidence_dir": str(evidence), "reason": "pytest did not produce a JUnit report",
+                    "provenance_authenticity_status": "UNAUTHENTICATED",
+                }
+        else:
+            report_source = pytest_report
+            if not report_source.is_file():
+                return {
+                    "status": "NOT_VERIFIED", "capture": capture.to_dict(),
+                    "evidence_dir": str(evidence), "reason": "pytest did not produce a JUnit report",
+                    "provenance_authenticity_status": "UNAUTHENTICATED",
+                }
+            report_bytes = _read_execution_artifact(report_source, MAX_REPORT_BYTES, "JUnit report")
+            runtime_path = staging / ".usit-runtime-imports.json"
+            try:
+                runtime_imports_bytes = _read_execution_artifact(
+                    runtime_path, MAX_RUNTIME_IMPORTS_BYTES, "runtime imports manifest"
+                )
+            except (OSError, ValueError) as exc:
+                runtime_imports_bytes = b""
+                runtime_imports_errors.append(
+                    f"runtime imports manifest unavailable or invalid: {type(exc).__name__}")
         try:
-            runtime_imports_bytes = _read_execution_artifact(
-                runtime_path, MAX_RUNTIME_IMPORTS_BYTES, "runtime imports manifest"
-            )
+            if not runtime_imports_bytes:
+                raise ValueError("runtime imports manifest is empty")
             runtime_imports = json.loads(runtime_imports_bytes.decode("utf-8"))
             if not isinstance(runtime_imports, dict) or runtime_imports.get("schema_version") != "usit-runtime-imports-v1":
                 raise ValueError("unsupported runtime imports schema")
@@ -846,8 +922,12 @@ def run_controlled_pytest(
                 "provenance_authenticity_status": "UNAUTHENTICATED",
             }
         # Cross-check the JUnit counts against the pytest terminal summary in
-        # the parent-captured stdout.log. The JUnit file lives in staging and
-        # can be rewritten by test code after pytest writes it; stdout.log is
+        # the parent-captured stdout.log. On the D1 pipe channel the JUnit
+        # bytes are what the parent drained from the pipe, so a post-hoc
+        # rewrite is impossible; the cross-check still guards against a
+        # child that writes false counts into the pipe. On the staging-file
+        # channel (Windows) the JUnit file lives in staging and can be
+        # rewritten by test code after pytest writes it; stdout.log is
         # written by the parent process, so a forged JUnit that disagrees
         # with the terminal summary is caught here. A missing summary line
         # (collection error, crash) is not itself a failure: the exit code
@@ -919,13 +999,22 @@ def run_controlled_pytest(
             # test process out of the evidence directory, the HMAC key file,
             # and the original project tree. A2 additionally makes the
             # staged source tree read-only for isolated runs (see
-            # staging_source_mode); the JUnit report and runtime-imports
-            # manifest stay writable by the test process, so authenticity
-            # stays UNAUTHENTICATED (see limitations).
+            # staging_source_mode). On the D1 pipe channel the JUnit report
+            # and runtime-imports manifest travel through parent-held pipes,
+            # so the child cannot rewrite them afterwards; on the staging-
+            # file channel they stay writable by the test process. Either
+            # way the child can still write false data into its outputs,
+            # so authenticity stays UNAUTHENTICATED (see limitations).
             "runner_isolation": runner_isolation,
             # A2: "READ_ONLY" when the staged source tree was made
             # read-only for an isolated run, else "WRITABLE".
             "staging_source_mode": staging_source_mode,
+            # D1: how the JUnit report and runtime-imports manifest
+            # reached the parent: "PARENT_PIPE" (POSIX, bytes drained
+            # from parent-held pipes; no staging file to rewrite) or
+            # "STAGING_FILE" (Windows, the child-writable staging files
+            # with the stdout cross-check).
+            "output_channel": output_channel,
             "source_snapshot": {
                 "manifest_schema_version": source_manifest["schema_version"],
                 "manifest_sha256": manifest_hash,
@@ -970,6 +1059,7 @@ def run_controlled_pytest(
         gate["pytest_exit_status"] = capture.status
         gate["runner_isolation"] = runner_isolation
         gate["staging_source_mode"] = staging_source_mode
+        gate["output_channel"] = output_channel
         gate.setdefault("limitations", []).append(isolation_limitation)
         gate["source_tree_inventory_status"] = "CLEAN" if not inventory_errors else "CHANGED_OR_UNSAFE"
         gate["source_tree_inventory_errors"] = inventory_errors
@@ -1037,6 +1127,7 @@ def run_controlled_pytest(
             "execution_provenance_validation": "STRUCTURE_AND_DIGESTS_VALIDATED",
             "runner_isolation": runner_isolation,
             "staging_source_mode": staging_source_mode,
+            "output_channel": output_channel,
             "runtime_import_binding_status": (
                 "RUNTIME_IMPORTS_MATCHED_STAGED_SNAPSHOT" if not runtime_imports_errors
                 else "RUNTIME_IMPORTS_NOT_BOUND"

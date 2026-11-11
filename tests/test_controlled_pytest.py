@@ -557,6 +557,50 @@ class ControlledPytestTests(unittest.TestCase):
         sessionfinish hook overwrites the JUnit report claiming two passed
         tests instead of one. The parent-captured stdout summary still says
         "1 passed", so the counts disagree and the gate must fail.
+
+        This test forces the staging-file channel (Windows behavior): on
+        the D1 pipe channel there is no staging JUnit file to rewrite, so
+        the same hook is inert there (see
+        test_forged_junit_file_is_ignored_on_pipe_channel).
+        """
+        conftest = self.project / "tests" / "conftest.py"
+        conftest.write_text(
+            "import pytest\n"
+            "from pathlib import Path\n"
+            "@pytest.hookimpl(trylast=True)\n"
+            "def pytest_sessionfinish(session, exitstatus):\n"
+            "    junit = Path(session.config.rootpath) / '.usit-junit.xml'\n"
+            "    junit.write_text(\n"
+            "        '<?xml version=\"1.0\" encoding=\"utf-8\"?>'\n"
+            "        '<testsuites><testsuite name=\"pytest\" tests=\"2\" failures=\"0\" errors=\"0\" skipped=\"0\">'\n"
+            "        '<testcase classname=\"tests.test_smoke\" name=\"test_snapshot_execution\" />'\n"
+            "        '<testcase classname=\"tests.test_smoke\" name=\"test_phantom\" />'\n"
+            "        '</testsuite></testsuites>', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        self.git("add", "tests/conftest.py")
+        self.git("commit", "-q", "-m", "fixture forges junit after pytest")
+        with patch("usit.controlled_pytest._PIPE_CHANNEL", False):
+            result = run_controlled_pytest(
+                self.project, evidence_parent=self.evidence,
+                authorization_file=self.authorization,
+                pytest_args=["tests/test_smoke.py"], timeout=60,
+            )
+        self.assertEqual(result["status"], "FAIL", result)
+        self.assertTrue(any(
+            "JUnit counts disagree with pytest terminal summary" in item
+            for item in result["source_tree_inventory_errors"]
+        ))
+
+    def test_forged_junit_file_is_ignored_on_pipe_channel(self):
+        """D1: on the pipe channel a post-hoc JUnit rewrite has no target.
+
+        The same forgery hook as the cross-check test overwrites
+        ``.usit-junit.xml`` in staging -- but on the pipe channel pytest
+        writes the report to a parent-held pipe, so no staging JUnit file
+        exists and the hook merely creates a stray file the parent never
+        reads. The run passes with the real counts, and the evidence
+        JUnit holds exactly one test.
         """
         conftest = self.project / "tests" / "conftest.py"
         conftest.write_text(
@@ -580,11 +624,27 @@ class ControlledPytestTests(unittest.TestCase):
             authorization_file=self.authorization,
             pytest_args=["tests/test_smoke.py"], timeout=60,
         )
-        self.assertEqual(result["status"], "FAIL", result)
-        self.assertTrue(any(
-            "JUnit counts disagree with pytest terminal summary" in item
-            for item in result["source_tree_inventory_errors"]
-        ))
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["output_channel"], "PARENT_PIPE", result)
+        evidence_junit = ET.fromstring(
+            (Path(result["evidence_dir"]) / "junit.xml").read_bytes())
+        suites = evidence_junit.findall(".//testsuite")
+        self.assertEqual(len(suites), 1)
+        self.assertEqual(suites[0].get("tests"), "1")
+        self.assertEqual(len(suites[0].findall("testcase")), 1)
+
+    def test_pipe_channel_reports_output_channel_in_provenance(self):
+        """D1: the provenance record names the output channel used."""
+        result = run_controlled_pytest(
+            self.project, evidence_parent=self.evidence,
+            authorization_file=self.authorization,
+            pytest_args=["tests/test_smoke.py"], timeout=60,
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        provenance = json.loads(
+            (Path(result["evidence_dir"]) / "execution-provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["output_channel"], "PARENT_PIPE")
+        self.assertEqual(result["output_channel"], "PARENT_PIPE")
 
     def test_staging_parent_does_not_expose_evidence_dir(self):
         """The test process must not see the evidence run directory via '..'.
