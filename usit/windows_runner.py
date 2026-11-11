@@ -224,6 +224,9 @@ def grant_modify_access(paths, username: str) -> None:
     everything else in staging stays owned by the parent. Raises ValueError
     when icacls is unavailable or exits non-zero; the username is not a
     secret and never appears in a password context.
+
+    icacls takes exactly one file per invocation: a second file argument
+    is rejected as an invalid parameter, so each path gets its own call.
     """
     import subprocess
 
@@ -232,16 +235,17 @@ def grant_modify_access(paths, username: str) -> None:
     targets = [str(path) for path in paths]
     if not targets or any(not target for target in targets):
         raise ValueError("grant_modify_access requires at least one path")
-    try:
-        result = subprocess.run(
-            ["icacls", *targets, "/grant", f"{username}:(M)"],
-            capture_output=True, text=True, timeout=60,
-        )
-    except OSError as exc:
-        raise ValueError(f"icacls grant failed for the runner user: {type(exc).__name__}") from exc
-    if result.returncode != 0:
-        detail = (result.stdout.strip() + " " + result.stderr.strip()).strip()
-        raise ValueError(f"icacls grant failed for the runner user: {detail[:500]}")
+    for target in targets:
+        try:
+            result = subprocess.run(
+                ["icacls", target, "/grant", f"{username}:(M)"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except OSError as exc:
+            raise ValueError(f"icacls grant failed for the runner user: {type(exc).__name__}") from exc
+        if result.returncode != 0:
+            detail = (result.stdout.strip() + " " + result.stderr.strip()).strip()
+            raise ValueError(f"icacls grant failed for the runner user: {detail[:500]}")
 
 
 def spawn_as_user(command, *, cwd, env, stdout_file, stderr_file, token) -> WindowsProcess:

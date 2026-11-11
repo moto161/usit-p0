@@ -293,20 +293,28 @@ class VerificationCaptureTests(unittest.TestCase):
         secret = "E1-test-secret-password"
         with self.assertRaisesRegex(ValueError, "requires a runner user"):
             self.run_capture("pass", user_password=secret)
-        with self.assertRaisesRegex(ValueError, "only supported on Windows") as ctx:
+        # A password with a user is legal on Windows (it is the logon
+        # password), so only POSIX rejects it here; on Windows the call
+        # proceeds to user resolution and fails because "nobody" does not
+        # exist. Either way the secret never appears in the message.
+        expected = "does not exist" if os.name == "nt" else "only supported on Windows"
+        with self.assertRaisesRegex(ValueError, expected) as ctx:
             self.run_capture("pass", user="nobody", user_password=secret)
         self.assertNotIn(secret, str(ctx.exception))
 
     def test_windows_runner_user_resolution(self):
         # Fake the Windows helper module so the resolution branches are
         # exercised on any platform (the real module refuses to import
-        # off Windows).
+        # off Windows). Patch the module attribute, not sys.modules: once
+        # any earlier call imported the real module, the package attribute
+        # shadows a sys.modules patch (fromlist lookup), which broke this
+        # test on Windows CI.
         fake = types.SimpleNamespace(
             is_parent_admin=lambda: True,
             user_exists=lambda name: name == "usit-runner",
         )
         with patch.object(os, "name", "nt"), \
-             patch.dict(sys.modules, {"usit.windows_runner": fake}), \
+             patch.object(capture, "windows_runner", fake), \
              patch.object(capture.subprocess, "Popen") as popen:
             name, uid = capture._resolve_runner_user("usit-runner")
             self.assertEqual((name, uid), ("usit-runner", None))
@@ -318,7 +326,7 @@ class VerificationCaptureTests(unittest.TestCase):
         fake_non_admin = types.SimpleNamespace(
             is_parent_admin=lambda: False, user_exists=lambda name: True)
         with patch.object(os, "name", "nt"), \
-             patch.dict(sys.modules, {"usit.windows_runner": fake_non_admin}):
+             patch.object(capture, "windows_runner", fake_non_admin):
             with self.assertRaisesRegex(ValueError, "run as administrator"):
                 capture._resolve_runner_user("usit-runner")
 

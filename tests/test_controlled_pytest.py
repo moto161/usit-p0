@@ -992,7 +992,11 @@ class ControlledPytestTests(unittest.TestCase):
                 pytest_args=["tests/test_smoke.py"], timeout=60,
                 runner_password=secret,
             )
-        with self.assertRaisesRegex(ValueError, "only supported on Windows") as ctx:
+        # A password with a user is legal on Windows, so only POSIX rejects
+        # it here; on Windows the call proceeds to authorization, which
+        # fails because the fixture names no runner user.
+        expected = "runner_user does not match" if os.name == "nt" else "only supported on Windows"
+        with self.assertRaisesRegex(ValueError, expected) as ctx:
             run_controlled_pytest(
                 self.project, evidence_parent=self.evidence,
                 authorization_file=self.authorization,

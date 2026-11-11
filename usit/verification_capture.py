@@ -26,6 +26,16 @@ try:
 except ImportError:  # Non-POSIX platforms have no pwd module.
     pwd = None  # type: ignore[assignment]
 
+# E1: the Windows runner helper is imported at module level (guarded) so
+# tests can patch this module's attribute; a lazy `from usit import
+# windows_runner` inside a function would return the real module once any
+# earlier call imported it (the package attribute shadows a sys.modules
+# patch), which broke the resolution unit tests on Windows CI.
+if os.name == "nt":
+    from usit import windows_runner
+else:
+    windows_runner = None  # type: ignore[assignment]
+
 from .safeio import read_bounded_no_follow
 
 __all__ = ["STATUSES", "CaptureResult", "PipeChannel", "open_pipe_channel", "capture_run", "verify_manifest"]
@@ -228,8 +238,8 @@ def _resolve_runner_user(user: str | int | None) -> tuple[str | None, int | None
             raise ValueError("Windows runner user must be a username string, not a UID integer")
         if not user:
             raise ValueError("runner user name must not be empty")
-        from usit import windows_runner
-
+        if windows_runner is None:
+            raise ValueError("Windows runner support is unavailable on this platform")
         if not windows_runner.is_parent_admin():
             raise ValueError("running as a dedicated user on Windows requires the parent process to run as administrator")
         if not windows_runner.user_exists(user):
@@ -604,8 +614,8 @@ def capture_run(
                         # E1: Windows has no Popen(user=...); spawn through
                         # LogonUser/CreateProcessAsUser. The token is the
                         # parent's copy; it is closed once the child exists.
-                        from usit import windows_runner
-
+                        if windows_runner is None:
+                            raise ValueError("Windows runner support is unavailable on this platform")
                         token = windows_runner.logon_user_primary_token(
                             runner_user, user_password)
                         try:
