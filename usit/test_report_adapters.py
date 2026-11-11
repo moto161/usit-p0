@@ -36,7 +36,26 @@ def _safe_relative_path(value: Any) -> str:
     return pure.as_posix()
 
 
-def parse_pytest_json(data: bytes) -> list[dict[str, Any]]:
+def _parse_duration(raw: Any) -> float | None:
+    """Parse a reported per-test duration in seconds; None when absent/invalid.
+
+    A duration is only retained when it is a finite, non-negative number.
+    Negative or non-numeric values are not silently coerced to zero: they
+    mean the report is malformed in that field, and the case is treated as
+    having no usable duration.
+    """
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value in {float("inf"), float("-inf")} or value < 0:
+        return None
+    return value
+
+
+def parse_pytest_json(data: bytes) -> tuple[list[dict[str, Any]], float | None]:
     try:
         doc = strict_json_loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -55,6 +74,7 @@ def parse_pytest_json(data: bytes) -> list[dict[str, Any]]:
         cases.append({
             "test_case_id": nodeid.strip(), "classname": None, "name": nodeid.strip(),
             "status": {"passed": "PASSED", "failed": "FAILED", "skipped": "SKIPPED"}[outcome],
+            "duration_seconds": _parse_duration(item.get("duration")),
             "failure_count": int(outcome == "failed"), "error_count": 0,
             "skipped_count": int(outcome == "skipped"), "source_format": "PYTEST_JSON",
         })
@@ -65,7 +85,11 @@ def parse_pytest_json(data: bytes) -> list[dict[str, Any]]:
     ids = [item["test_case_id"] for item in cases]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate pytest nodeid values are ambiguous")
-    return sorted(cases, key=lambda item: item["test_case_id"])
+    # Top-level session duration, self-reported by the test process: only a
+    # cross-check input against the parent-measured wall clock, never the
+    # wall clock itself.
+    report_duration_seconds = _parse_duration(doc.get("duration"))
+    return sorted(cases, key=lambda item: item["test_case_id"]), report_duration_seconds
 
 
 def parse_coverage_py_json(data: bytes) -> dict[str, dict[str, Any]]:

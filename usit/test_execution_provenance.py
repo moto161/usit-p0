@@ -117,6 +117,18 @@ def _validate_record_identity(
     completed = _utc_timestamp(record.get("completed_at"), "completed_at")
     if completed < started:
         raise ValueError("completed_at must not precede started_at")
+    wall_clock_seconds = (completed - started).total_seconds()
+
+    # Optional worker count, recorded by runners that know how the tests
+    # were distributed. The controlled runner never uses pytest-xdist (its
+    # allowed option list contains no -n/--numprocesses), so it records 1.
+    # An absent worker_count means the importer cannot tell serial from
+    # parallel and must skip the summed-duration cross-check.
+    worker_count = record.get("worker_count")
+    if worker_count is not None and (
+        not isinstance(worker_count, int) or isinstance(worker_count, bool) or worker_count < 1
+    ):
+        raise ValueError("worker_count must be a positive integer or absent")
 
     runner = record.get("runner")
     if (not isinstance(runner, dict)
@@ -124,7 +136,7 @@ def _validate_record_identity(
             or not isinstance(runner.get("version"), str) or not runner["version"].strip()):
         raise ValueError("runner must contain non-empty name and version")
 
-    return execution_id, signature_status
+    return execution_id, signature_status, wall_clock_seconds, worker_count
 
 
 def validate_provenance_record_identity(
@@ -142,7 +154,7 @@ def validate_provenance_record_identity(
     record's declared snapshot hash.
     """
     record = _json_object(record_bytes, "execution provenance record", MAX_RECORD_BYTES)
-    execution_id, signature_status = _validate_record_identity(record, hmac_key)
+    execution_id, signature_status, wall_clock_seconds, worker_count = _validate_record_identity(record, hmac_key)
     manifest_status = "NOT_CHECKED"
     if source_manifest_bytes is not None:
         snapshot = record.get("source_snapshot")
@@ -167,6 +179,8 @@ def validate_provenance_record_identity(
         "provenance_signature_status": signature_status,
         "source_manifest_integrity_status": manifest_status,
         "provenance_authenticity_status": "UNAUTHENTICATED",
+        "wall_clock_seconds": wall_clock_seconds,
+        "worker_count": worker_count,
     }
 
 
@@ -192,7 +206,7 @@ def validate_execution_provenance(
         raise ValueError("test report must be bytes")
     if len(report_bytes) > MAX_REPORT_BYTES:
         raise ValueError(f"test report exceeds size limit ({MAX_REPORT_BYTES} bytes)")
-    execution_id, signature_status = _validate_record_identity(record, hmac_key)
+    execution_id, signature_status, wall_clock_seconds, worker_count = _validate_record_identity(record, hmac_key)
 
     report_format = record.get("report_format")
     if not isinstance(report_format, str) or report_format not in {"PYTEST_JSON", "JUNIT_XML"}:
@@ -277,6 +291,8 @@ def validate_execution_provenance(
         "provenance_signature_status": signature_status,
         "pytest_exit_code": exit_code,
         "pytest_exit_status": exit_status,
+        "wall_clock_seconds": wall_clock_seconds,
+        "worker_count": worker_count,
         "working_tree_state": tree["state"],
         "untracked_files": tree["untracked_files"],
         "execution_reproducibility_status": (

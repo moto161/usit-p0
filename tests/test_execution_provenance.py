@@ -50,6 +50,17 @@ class TestExecutionProvenanceTests(unittest.TestCase):
         self.assertEqual(result["provenance_authenticity_status"], "UNAUTHENTICATED")
         self.assertEqual(result["execution_reproducibility_status"], "CANDIDATE_ONLY")
         self.assertEqual(result["provenance_signature_status"], "NOT_CHECKED")
+        self.assertEqual(result["wall_clock_seconds"], 1.0)
+        self.assertIsNone(result["worker_count"])
+
+    def test_worker_count_is_recorded_and_rejects_invalid_values(self):
+        self.record["worker_count"] = 4
+        result = self.validate()
+        self.assertEqual(result["worker_count"], 4)
+        for bad in (0, -1, "2", 1.5, True):
+            self.record["worker_count"] = bad
+            with self.assertRaisesRegex(ValueError, "worker_count"):
+                self.validate()
 
     def test_signed_record_validates_with_key(self):
         from usit.evidence_signing import generate_run_key, sign_document

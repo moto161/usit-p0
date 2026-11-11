@@ -650,6 +650,10 @@ def run_controlled_pytest(
             # code 0 before treating any PASSED in the report as executed.
             "pytest_exit_code": capture.exit_code,
             "pytest_exit_status": capture.status,
+            # The controlled runner never distributes tests across workers:
+            # its allowed pytest option list contains no -n/--numprocesses,
+            # so the summed case durations must fit inside the wall clock.
+            "worker_count": 1,
             "source_snapshot": {
                 "manifest_schema_version": source_manifest["schema_version"],
                 "manifest_sha256": manifest_hash,

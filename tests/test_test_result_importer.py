@@ -643,6 +643,166 @@ def test_delete():
                 "REPORT_PASSED_BUT_RUNNER_EXIT_CODE_NONZERO",
             )
 
+    def _provenance_import(self, base, report, mapping, graph, completed_at,
+                           worker_count=None):
+        """Import a report with a provenance record spanning a 2s wall clock.
+
+        ``completed_at`` is the run's end timestamp; the start is fixed at
+        2026-11-03T10:00:00Z, so the wall clock is 2s. ``worker_count``
+        records how the run was distributed (None = not recorded).
+        """
+        from usit.test_execution_provenance import (
+            SCHEMA_VERSION, canonical_json_bytes, sha256_hex,
+        )
+        report_bytes = report.read_bytes()
+        manifest = {
+            "schema_version": "usit-manifest-v1",
+            "files": [{"path": "tests/test_photo.py", "sha256": "a" * 64}],
+        }
+        manifest_path = base / "source-manifest.json"
+        manifest_path.write_bytes(json.dumps(manifest).encode("utf-8"))
+        provenance = {
+            "schema_version": SCHEMA_VERSION,
+            "execution_id": "ci-run-duration",
+            "started_at": "2026-11-03T10:00:00Z",
+            "completed_at": completed_at,
+            "runner": {"name": "pytest", "version": "8.3.5"},
+            "report_format": "JUNIT_XML",
+            "report_relative_path": "reports/junit.xml",
+            "report_sha256": sha256_hex(report_bytes),
+            "source_snapshot": {
+                "manifest_schema_version": "usit-manifest-v1",
+                "manifest_sha256": sha256_hex(canonical_json_bytes(manifest)),
+                "file_count": 1,
+                "capture_method": "PRE_EXECUTION_READ_ONLY_CAPTURE",
+            },
+            "working_tree_state": {"state": "CLEAN", "untracked_files": "INCLUDED"},
+            "command_fingerprint": "b" * 64,
+            "environment_fingerprint": "c" * 64,
+        }
+        if worker_count is not None:
+            provenance["worker_count"] = worker_count
+        record_path = base / "execution-provenance.json"
+        record_path.write_text(json.dumps(provenance), encoding="utf-8")
+        return ingest_junit_results(
+            report, mapping, graph,
+            provenance_record_path=record_path,
+            source_manifest_path=manifest_path,
+        )
+
+    def test_junit_retains_durations_without_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(base, """<testsuite time="1.75">
+              <testcase classname="tests.PhotoTests" name="test_upload" time="1.25"/>
+              <testcase classname="tests.PhotoTests" name="test_delete" time="0.5"/>
+            </testsuite>""")
+            result = ingest_junit_results(report, mapping, graph)
+            by_id = {x["business_function_id"]: x for x in result["business_function_results"]}
+            self.assertEqual(by_id["bf-upload"]["execution_status"], "PASSED")
+            self.assertEqual(
+                by_id["bf-upload"]["mapped_test_cases"][0]["duration_seconds"], 1.25)
+            self.assertEqual(
+                by_id["bf-delete"]["mapped_test_cases"][0]["duration_seconds"], 0.5)
+            check = result["duration_cross_check"]
+            self.assertEqual(check["status"], "NOT_CHECKED")
+            self.assertEqual(check["reason"], "NO_EXECUTION_PROVENANCE")
+            self.assertEqual(check["total_case_duration_seconds"], 1.75)
+            self.assertEqual(check["report_duration_seconds"], 1.75)
+
+    def test_case_duration_exceeding_wall_clock_downgrades_only_its_function(self):
+        # One test cannot outlast the whole run, serial or parallel, so the
+        # per-case rule still applies with worker_count=2 -- while the sum
+        # check is correctly skipped for a parallel run.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(base, """<testsuite>
+              <testcase classname="tests.PhotoTests" name="test_upload" time="10.0"/>
+              <testcase classname="tests.PhotoTests" name="test_delete" time="0.5"/>
+            </testsuite>""")
+            result = self._provenance_import(
+                base, report, mapping, graph, "2026-11-03T10:00:02Z", worker_count=2)
+            by_id = {x["business_function_id"]: x for x in result["business_function_results"]}
+            self.assertEqual(by_id["bf-upload"]["execution_status"], "UNKNOWN")
+            self.assertEqual(by_id["bf-upload"]["execution_status_reason"],
+                             "TEST_DURATION_EXCEEDS_WALL_CLOCK")
+            self.assertEqual(by_id["bf-delete"]["execution_status"], "PASSED")
+            check = result["duration_cross_check"]
+            self.assertEqual(check["status"], "CONFLICT")
+            self.assertEqual(check["per_case_violations"], ["tests.PhotoTests::test_upload"])
+            self.assertFalse(check["sum_check_applied"])
+
+    def test_summed_durations_exceeding_wall_clock_downgrade_serial_run(self):
+        # Each case fits inside the 2s wall clock (limit 4s with tolerance),
+        # but the 5s sum cannot fit a serial run.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(base, """<testsuite>
+              <testcase classname="tests.PhotoTests" name="test_upload" time="2.5"/>
+              <testcase classname="tests.PhotoTests" name="test_delete" time="2.5"/>
+            </testsuite>""")
+            result = self._provenance_import(
+                base, report, mapping, graph, "2026-11-03T10:00:02Z", worker_count=1)
+            by_id = {x["business_function_id"]: x for x in result["business_function_results"]}
+            self.assertEqual(result["duration_cross_check"]["status"], "CONFLICT")
+            self.assertIn("TOTAL_TEST_DURATION_EXCEEDS_WALL_CLOCK",
+                          result["duration_cross_check"]["violations"])
+            self.assertTrue(result["duration_cross_check"]["sum_check_applied"])
+            for function_id in ("bf-upload", "bf-delete"):
+                self.assertEqual(by_id[function_id]["execution_status"], "UNKNOWN")
+                self.assertEqual(by_id[function_id]["execution_status_reason"],
+                                 "TOTAL_TEST_DURATION_EXCEEDS_WALL_CLOCK")
+
+    def test_parallel_run_skips_summed_duration_check(self):
+        # The same 5s of case durations is legitimate under pytest-xdist:
+        # two workers run in parallel, so the sum may exceed the wall clock.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(base, """<testsuite>
+              <testcase classname="tests.PhotoTests" name="test_upload" time="2.5"/>
+              <testcase classname="tests.PhotoTests" name="test_delete" time="2.5"/>
+            </testsuite>""")
+            result = self._provenance_import(
+                base, report, mapping, graph, "2026-11-03T10:00:02Z", worker_count=2)
+            by_id = {x["business_function_id"]: x for x in result["business_function_results"]}
+            self.assertEqual(result["duration_cross_check"]["status"], "CHECKED")
+            self.assertFalse(result["duration_cross_check"]["sum_check_applied"])
+            self.assertEqual(by_id["bf-upload"]["execution_status"], "PASSED")
+            self.assertEqual(by_id["bf-delete"]["execution_status"], "PASSED")
+
+    def test_report_total_exceeding_wall_clock_downgrades_all_passed(self):
+        # Cases are short, but the report's own claimed total (60s) cannot
+        # fit the 2s parent-measured wall clock.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(base, """<testsuite time="60.0">
+              <testcase classname="tests.PhotoTests" name="test_upload" time="0.5"/>
+              <testcase classname="tests.PhotoTests" name="test_delete" time="0.5"/>
+            </testsuite>""")
+            result = self._provenance_import(
+                base, report, mapping, graph, "2026-11-03T10:00:02Z", worker_count=1)
+            by_id = {x["business_function_id"]: x for x in result["business_function_results"]}
+            self.assertIn("REPORT_DURATION_EXCEEDS_WALL_CLOCK",
+                          result["duration_cross_check"]["violations"])
+            for function_id in ("bf-upload", "bf-delete"):
+                self.assertEqual(by_id[function_id]["execution_status"], "UNKNOWN")
+                self.assertEqual(by_id[function_id]["execution_status_reason"],
+                                 "REPORT_DURATION_EXCEEDS_WALL_CLOCK")
+
+    def test_duration_within_tolerance_passes(self):
+        # Wall clock 2s, second-precision timestamps: a 3.5s case is inside
+        # the 2s tolerance and must not be flagged.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            report, mapping, graph = self._inputs(base, """<testsuite>
+              <testcase classname="tests.PhotoTests" name="test_upload" time="3.5"/>
+            </testsuite>""")
+            result = self._provenance_import(
+                base, report, mapping, graph, "2026-11-03T10:00:02Z", worker_count=2)
+            by_id = {x["business_function_id"]: x for x in result["business_function_results"]}
+            self.assertEqual(result["duration_cross_check"]["status"], "CHECKED")
+            self.assertEqual(by_id["bf-upload"]["execution_status"], "PASSED")
+
     def test_evidence_bundle_rejects_symlinked_evidence_directory(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

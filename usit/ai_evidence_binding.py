@@ -249,7 +249,7 @@ def verify_evidence_bindings(ledger: dict[str, Any], evidence_root: str | Path,
             prefix = relative + "#"
             case_id = locator[len(prefix):] if isinstance(locator, str) and locator.startswith(prefix) else ""
             try:
-                cases = _parse_junit(raw)
+                cases, _ = _parse_junit(raw)
                 case = next((item for item in cases if item["test_case_id"] == case_id), None)
             except ValueError:
                 case = None

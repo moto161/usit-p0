@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from .test_report_adapters import parse_pytest_json, strict_json_loads
+from .test_report_adapters import _parse_duration, parse_pytest_json, strict_json_loads
 from .safeio import is_reparse, open_no_follow
 from .test_execution_provenance import (
     MAX_MANIFEST_BYTES, MAX_RECORD_BYTES, validate_execution_provenance,
@@ -163,7 +163,7 @@ def _verify_report_source_locator(
     }
 
 
-def _parse_junit(data: bytes) -> list[dict[str, Any]]:
+def _parse_junit(data: bytes) -> tuple[list[dict[str, Any]], float | None]:
     # ElementTree does not resolve external entities, and explicitly rejecting
     # declarations keeps the accepted report format deliberately conservative.
     # The report is already bounded to MAX_REPORT_BYTES; scan the entire
@@ -194,6 +194,7 @@ def _parse_junit(data: bytes) -> list[dict[str, Any]]:
             "classname": classname or None,
             "name": name,
             "status": status,
+            "duration_seconds": _parse_duration(element.attrib.get("time")),
             "failure_count": outcomes.count("failure"),
             "error_count": outcomes.count("error"),
             "skipped_count": outcomes.count("skipped"),
@@ -208,7 +209,85 @@ def _parse_junit(data: bytes) -> list[dict[str, Any]]:
     duplicates = sorted(key for key, count in counts.items() if count > 1)
     if duplicates:
         raise ValueError("duplicate JUnit testcase IDs are ambiguous: " + ", ".join(duplicates[:10]))
-    return sorted(cases, key=lambda item: item["test_case_id"])
+    # The report's own claimed total duration: the testsuite time attribute
+    # (summed over children for a testsuites root). Self-reported, so it is
+    # only used as one side of a cross-check against the parent-measured
+    # wall clock, never as the wall clock itself.
+    suite_times = [_parse_duration(element.attrib.get("time"))
+                   for element in root.iter("testsuite")]
+    known_times = [value for value in suite_times if value is not None]
+    report_duration_seconds = sum(known_times) if known_times else None
+    return sorted(cases, key=lambda item: item["test_case_id"]), report_duration_seconds
+
+
+# Wall-clock timestamps in provenance are second-precision, so the recorded
+# wall clock can be up to 1s shorter than the true run. The tolerance covers
+# that rounding plus sub-second reporting granularity; a forged duration of
+# minutes in a seconds-long run is still caught by a wide margin.
+_DURATION_TOLERANCE_SECONDS = 2.0
+
+
+def _duration_cross_check(
+    cases: list[dict[str, Any]],
+    report_duration_seconds: float | None,
+    execution_provenance: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Cross-check reported test durations against the parent-measured wall clock.
+
+    Rules, in order of strength:
+    - Per-case: one test cannot run longer than the whole run, serial or
+      parallel. A violating case downgrades only its own function.
+    - Summed: only when the provenance records worker_count == 1 (a serial
+      run). Under pytest-xdist the summed case durations legitimately exceed
+      the wall clock, so the sum check is skipped for parallel or unknown
+      worker counts instead of producing false conflicts.
+    - Report total: the report's own claimed total duration (testsuite time /
+      pytest-json session duration) cannot exceed the wall clock either.
+    Without provenance there is no trusted wall clock and nothing is checked;
+    durations are still retained in the imported cases.
+    """
+    known = [item["duration_seconds"] for item in cases
+             if item.get("duration_seconds") is not None]
+    total_case_duration = sum(known) if known else None
+    check: dict[str, Any] = {
+        "status": "NOT_CHECKED",
+        "reason": "NO_EXECUTION_PROVENANCE",
+        "wall_clock_seconds": None,
+        "worker_count": None,
+        "total_case_duration_seconds": total_case_duration,
+        "report_duration_seconds": report_duration_seconds,
+        "per_case_violations": [],
+        "sum_check_applied": False,
+        "violations": [],
+    }
+    if execution_provenance is None:
+        return check
+    wall_clock = execution_provenance.get("wall_clock_seconds")
+    worker_count = execution_provenance.get("worker_count")
+    check["wall_clock_seconds"] = wall_clock
+    check["worker_count"] = worker_count
+    if wall_clock is None:
+        check["reason"] = "WALL_CLOCK_NOT_RECORDED"
+        return check
+    limit = wall_clock + _DURATION_TOLERANCE_SECONDS
+    violations: list[str] = []
+    per_case = sorted(
+        item["test_case_id"] for item in cases
+        if item.get("duration_seconds") is not None and item["duration_seconds"] > limit
+    )
+    if per_case:
+        violations.append("TEST_DURATION_EXCEEDS_WALL_CLOCK")
+    check["per_case_violations"] = per_case
+    sum_check_applied = worker_count == 1 and total_case_duration is not None
+    check["sum_check_applied"] = sum_check_applied
+    if sum_check_applied and total_case_duration > limit:
+        violations.append("TOTAL_TEST_DURATION_EXCEEDS_WALL_CLOCK")
+    if report_duration_seconds is not None and report_duration_seconds > limit:
+        violations.append("REPORT_DURATION_EXCEEDS_WALL_CLOCK")
+    check["violations"] = violations
+    check["status"] = "CONFLICT" if violations else "CHECKED"
+    check["reason"] = None
+    return check
 
 
 def _verify_test_source_binding(item: dict[str, Any], project_root: str | Path | None) -> dict[str, Any]:
@@ -602,11 +681,13 @@ def ingest_junit_results(
         explicit_map[case_id] = {**item, "business_function_id": function_id}
 
     if report_format == "junit-xml":
-        cases = _parse_junit(report_bytes)
+        cases, report_duration_seconds = _parse_junit(report_bytes)
     elif report_format == "pytest-json":
-        cases = parse_pytest_json(report_bytes)
+        cases, report_duration_seconds = parse_pytest_json(report_bytes)
     else:
         raise ValueError("report_format must be junit-xml or pytest-json")
+    duration_cross_check = _duration_cross_check(
+        cases, report_duration_seconds, execution_provenance)
     actual_ids = {item["test_case_id"] for item in cases}
     mapped_cases: dict[str, list[dict[str, Any]]] = defaultdict(list)
     unmapped = []
@@ -672,6 +753,25 @@ def ingest_junit_results(
             if exit_code is not None and exit_code != 0:
                 execution_status = "UNKNOWN"
                 execution_status_reason = "REPORT_PASSED_BUT_RUNNER_EXIT_CODE_NONZERO"
+        # Duration cross-check: a PASSED function whose timing evidence is
+        # inconsistent is UNKNOWN, not passed. A per-case violation is
+        # reported with the precise reason for the function containing that
+        # case; a run-level violation (summed durations or the report's own
+        # total exceeding the parent-measured wall clock) downgrades every
+        # other PASSED function, because the report's timing as a whole is
+        # not credible.
+        if execution_status == "PASSED":
+            violations = set(duration_cross_check["violations"])
+            if any(case["test_case_id"] in duration_cross_check["per_case_violations"]
+                   for case in linked):
+                execution_status = "UNKNOWN"
+                execution_status_reason = "TEST_DURATION_EXCEEDS_WALL_CLOCK"
+            elif "TOTAL_TEST_DURATION_EXCEEDS_WALL_CLOCK" in violations:
+                execution_status = "UNKNOWN"
+                execution_status_reason = "TOTAL_TEST_DURATION_EXCEEDS_WALL_CLOCK"
+            elif "REPORT_DURATION_EXCEEDS_WALL_CLOCK" in violations:
+                execution_status = "UNKNOWN"
+                execution_status_reason = "REPORT_DURATION_EXCEEDS_WALL_CLOCK"
         function_results.append({
             "business_function_id": function_id,
             "endpoint_id": view.get("endpoint_id"),
@@ -711,12 +811,14 @@ def ingest_junit_results(
         "business_function_status_counts": dict(sorted(status_counts.items())),
         "business_function_results": function_results,
         "execution_provenance": execution_provenance,
+        "duration_cross_check": duration_cross_check,
         "evidence_bundle_validation": evidence_bundle_validation or {"status": "NOT_PROVIDED"},
         "coverage_limitations": [
             "功能关联完全依赖显式 mapping；不使用名称相似度或 endpoint 猜测。",
             "JUnit 测试通过不等于业务需求完整正确，也不等于代码覆盖率。",
             "没有映射测试结果的功能标记 NOT_EXECUTED；被跳过的功能标记 UNKNOWN。",
             "映射中任一预期 testcase 未出现在报告中时，即使已报告用例全部通过，功能状态也只能是 UNKNOWN；观察到的失败仍优先报告 FAILED。",
+            "报告的用例时长与父进程实测墙钟时间做交叉核对：单个用例时长超过墙钟、串行运行的用例时长之和超过墙钟、或报告自称的总时长超过墙钟时，相关通过结论降级为 UNKNOWN；并行运行（worker_count>1）或无 provenance 时不做求和核对。",
             "JUnit XML 可接收 Android instrumentation 等兼容报告；pytest 支持 pytest-json-report JSON。",
             "代码覆盖率由独立 coverage importer 读取，并要求显式源码文件/行范围映射。",
             "测试源码绑定仅在 mapping 提供 test_source_file、test_source_line、test_source_file_sha256 且调用方提供 project_root 时核对；哈希匹配仅证明字节一致，不证明测试充分性或报告执行了该源码。",

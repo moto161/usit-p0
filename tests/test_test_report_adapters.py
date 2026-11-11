@@ -18,13 +18,29 @@ class TestReportAdapters(unittest.TestCase):
             {"nodeid": "tests/test_a.py::test_skip", "outcome": "skipped"},
             {"nodeid": "tests/test_a.py::test_bad", "outcome": "failed"},
         ]}).encode()
-        result = parse_pytest_json(data)
+        result, report_duration = parse_pytest_json(data)
         self.assertEqual([x["status"] for x in result], ["FAILED", "PASSED", "SKIPPED"])
+        self.assertIsNone(report_duration)
         duplicate = json.dumps({"tests": [
             {"nodeid": "x", "outcome": "passed"}, {"nodeid": "x", "outcome": "passed"}
         ]}).encode()
         with self.assertRaisesRegex(ValueError, "duplicate pytest"):
             parse_pytest_json(duplicate)
+
+    def test_pytest_json_retains_case_and_report_durations(self):
+        data = json.dumps({"duration": 3.5, "tests": [
+            {"nodeid": "tests/test_a.py::test_ok", "outcome": "passed", "duration": 1.25},
+            {"nodeid": "tests/test_a.py::test_no_time", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::test_bad_time", "outcome": "failed", "duration": "nope"},
+            {"nodeid": "tests/test_a.py::test_negative", "outcome": "passed", "duration": -1},
+        ]}).encode()
+        result, report_duration = parse_pytest_json(data)
+        by_id = {x["test_case_id"]: x for x in result}
+        self.assertEqual(by_id["tests/test_a.py::test_ok"]["duration_seconds"], 1.25)
+        self.assertIsNone(by_id["tests/test_a.py::test_no_time"]["duration_seconds"])
+        self.assertIsNone(by_id["tests/test_a.py::test_bad_time"]["duration_seconds"])
+        self.assertIsNone(by_id["tests/test_a.py::test_negative"]["duration_seconds"])
+        self.assertEqual(report_duration, 3.5)
 
     def test_coverage_py_json_keeps_executed_and_missing_lines(self):
         data = json.dumps({"files": {"src/photo.py": {
