@@ -98,7 +98,7 @@ if (!TS_TRUST.trusted) {
   process.stdout.write(JSON.stringify({
     contract_version: CONTRACT, parser_name: PARSER, parser_version: "UNAVAILABLE",
     available: false,
-    availability: { available: false, reason: TS_TRUST.reason, ts_lib: TS_TRUST.tsLib, ts_lib_real_path: TS_TRUST.realPath },
+    availability: { available: false, reason: TS_TRUST.reason, parser_name: PARSER },
     project_diagnostics: [{ code: TS_TRUST.reason, severity: "ERROR",
       message: "The TypeScript install could not be proven trusted; refusing to load it." }],
     files: {}, records: [],

@@ -138,7 +138,9 @@ class TrustedInstallTests(unittest.TestCase):
             result = analyze_js_ts_project(proj, [], js_ts_source=_source(proj))
         self.assertTrue(avail["available"], str(avail))
         self.assertEqual(avail["version"], EXPECTED_TYPESCRIPT_VERSION)
-        self.assertEqual(Path(avail["ts_lib_real_path"]).resolve(), iso.ts.resolve())
+        self.assertEqual(avail["typescript_install"], "PROJECT_LOCAL")
+        self.assertEqual(avail["typescript_install_path_status"], "VERIFIED_WITHIN_USIT_ROOT")
+        self.assertNotIn("node_modules/typescript", json.dumps(avail))
         self.assertEqual(result["parser_version"], EXPECTED_TYPESCRIPT_VERSION)
         self.assertEqual([s["qualified_name"] for s in result["files"]["src/a.ts"]["symbols"]],
                          ["p079"], "A trusted install must still resolve symbols.")

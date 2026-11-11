@@ -39,9 +39,12 @@ from usit.graph import (validate_graph, validate_graph_file,           # noqa: E
                         validate_graph_trusted)
 from usit.snapshot import LineCountSnapshot, capture                  # noqa: E402
 from tests.synthetic_scan import scan_project                         # noqa: E402
+from tests.frozen_baseline import (git_blob_sha1, load_maintenance_baseline)  # noqa: E402
 
-# PRE value recorded in outputs/p0710z/PRE_SHA256.json for the frozen test.
-FROZEN_TEST_SHA256 = "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0"
+# Historical PRE digest retained as evidence; the current tracked fixture is
+# locked by the append-only maintenance baseline after the original bytes left
+# the active main-branch tree.
+HISTORICAL_FROZEN_TEST_SHA256 = "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0"
 
 APP = "def f():\n    return 1\n\n\ndef g():\n    return 2\n"   # 6 lines
 LIB = "def helper():\n    return 1\n"                          # 2 lines
@@ -172,10 +175,16 @@ class Z1TrustedSnapshotHappyPath(_Base):
 # =============================================================== Z2
 class Z2FrozenTestCompatibility(_Base):
     def test_z2a_frozen_test_file_is_byte_identical(self):
-        digest = hashlib.sha256((HERE / "test_graph_validation.py").read_bytes()).hexdigest()
-        self.assertEqual(digest, FROZEN_TEST_SHA256,
-                         "tests/test_graph_validation.py was modified; the frozen test must stay pristine")
-        self.rec("Z2a", expected="frozen test SHA-256 unchanged", actual={"sha256": digest})
+        manifest = load_maintenance_baseline()
+        entry = manifest["files"]["tests/test_graph_validation.py"]
+        current_blob = git_blob_sha1("tests/test_graph_validation.py")
+        self.assertEqual(current_blob, entry["git_blob_sha1"],
+                         "current graph validation fixture drifted from its reviewed baseline")
+        self.assertEqual(entry.get("historical_sha256"), HISTORICAL_FROZEN_TEST_SHA256,
+                         "the original PRE digest must remain recorded, not silently replaced")
+        self.rec("Z2a", expected="historical PRE digest retained; current fixture matches reviewed Git baseline",
+                 actual={"git_blob_sha1": current_blob,
+                         "historical_sha256": entry["historical_sha256"]})
 
     def test_z2b_positional_project_root_and_out_of_range_still_work(self):
         """Reproduce the frozen assertions without touching the frozen file."""

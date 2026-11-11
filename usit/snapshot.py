@@ -433,8 +433,8 @@ class LineCountSnapshot:
               * ``UNAVAILABLE`` -- the check could not be completed reliably
                 (path not in this capture, captured digest missing/malformed,
                 open/read failure, path escape, symlink/reparse bypass, path
-                replacement, or identity change during the read).  ``UNAVAILABLE``
-                is **never** ``MATCH``.
+                replacement, or identity change during the read (including
+                POSIX ctime_ns changes).  ``UNAVAILABLE`` is **never** ``MATCH``.
 
         Raises:
             ValueError: ``rel`` is not a usable normalised relative path, or the
@@ -499,9 +499,20 @@ class LineCountSnapshot:
                                           f"post-read fstat failed: {type(exc).__name__}",
                                           None)
             # The file must not have changed identity while we read it.
-            if (int(st1.st_dev), int(st1.st_ino), int(st1.st_size),
-                    int(st1.st_mtime_ns)) != (int(st2.st_dev), int(st2.st_ino),
-                                              int(st2.st_size), int(st2.st_mtime_ns)):
+            # POSIX ctime changes on in-place writes even when an attacker
+            # restores mtime_ns. Windows exposes creation-time semantics for
+            # st_ctime in supported Python versions; there the no-follow handle's
+            # FILE_SHARE_READ mode prevents concurrent write/delete sharing.
+            identity_before = (
+                int(st1.st_dev), int(st1.st_ino), int(st1.st_size), int(st1.st_mtime_ns)
+            )
+            identity_after = (
+                int(st2.st_dev), int(st2.st_ino), int(st2.st_size), int(st2.st_mtime_ns)
+            )
+            if os.name != "nt":
+                identity_before += (int(st1.st_ctime_ns),)
+                identity_after += (int(st2.st_ctime_ns),)
+            if identity_before != identity_after:
                 return ContentVerifyResult(norm, "UNAVAILABLE", captured, None,
                                           "file identity changed during read", None)
             # Detect a path-replacement race: the descriptor's object must still

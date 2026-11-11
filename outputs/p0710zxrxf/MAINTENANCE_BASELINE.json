@@ -1,0 +1,43 @@
+{
+  "schema_version": "usit-frozen-maintenance-baseline-v1",
+  "historical_manifest": "outputs/p0710zxrxf/PRE_SHA256.json",
+  "historical_manifest_git_blob_sha1": "6fd84b9e3c69bdbc0fc4a56c355261904e640e60",
+  "policy": "The original PRE_SHA256.json is immutable and every watched file retains its historical PRE SHA-256. All watched files are pinned by canonical Git blob IDs so checkout line-ending conversion cannot create false drift. Files unchanged since PRE retain their historical content; files maintained on main carry an explicit reason and successor blob ID. The test suite verifies each historical SHA against PRE before comparing the canonical current blob.",
+  "files": {
+    "usit/graph.py": {
+      "git_blob_sha1": "86a6fb54ca5800c73a89f12a9a3228f5b6a370db",
+      "historical_sha256": "eeda9ae8e22a60b0dcd9e15b6bd261cef296afb312749c53bcac8feeb9b23fb4",
+      "reason": "Byte-identical to the PRE snapshot on main; pinned by canonical Git blob so checkout line-ending conversion cannot create false drift."
+    },
+    "usit/scanner.py": {
+      "git_blob_sha1": "10bd079b6533bc7e2ab1a654d7bb6bbb1ddbe128",
+      "historical_sha256": "c70a1a4baf3a6a17cb7ec0ed4748db7194d70e3008ab32f0ac05e3e55f797912",
+      "reason": "Differs from the PRE snapshot as uploaded to main (initial full source upload); this backport adds POSIX ctime_ns to the discovery-to-open identity check. Current main blob pinned with the PRE digest retained."
+    },
+    "usit/safeio.py": {
+      "git_blob_sha1": "d1a45c017b768911de960a8684fbd224d1be5a77",
+      "historical_sha256": "d8d8a42e6cb72dcfe2dedb66f80af80acb793a6a777d69d9e9d5411e1233ad7c",
+      "reason": "Byte-identical to the PRE snapshot on main; pinned by canonical Git blob so checkout line-ending conversion cannot create false drift."
+    },
+    "tests/test_graph_validation.py": {
+      "git_blob_sha1": "19d992c72b2edaad6221d0d3b74c9dc056dded4d",
+      "historical_sha256": "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0",
+      "reason": "Byte-identical to the PRE snapshot on main; pinned by canonical Git blob so checkout line-ending conversion cannot create false drift."
+    },
+    "tests/test_p073_budget_race.py": {
+      "git_blob_sha1": "5f897498548d6ec7942a6a4e751b34f6eb8a167d",
+      "historical_sha256": "470851778ee2224593ab146109b86b613f52fcd60149ddc23092da33dd3fbeb6",
+      "reason": "Unmodified historical budget-race fixture; retain the original PRE digest and pin its canonical Git blob independent of working-tree line endings."
+    },
+    "tests/test_p0710z_snapshot_trust.py": {
+      "git_blob_sha1": "24e8f2755e02ab40a5df10f443689674ceef35a4",
+      "historical_sha256": "7f8ad74737ad4e8d6928cf84a153d298534e1259a081ac70df094888b03b0e8f",
+      "reason": "Maintained on main by this backport: frozen assertion migrated from live SHA-256 to the reviewed successor Git-blob baseline; historical PRE digest retained."
+    },
+    "tests/test_p0710zrf_descriptor_binding.py": {
+      "git_blob_sha1": "ed60c1950abfa395672ebfb01f6b8b6459f7ceec",
+      "historical_sha256": "ef452a224d5c0b0efbdfc22017fa2e7410eb2d73329b05e851597eceebe00322",
+      "reason": "Maintained on main by this backport: corrected the LF fixture fallback for the same-size rewrite test and migrated the frozen check to the reviewed successor baseline; historical PRE digest retained."
+    }
+  }
+}

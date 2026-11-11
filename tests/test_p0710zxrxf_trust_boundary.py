@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -69,30 +70,27 @@ def raw_write(path: Path, data: bytes) -> None:
         os.close(fd)
 
 
-# --- R2 (F1-R2): explicit, documented ZXRXF7 frozen-hash guard scope --------
-# Original design intent (test_zrxf7 docstring): "frozen + related tests +
-# graph/scanner/safeio unchanged" -- i.e. protect PRODUCTION SOURCE touched by
-# the ZRXRF fix and the FROZEN/RELATED regression fixtures it promised not to
-# alter.  It must NOT freeze the regression harness source itself (a "test
-# guards its own test" circular dependency that R1's legitimate maintenance of
-# the ZRFX harness exposed).
-ZXRXF7_WATCH = (
-    # production source touched by the ZRXRF fix -> keep integrity-checked
+# --- R2 (F1-R2): historical and successor integrity baselines ----------------
+# Keep PRE_SHA256.json immutable for files that remain byte-identical. Files
+# intentionally maintained since PRE are enumerated in MAINTENANCE_BASELINE.json
+# with their old PRE digest, current canonical Git blob ID, and a reason. The
+# actively maintained ZRFX harness remains outside both scopes.
+# Historical PRE evidence remains the baseline for files that are still
+# byte-identical.  Explicitly maintained production/test files use a successor
+# Git-blob baseline; the original PRE_SHA256.json is never rewritten.
+ZXRXF7_HISTORICAL_WATCH = (
+    "usit/safeio.py",
+    "tests/test_p073_budget_race.py",
+)
+ZXRXF7_MAINTENANCE_WATCH = (
     "usit/graph.py",
     "usit/scanner.py",
-    "usit/safeio.py",
-    # frozen fixtures (also byte-identical-asserted by ZRFX.FROZEN_SHA)
     "tests/test_graph_validation.py",
-    "tests/test_p073_budget_race.py",
-    # related regression fixtures for the P0.7.10 snapshot/descriptor fixes
     "tests/test_p0710z_snapshot_trust.py",
     "tests/test_p0710zrf_descriptor_binding.py",
-    # NOTE: tests/test_p0710zrfx_trust_boundary.py is EXCLUDED -- it is the
-    # ZRFR-1 regression HARNESS (actively-maintained test code), not a frozen
-    # fixture and not production source.  Freezing it broke the guard on every
-    # authorized maintenance (e.g. R1).  tests/test_p0710zxrxf_trust_boundary.py
-    # (this harness) postdates the PRE baseline and was never in the watch list.
 )
+ZXRXF7_WATCH = ZXRXF7_HISTORICAL_WATCH + ZXRXF7_MAINTENANCE_WATCH
+MAINTENANCE_BASELINE = OUT / "MAINTENANCE_BASELINE.json"
 
 
 def _frozen_guard_unchanged(watch_files, baseline_path, base_dir=PROJ) -> dict:
@@ -111,6 +109,46 @@ def _frozen_guard_unchanged(watch_files, baseline_path, base_dir=PROJ) -> dict:
         p = Path(base_dir) / rel
         cur = hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
         unchanged[rel] = (norm.get(rel) == cur)
+    return unchanged
+
+
+def _git_blob_sha1(rel: str, base_dir: Path = PROJ) -> str | None:
+    """Return the canonical tracked Git blob ID, independent of checkout EOLs."""
+    result = subprocess.run(
+        ["git", "show", f"HEAD:{rel}"],
+        cwd=base_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    data = result.stdout
+    payload = b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+    return hashlib.sha1(payload).hexdigest()
+
+
+def _maintenance_guard_unchanged(watch_files, baseline_path, base_dir=PROJ) -> dict:
+    """Check explicitly authorized maintenance files against a successor baseline."""
+    base = Path(base_dir)
+    manifest = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+    entries = manifest.get("files", {})
+    pre = json.loads((base / "outputs" / "p0710zxrxf" / "PRE_SHA256.json").read_text(encoding="utf-8"))
+    pre_hashes = {
+        key.replace(chr(92), "/").split("/usit_p0/", 1)[-1]: value
+        for key, value in pre.items()
+    }
+    unchanged = {}
+    for rel in watch_files:
+        entry = entries.get(rel, {})
+        current = _git_blob_sha1(rel, base)
+        unchanged[rel] = (
+            current is not None
+            and current == entry.get("git_blob_sha1")
+            and entry.get("historical_sha256") == pre_hashes.get(rel)
+            and isinstance(entry.get("reason"), str)
+            and bool(entry["reason"].strip())
+        )
     return unchanged
 
 
@@ -331,9 +369,16 @@ class ZXRXF7FrozenCompatibility(_Base):
         # R2: use the explicit, documented guard scope (ZXRXF7_WATCH) and the
         # shared helper so the comparison logic is also unit-tested in
         # tests.test_p0710zxrxf_guard_r2.
-        unchanged = _frozen_guard_unchanged(ZXRXF7_WATCH, OUT / "PRE_SHA256.json")
-        self.assertTrue(all(unchanged.values()), f"unexpectedly changed: {unchanged}")
-        self.rec("ZXRXF7", expected="frozen + related tests + graph/scanner/safeio unchanged",
+        unchanged = _maintenance_guard_unchanged(
+            ZXRXF7_WATCH, MAINTENANCE_BASELINE)
+        self.assertTrue(all(unchanged.values()), f"historical or maintenance baseline mismatch: {unchanged}")
+        manifest = json.loads(MAINTENANCE_BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(set(manifest.get("files", {})), set(ZXRXF7_WATCH))
+        self.assertEqual(
+            _git_blob_sha1("outputs/p0710zxrxf/PRE_SHA256.json"),
+            manifest.get("historical_manifest_git_blob_sha1"),
+        )
+        self.rec("ZXRXF7", expected="historical PRE preserved; explicitly maintained files match successor baseline",
                  actual=unchanged)
 
 

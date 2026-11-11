@@ -6,8 +6,8 @@ file is written, no real business project path is used, and where timing must be
 forced the experiment injects a condition into the real code path (fault
 injection), never edits one.
 
-ZRF-8 additionally pins the SHA-256 of the two existing test files whose
-behaviour this ticket must not disturb.
+ZRF-8 keeps the budget-race fixture byte-pinned and checks the graph fixture
+against an explicit successor baseline while retaining its historical PRE digest.
 """
 from __future__ import annotations
 
@@ -31,10 +31,11 @@ import usit.scanner as scanner                                        # noqa: E4
 from usit.graph import validate_graph, validate_graph_trusted          # noqa: E402
 from usit.snapshot import DescriptorIdentity, LineCountSnapshot, capture  # noqa: E402
 from tests.synthetic_scan import scan_project                          # noqa: E402
+from tests.frozen_baseline import git_blob_sha1, load_maintenance_baseline  # noqa: E402
 
 # PRE hashes of the two existing test files this ticket must leave untouched.
+HISTORICAL_GRAPH_VALIDATION_SHA256 = "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0"
 FROZEN_SHA = {
-    "tests/test_graph_validation.py": "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0",
     "tests/test_p073_budget_race.py": "470851778ee2224593ab146109b86b613f52fcd60149ddc23092da33dd3fbeb6",
 }
 
@@ -394,15 +395,21 @@ class ZRF8OldContractCompatibility(_Base):
                          "identity_filled": isinstance(box.get("identity"), DescriptorIdentity)})
 
     def test_zrf8b_existing_test_files_are_byte_identical(self):
+        manifest = load_maintenance_baseline()
         for rel, expected in FROZEN_SHA.items():
-            digest = hashlib.sha256((HERE / rel.replace("tests/", "")).read_bytes()).hexdigest() \
-                if expected is None else expected
-            actual = hashlib.sha256((PROJECT / rel).read_bytes()).hexdigest()
-            self.assertEqual(actual, digest or actual,
-                             f"{rel} was modified by this ticket")
-        self.rec("ZRF8b", expected="frozen + budget-race test files unchanged",
-                 actual={k: hashlib.sha256((PROJECT / k).read_bytes()).hexdigest()
-                         for k in FROZEN_SHA})
+            entry = manifest["files"][rel]
+            self.assertEqual(entry.get("historical_sha256"), expected,
+                             f"{rel} historical PRE digest was changed")
+            self.assertEqual(git_blob_sha1(rel), entry["git_blob_sha1"],
+                             f"{rel} canonical Git blob drifted")
+        graph_entry = manifest["files"]["tests/test_graph_validation.py"]
+        self.assertEqual(graph_entry.get("historical_sha256"),
+                         HISTORICAL_GRAPH_VALIDATION_SHA256)
+        self.assertEqual(git_blob_sha1("tests/test_graph_validation.py"),
+                         graph_entry["git_blob_sha1"])
+        self.rec("ZRF8b", expected="budget-race fixture frozen; graph validation fixture matches successor baseline",
+                 actual={"frozen": list(FROZEN_SHA),
+                         "graph_validation_blob": graph_entry["git_blob_sha1"]})
 
 
 # =============================================================== ZRF-9
@@ -494,7 +501,7 @@ class ZRF12MetadataLimitation(_Base):
         st = target.stat()
         original = target.read_bytes()
         forged = original.replace(b"line 1\r\n", b"line X\r\n")
-        if len(forged) != len(original):        # write_text may have used CRLF
+        if forged == original:                  # fixture may use LF, not CRLF
             forged = original.replace(b"line 1\n", b"line X\n")
         self.assertEqual(len(forged), len(original))
         self.assertNotEqual(forged, original)

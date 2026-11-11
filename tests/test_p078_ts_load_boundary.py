@@ -137,7 +137,8 @@ class NormalLocalTypescriptTests(unittest.TestCase):
             availability = parser_availability(iso.root)
             self.assertTrue(availability["available"], str(availability))
             self.assertEqual(availability["version"], EXPECTED_TYPESCRIPT_VERSION)
-            self.assertEqual(Path(availability["ts_lib_real_path"]).resolve(), iso.ts.resolve())
+            self.assertEqual(availability["typescript_install"], "PROJECT_LOCAL")
+            self.assertEqual(availability["typescript_install_path_status"], "VERIFIED_WITHIN_USIT_ROOT")
 
             proj = iso.synthetic_project()
             result = analyze_js_ts_project(proj, [], js_ts_source=_memory_source(proj))
@@ -456,16 +457,17 @@ class FailClosedTests(unittest.TestCase):
 # I. structured load-path reporting
 # ---------------------------------------------------------------------------
 class StructuredLoadPathTests(unittest.TestCase):
-    def test_availability_reports_verifiable_load_path(self):
+    def test_availability_reports_verified_install_status_without_path_disclosure(self):
         iso = _IsoRoot(self)
         iso.install_local()
         with patch.object(js_ts_parser, "USIT_ROOT", iso.root):
             availability = parser_availability(iso.root)
-        self.assertIn("ts_lib", availability)
-        self.assertIn("ts_lib_real_path", availability)
-        self.assertEqual(Path(availability["ts_lib_real_path"]).resolve(), iso.ts.resolve())
-        # No unrelated environment secrets may be echoed back.
+        self.assertEqual(availability["typescript_install"], "PROJECT_LOCAL")
+        self.assertEqual(availability["typescript_install_path_status"], "VERIFIED_WITHIN_USIT_ROOT")
+        # Public capability output must never disclose absolute install paths.
         blob = json.dumps(availability, ensure_ascii=False)
+        self.assertNotIn("node_modules/typescript", blob)
+        self.assertNotIn(str(iso.base), blob)
         for secret_key in ("USERPROFILE", "PASSWORD", "TOKEN", "SECRET"):
             self.assertNotIn(secret_key, blob)
 
@@ -488,8 +490,10 @@ class StructuredLoadPathTests(unittest.TestCase):
             with patch.object(js_ts_parser, "USIT_ROOT", iso.root):
                 availability = parser_availability(iso.root)
             self.assertFalse(availability["available"])
-            self.assertTrue(availability.get("ts_lib"))
+            self.assertEqual(availability.get("typescript_install"), "PROJECT_LOCAL")
+            self.assertEqual(availability.get("typescript_install_path_status"), "NOT_VERIFIED")
             self.assertTrue(availability.get("reason"))
+            self.assertNotIn("node_modules/typescript", json.dumps(availability))
         finally:
             _restore(iso.ts, backup)
 

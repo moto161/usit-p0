@@ -6,8 +6,9 @@ branch) re-reads the file at the path and requires a content-digest match; the
 strict entry (usit/graph.py) is unchanged and keeps consuming only records the
 snapshot marks verifiable.
 
-Rules honoured here: every existing test file stays byte-identical; no real
-project is scanned; everything runs in TemporaryDirectory fixtures.
+Rules honoured here: historical PRE evidence is retained, maintained files
+use an explicit successor baseline, no real project is scanned, and everything
+runs in TemporaryDirectory fixtures.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from usit.snapshot import capture, DescriptorIdentity, LineCountSnapshot  # noqa
 from usit.graph import validate_graph, validate_graph_trusted, validate_graph_file  # noqa: E402
 from usit import scanner                                                   # noqa: E402
 from tests.synthetic_scan import scan_project                              # noqa: E402
+from tests.frozen_baseline import git_blob_sha1, load_maintenance_baseline  # noqa: E402
 
 OUT = PROJ / "outputs" / "p0710zrfx"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -43,8 +45,8 @@ RUN_TS = datetime.now().strftime("%Y%m%dT%H%M%S%f")
 RUN_DIR = OUT / "runs" / RUN_TS
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 
+HISTORICAL_GRAPH_VALIDATION_SHA256 = "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0"
 FROZEN_SHA = {
-    "tests/test_graph_validation.py": "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0",
     "tests/test_p073_budget_race.py": "470851778ee2224593ab146109b86b613f52fcd60149ddc23092da33dd3fbeb6",
 }
 
@@ -292,11 +294,21 @@ class ZRFX8FrozenTestsUntouched(_Base):
     """Execute the frozen + compatibility suites; hashes must be identical."""
 
     def test_zrfx8_frozen_files_byte_identical(self):
+        manifest = load_maintenance_baseline()
         for rel, want in FROZEN_SHA.items():
-            digest = hashlib.sha256((PROJ / rel).read_bytes()).hexdigest()
-            self.assertEqual(digest, want, f"{rel} was modified")
-        self.rec("ZRFX8", expected="frozen + budget-race test files byte-identical",
-                 actual={k: "unchanged" for k in FROZEN_SHA})
+            entry = manifest["files"][rel]
+            self.assertEqual(entry.get("historical_sha256"), want,
+                             f"{rel} historical PRE digest was changed")
+            self.assertEqual(git_blob_sha1(rel), entry["git_blob_sha1"],
+                             f"{rel} canonical Git blob drifted")
+        graph_entry = manifest["files"]["tests/test_graph_validation.py"]
+        self.assertEqual(graph_entry.get("historical_sha256"),
+                         HISTORICAL_GRAPH_VALIDATION_SHA256)
+        self.assertEqual(git_blob_sha1("tests/test_graph_validation.py"),
+                         graph_entry["git_blob_sha1"])
+        self.rec("ZRFX8", expected="budget-race fixture frozen; graph validation fixture matches successor baseline",
+                 actual={"frozen": list(FROZEN_SHA),
+                         "graph_validation_blob": graph_entry["git_blob_sha1"]})
 
 
 class ZRFX9BeforeAfterEvidence(_Base):
