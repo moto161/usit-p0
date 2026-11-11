@@ -244,6 +244,9 @@ class BusinessEvidenceVerifierTests(unittest.TestCase):
         upload = next(item for item in result["business_function_evidence"]
                       if item["business_function_id"] == "bf-upload")
         self.assertEqual(upload["code_coverage_detail"]["verification_status"], "SOURCE_BINDING_NOT_VERIFIED")
+        self.assertEqual(upload["code_coverage_status"], "UNKNOWN")
+        self.assertIsNone(upload["line_coverage_percent"])
+        self.assertNotEqual(upload["code_coverage_detail"]["verification_status"], "SOURCE_BYTES_MATCHED")
 
     def test_coverage_counts_percent_status_and_nonfinite_values_are_cross_checked(self):
         import copy
