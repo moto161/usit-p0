@@ -281,6 +281,56 @@ def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[st
     return paths
 
 
+def _strip_url_suffix(skeleton_path: str) -> str:
+    """Cut a URL skeleton at the first literal "?" or "#" outside "{?}"."""
+    out: list[str] = []
+    i = 0
+    while i < len(skeleton_path):
+        if skeleton_path.startswith("{?}", i):
+            out.append("{?}")
+            i += 3
+            continue
+        ch = skeleton_path[i]
+        if ch in ("?", "#"):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _is_route_param_segment(segment: str) -> bool:
+    """True when a route path segment is a parameter, not a literal name."""
+    if segment == "*":
+        return True
+    if segment.startswith(":") and len(segment) > 1:
+        return True
+    return segment.startswith("{") and segment.endswith("}") and len(segment) > 2
+
+
+def _match_template_path(skeleton_path: str, route_path: str) -> bool:
+    """Match a URL skeleton against a route pattern, segment by segment.
+
+    A "{?}" skeleton segment matches exactly one route parameter segment
+    (":id", "{id}" or "*"); literal segments must match exactly; a
+    placeholder inside a segment ("/photos/prefix-{?}") never matches, and
+    the segment counts must agree. A literal call path never matches a
+    parameter segment here -- that is a different rule, not this one.
+    """
+    skeleton = _strip_url_suffix(skeleton_path)
+    route = _strip_url_suffix(route_path)
+    skeleton_segments = [seg for seg in skeleton.split("/") if seg]
+    route_segments = [seg for seg in route.split("/") if seg]
+    if len(skeleton_segments) != len(route_segments):
+        return False
+    for skeleton_segment, route_segment in zip(skeleton_segments, route_segments):
+        if skeleton_segment == route_segment:
+            continue
+        if skeleton_segment == "{?}" and _is_route_param_segment(route_segment):
+            continue
+        return False
+    return True
+
+
 def project_business_graph(graph: Mapping[str, Any],
                            semantics: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copied graph with evidence-linked business candidate nodes.
@@ -1053,7 +1103,10 @@ def project_business_graph(graph: Mapping[str, Any],
         str(item.get("event_name") or ""), str(item.get("binding_expression") or ""),
     ))
     # S2.13-B: exact frontend HTTP method/path literal -> documented/code endpoint candidates.
+    # F2: template skeletons (TEMPLATE_METHOD_PATH) also match route patterns
+    # segment by segment; a "{?}" segment matches one route parameter segment.
     endpoint_by_contract: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    endpoints_by_method: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     for endpoint_node in nodes:
         if endpoint_node.get("business_kind") != "endpoint":
             continue
@@ -1063,6 +1116,7 @@ def project_business_graph(graph: Mapping[str, Any],
         path = str(details.get("endpoint") or details.get("path") or "")
         if method and path:
             endpoint_by_contract.setdefault((method, path), []).append(endpoint_node)
+            endpoints_by_method.setdefault(method, []).append((path, endpoint_node))
     api_endpoint_links = []
     for edge in edges:
         if edge.get("method") != "typescript-api-client-call":
@@ -1080,19 +1134,45 @@ def project_business_graph(graph: Mapping[str, Any],
                 "resolution_status": "EXACT_MATCH", "confidence": "STATIC_INFERENCE",
                 "verification_status": "NOT_VERIFIED",
             })
-        else:
+            continue
+        template_matches: list[dict[str, Any]] = []
+        if (edge.get("resolution_status") == "TEMPLATE_METHOD_PATH"
+                and method and isinstance(path, str)):
+            template_matches = [
+                node for route_path, node in endpoints_by_method.get(method, [])
+                if _match_template_path(path, route_path)
+            ]
+        if len(template_matches) == 1:
+            endpoint = template_matches[0]
+            api_endpoint_links.append({
+                "api_call_node_id": edge.get("target"), "endpoint_node_id": endpoint.get("id"),
+                "method": method, "path": path, "source_file": evidence.get("path"),
+                "line": evidence.get("line"), "caller_symbol_id": edge.get("caller_symbol_id"),
+                "resolution_status": "TEMPLATE_MATCH", "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+            })
+            continue
+        if template_matches:
             api_endpoint_links.append({
                 "api_call_node_id": edge.get("target"), "method": method or None, "path": path,
                 "source_file": evidence.get("path"), "line": evidence.get("line"),
                 "caller_symbol_id": edge.get("caller_symbol_id"),
-                "resolution_status": (
-                    edge.get("resolution_status")
-                    if edge.get("resolution_status") != "LITERAL_METHOD_PATH"
-                    else ("NO_MATCH" if not matches else "AMBIGUOUS")
-                ),
-                "candidate_endpoint_ids": sorted(item.get("id") for item in matches),
+                "resolution_status": "AMBIGUOUS",
+                "candidate_endpoint_ids": sorted(item.get("id") for item in template_matches),
                 "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
             })
+            continue
+        resolution = edge.get("resolution_status")
+        if resolution in ("LITERAL_METHOD_PATH", "TEMPLATE_METHOD_PATH"):
+            resolution = "NO_MATCH" if not matches else "AMBIGUOUS"
+        api_endpoint_links.append({
+            "api_call_node_id": edge.get("target"), "method": method or None, "path": path,
+            "source_file": evidence.get("path"), "line": evidence.get("line"),
+            "caller_symbol_id": edge.get("caller_symbol_id"),
+            "resolution_status": resolution,
+            "candidate_endpoint_ids": sorted(item.get("id") for item in matches),
+            "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+        })
     # Join UI entrypoints to API endpoints only through resolved call-graph edges.
     calls_by_caller: dict[str, list[str]] = {}
     for edge in edges:
@@ -1123,7 +1203,7 @@ def project_business_graph(graph: Mapping[str, Any],
             if depth < 8:
                 queue.extend((target, depth + 1) for target in sorted(calls_by_caller.get(symbol_id, [])))
         for link in found:
-            if link.get("resolution_status") != "EXACT_MATCH":
+            if link.get("resolution_status") not in ("EXACT_MATCH", "TEMPLATE_MATCH"):
                 continue
             frontend_business_chains.append({
                 "source_file": binding.get("source_file"), "event_line": binding.get("line"),

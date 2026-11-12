@@ -94,6 +94,78 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
             self.assertEqual(call["resolution_status"], "EXTERNAL", call)
             self.assertIn("lib.es5.d.ts", call.get("target", {}).get("file", ""))
 
+    def test_template_literal_fetch_url_resolves_to_skeleton_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "api.js").write_text(
+                "function loadPhoto(id) { return fetch(`/api/photos/${id}`); }\n",
+                encoding="utf-8",
+            )
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = parsed["files"]["api.js"]["api_client_calls"]
+            self.assertEqual(len(calls), 1)
+            call = calls[0]
+            self.assertEqual(call["method"], "GET")
+            self.assertEqual(call["path"], "/api/photos/{?}")
+            self.assertEqual(call["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_template_literal_axios_url_with_multiple_segments(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "api.js").write_text(
+                "async function loadPosts(uid) { return axios.get(`/api/users/${uid}/posts`); }\n",
+                encoding="utf-8",
+            )
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = parsed["files"]["api.js"]["api_client_calls"]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["path"], "/api/users/{?}/posts")
+            self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_base_url_prefix_template_resolves_to_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "api.js").write_text(
+                "const BASE = 'https://api.example.com';\n"
+                "function loadPhoto(id) { return fetch(`${BASE}/api/photos/${id}`); }\n",
+                encoding="utf-8",
+            )
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = parsed["files"]["api.js"]["api_client_calls"]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["path"], "/api/photos/{?}")
+            self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_plus_chain_url_literals(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "api.js").write_text(
+                "function a() { return axios.get(\"/api/\" + \"photos\"); }\n"
+                "function b(id) { return axios.get(\"/api/photos/\" + id); }\n",
+                encoding="utf-8",
+            )
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = sorted(parsed["files"]["api.js"]["api_client_calls"],
+                           key=lambda item: item["line"])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["path"], "/api/photos")
+            self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+            self.assertIsNone(calls[1]["path"])
+            self.assertEqual(calls[1]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_variable_url_stays_dynamic(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "api.js").write_text(
+                "function load(url) { return fetch(url); }\n",
+                encoding="utf-8",
+            )
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = parsed["files"]["api.js"]["api_client_calls"]
+            self.assertEqual(len(calls), 1)
+            self.assertIsNone(calls[0]["path"])
+            self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
 
 if __name__ == "__main__":
     unittest.main()

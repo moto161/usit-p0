@@ -18,6 +18,34 @@ def graph():
     }
 
 
+def _api_edge(route_path, resolution="TEMPLATE_METHOD_PATH", caller=None,
+              method="GET", target="api-client-call:server/routes/photos.js:2:0"):
+    edge = {
+        "source": "file:server/routes/photos.js", "target": target, "type": "references",
+        "method": "typescript-api-client-call", "route_method": method,
+        "route_path": route_path, "resolution_status": resolution,
+        "evidence": {"path": "server/routes/photos.js", "line": 2},
+    }
+    if caller is not None:
+        edge["caller_symbol_id"] = caller
+    return edge
+
+
+def _api_link_result(endpoint_paths, api_edges, extra_nodes=None, extra_edges=None):
+    source = graph()
+    for node in extra_nodes or []:
+        source["nodes"].append(node)
+    source["edges"].extend(api_edges)
+    source["edges"].extend(extra_edges or [])
+    semantics = {"endpoints": [
+        {"method": "GET", "path": path, "source": "server/routes/photos.js", "line": 5}
+        for path in endpoint_paths
+    ]}
+    result = project_business_graph(source, semantics)
+    endpoints = [n for n in result["nodes"] if n.get("business_kind") == "endpoint"]
+    return result, endpoints
+
+
 class BusinessGraphProjectionTests(unittest.TestCase):
     def test_links_records_only_to_exact_source_files(self):
         semantics = {
@@ -371,6 +399,62 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertTrue(by_line[9]["business_details"]["has_dynamic_parts"])
         # A record from before the flag existed defaults to False.
         self.assertFalse(by_line[12]["business_details"]["has_dynamic_parts"])
+
+    def test_template_skeleton_matches_single_route_parameter_endpoint(self):
+        result, endpoints = _api_link_result(["/photos/:id"], [_api_edge("/photos/{?}")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "TEMPLATE_MATCH")
+        self.assertEqual(links[0]["endpoint_node_id"], endpoints[0]["id"])
+        self.assertEqual(links[0]["path"], "/photos/{?}")
+
+    def test_template_skeleton_with_two_same_shape_endpoints_is_ambiguous(self):
+        result, endpoints = _api_link_result(
+            ["/photos/:id", "/photos/:photoId"], [_api_edge("/photos/{?}")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "AMBIGUOUS")
+        self.assertEqual(links[0]["candidate_endpoint_ids"],
+                         sorted(n["id"] for n in endpoints))
+
+    def test_template_skeleton_without_match_is_no_match(self):
+        result, _endpoints = _api_link_result(["/photos/:id"], [_api_edge("/api/unknown/{?}")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "NO_MATCH")
+
+    def test_partial_segment_placeholder_does_not_match(self):
+        result, _endpoints = _api_link_result(["/photos/:id"], [_api_edge("/photos/prefix-{?}")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "NO_MATCH")
+
+    def test_template_skeleton_matches_brace_style_route_parameter(self):
+        result, endpoints = _api_link_result(["/photos/{id}"], [_api_edge("/photos/{?}")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "TEMPLATE_MATCH")
+        self.assertEqual(links[0]["endpoint_node_id"], endpoints[0]["id"])
+
+    def test_frontend_chain_includes_template_match(self):
+        handler = "symbol:web/app.tsx#loadPhoto:8"
+        binding_edge = {
+            "source": "file:web/app.tsx", "target": handler, "type": "references",
+            "method": "typescript-jsx-event-handler-binding",
+            "resolution_status": "RESOLVED", "event_name": "onClick",
+            "binding_expression": "onClick={loadPhoto}",
+            "evidence": {"path": "web/app.tsx", "line": 10},
+        }
+        result, endpoints = _api_link_result(
+            ["/photos/:id"], [_api_edge("/photos/{?}", caller=handler)],
+            extra_nodes=[{"id": "file:web/app.tsx", "type": "file",
+                          "label": "web/app.tsx", "evidence": {"path": "web/app.tsx"}}],
+            extra_edges=[binding_edge])
+        chains = result["business_understanding"]["frontend_business_chains"]
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0]["resolution_status"], "TEMPLATE_MATCH")
+        self.assertEqual(chains[0]["endpoint_node_id"], endpoints[0]["id"])
+        self.assertEqual(chains[0]["handler_symbol_id"], handler)
 
     def test_duplicate_same_file_handler_symbols_remain_ambiguous(self):
         source = graph()

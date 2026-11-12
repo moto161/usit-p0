@@ -162,6 +162,61 @@ function loc(sourceFile, node) {
   return { file_path: sourceFile.fileName, line: pos.line + 1, column: pos.character + 1 };
 }
 
+// F2: resolve a URL argument to its static skeleton, or null when the URL
+// is not a literal expression. Template substitutions become "{?}"
+// placeholders (one per span, whatever the span expression is); "+" chains
+// of literals concatenate; anything else (a variable, a call, a Request /
+// URL object) yields null -- the skeleton is never guessed.
+function resolveUrlSkeleton(node) {
+  if (!node) return null;
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isTemplateExpression(node)) {
+    let out = node.head.text;
+    for (const span of node.templateSpans) out += "{?}" + span.literal.text;
+    return out;
+  }
+  if (ts.isParenthesizedExpression(node)) return resolveUrlSkeleton(node.expression);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = resolveUrlSkeleton(node.left);
+    const right = resolveUrlSkeleton(node.right);
+    if (left === null || right === null) return null;
+    return left + right;
+  }
+  return null;
+}
+
+// Cut a skeleton path at the first literal "?" or "#" that is not part of
+// a "{?}" placeholder.
+function stripUrlSuffix(skeletonPath) {
+  let out = "";
+  for (let i = 0; i < skeletonPath.length; i++) {
+    if (skeletonPath.startsWith("{?}", i)) { out += "{?}"; i += 2; continue; }
+    const ch = skeletonPath[i];
+    if (ch === "?" || ch === "#") break;
+    out += ch;
+  }
+  return out;
+}
+
+// Take the path part of a URL skeleton, or null when there is none: a
+// skeleton starting with "/" is a path; a leading "{?}/" is a ${BASE_URL}
+// prefix; a literal scheme://host prefix is stripped to its path.
+function extractSkeletonPath(skeleton) {
+  if (typeof skeleton !== "string" || skeleton.length === 0) return null;
+  let candidate = null;
+  if (skeleton.startsWith("/")) {
+    candidate = skeleton;
+  } else if (skeleton.startsWith("{?}/")) {
+    candidate = skeleton.slice(3);
+  } else {
+    const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]+(\/.*)?$/.exec(skeleton);
+    if (m) candidate = m[1] || "/";
+  }
+  if (candidate === null || !candidate.startsWith("/")) return null;
+  const stripped = stripUrlSuffix(candidate);
+  return stripped.startsWith("/") && stripped.length > 0 ? stripped : null;
+}
+
 function diagnostic(code, severity, message, line, column) {
   const result = { code: String(code), severity: severity || "UNKNOWN", message: String(message || code) };
   if (line != null) result.line = line;
@@ -821,15 +876,33 @@ function main(input) {
                 }
               }
               const apiPosition = loc(sourceFile, node);
+              // F2: a single literal keeps the old rule exactly (a literal
+              // containing "?" / "#" / "$" stays dynamic); anything else
+              // resolves through the URL skeleton, whose "{?}" placeholders
+              // mark template interpolations.
+              let skeletonPath = null;
+              let apiResolution = "DYNAMIC_OR_UNSUPPORTED_URL";
+              if (literalUrl !== null) {
+                if (literalUrl.startsWith("/") && !/[?#{}$]/.test(literalUrl)) {
+                  skeletonPath = literalUrl;
+                  apiResolution = httpMethod ? "LITERAL_METHOD_PATH" : "DYNAMIC_OR_UNSUPPORTED_URL";
+                }
+              } else {
+                const skeleton = urlArg ? resolveUrlSkeleton(urlArg) : null;
+                skeletonPath = skeleton !== null ? extractSkeletonPath(skeleton) : null;
+                if (skeletonPath !== null && httpMethod) {
+                  apiResolution = skeletonPath.includes("{?}")
+                    ? "TEMPLATE_METHOD_PATH" : "LITERAL_METHOD_PATH";
+                }
+              }
               row.api_client_calls.push({
                 callee: calleeText, method: httpMethod,
-                path: literalUrl && literalUrl.startsWith("/") && !/[?#{}$]/.test(literalUrl) ? literalUrl : null,
+                path: skeletonPath,
                 url_expression: urlArg ? urlArg.getText(sourceFile).slice(0, 240) : null,
                 line: apiPosition.line, column: apiPosition.column,
                 caller_symbol_id: currentOwner ? currentOwner.symbol_id : null,
                 caller_name: currentOwner ? currentOwner.name : null,
-                resolution_status: literalUrl && literalUrl.startsWith("/") && !/[?#{}$]/.test(literalUrl) && httpMethod
-                  ? "LITERAL_METHOD_PATH" : "DYNAMIC_OR_UNSUPPORTED_URL",
+                resolution_status: apiResolution,
                 confidence: "STATIC_INFERENCE", verification_status: "NOT_VERIFIED",
               });
             }
