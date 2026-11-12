@@ -10,7 +10,8 @@ leaves the statement UNKNOWN -- the static skeleton is never guessed.
 Table names take the last segment of a possibly schema-qualified
 reference (``catalog.schema.table`` -> ``table``), with quoted
 identifiers unquoted; a segment that is not a plain identifier is
-dropped, never guessed.
+dropped, never guessed. Comma-joined tables in a FROM clause are
+recognized together (subquery items and table-function calls excepted).
 """
 from __future__ import annotations
 
@@ -74,6 +75,87 @@ def _normalize_table(reference: str) -> str | None:
     return name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name) else None
 
 
+_FROM_CLAUSE_END = re.compile(
+    r"\b(?:WHERE|GROUP|ORDER|LIMIT|HAVING|JOIN|ON|UNION|INTERSECT|EXCEPT)\b|;", re.I)
+_TABLE_REF_AT_START = re.compile(r"^\s*(" + _TABLE_REF + r")")
+
+
+def _split_top_level_commas(segment: str) -> list[str]:
+    """Split on commas that are not inside parentheses or quotes.
+
+    Tracks paren depth and single/double/backtick/bracket quoting (with
+    '' and "" escapes); a comma inside any of those does not split.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote: str | None = None
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+        if quote is not None:
+            current.append(ch)
+            if quote in ("'", '"') and ch == quote:
+                if i + 1 < len(segment) and segment[i + 1] == quote:
+                    current.append(quote)
+                    i += 2
+                    continue
+                quote = None
+            elif quote == "`" and ch == "`":
+                quote = None
+            elif quote == "]" and ch == "]":
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            current.append(ch)
+        elif ch == "[":
+            quote = "]"
+            current.append(ch)
+        elif ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _from_clause_tables(text: str) -> set[str]:
+    """Tables listed after FROM as comma-separated items.
+
+    Supplements the keyword scan: 'FROM photos, albums' yields both.
+    Subquery items and table-function calls are skipped -- their inner
+    tables are picked up by the per-FROM scan and the keyword scan.
+    """
+    found: set[str] = set()
+    for from_match in re.finditer(r"\bFROM\b", text, re.I):
+        start = from_match.end()
+        end_match = _FROM_CLAUSE_END.search(text, start)
+        segment = text[start:end_match.start() if end_match else len(text)]
+        for item in _split_top_level_commas(segment):
+            item = item.strip()
+            if not item or item.startswith("("):
+                continue
+            ref_match = _TABLE_REF_AT_START.match(item)
+            if ref_match is None:
+                continue
+            if item[ref_match.end():].lstrip().startswith("("):
+                continue  # table function call, e.g. generate_series(1, 10)
+            name = _normalize_table(ref_match.group(1))
+            if name is not None:
+                found.add(name)
+    return found
+
+
 def _parse_sql(sql: str) -> dict[str, Any]:
     text = sql.strip()
     if not text or re.search(r"\b(WITH|UNION|INTERSECT|EXCEPT)\b", text, re.I):
@@ -87,6 +169,7 @@ def _parse_sql(sql: str) -> dict[str, Any]:
         name = _normalize_table(match.group(1))
         if name is not None:
             table_names.add(name)
+    table_names |= _from_clause_tables(text)
     tables = sorted(table_names)
     columns: list[str] = []
     if operation == "SELECT":

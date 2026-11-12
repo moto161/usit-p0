@@ -276,6 +276,74 @@ class DatabaseAccessExtractionTests(unittest.TestCase):
         self.assertEqual(rows[0]["tables"], [])
         self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
 
+    def test_comma_join_two_tables(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM photos, albums")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_comma_join_with_aliases(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos p, albums AS a WHERE p.id = a.photo_id")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["columns"], ["id"])
+
+    def test_comma_join_qualified_and_quoted_tables(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute(\'SELECT * FROM public.photos, "albums"\')\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+
+    def test_comma_join_three_tables(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM photos, albums, users")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos", "users"])
+
+    def test_comma_join_mixed_with_join(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM photos, albums JOIN users ON users.id = albums.owner_id")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos", "users"])
+
+    def test_comma_join_skips_subquery_item(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM photos, (SELECT id FROM albums) AS sub")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+
+    def test_comma_join_skips_table_function_call(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM photos, generate_series(1, 10)")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_comma_join_dynamic_placeholder_is_dropped(self):
+        rows = extract_database_accesses({
+            "repo/photoRepo.js": "const rows = await pool.query(`SELECT * FROM photos, ${table}`);\n"
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertTrue(rows[0]["has_dynamic_parts"])
+
+    def test_insert_select_from_comma_join(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("INSERT INTO archive SELECT * FROM photos, albums")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["albums", "archive", "photos"])
+        self.assertEqual(rows[0]["columns"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
