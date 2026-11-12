@@ -370,6 +370,23 @@ python -m usit analyze-gaps --semantics .\\business_semantics.json --graph .\\bu
 The test plan, evidence matrix and traceability matrix are optional. When `--traceability` is supplied, only rows marked `APPROVED_LINK` with an exact feature identity and a business_function_id present in the supplied graph can close a requirement traceability gap. The traceability matrix must carry the SHA-256 of the exact graph bytes supplied to `analyze-gaps`; stale or mismatched matrices are rejected. Unreviewed, rejected, targetless or ambiguous mappings do not close gaps. The output records SHA-256 hashes of every supplied input. P0/P1/P2 are triage priorities, not severity determinations. Requirements and acceptance criteria still require owner review.
 
 
+## R1 — 修复闭环：提议 → 授权 → 工作副本应用 → 回归验证
+
+`propose-fixes` turns a gap backlog into structured fix proposals; `apply-fix` applies one APPROVED proposal into a work copy outside the project and re-checks it. This is the first increment of the fix loop: the tool can now close a gap, not only report one.
+
+- Propose (read-only): R1 has exactly one automatic fix kind — an `UNDOCUMENTED_CODE_ENDPOINT` whose code path matches the documented format (`/api/...`) and whose project holds exactly one document with documented endpoints. The proposal inserts one `METHOD /api/path` line after the last documented endpoint in that document. Every other case (`DOCUMENTED_ENDPOINT_UNMATCHED`, `AMBIGUOUS_ENDPOINT_CONTRACT`, a non-`/api/` path, or several candidate documents) becomes a `NEEDS_HUMAN_DECISION` proposal with no change payload; other gap kinds get no proposal in this increment.
+- Approve: a review manifest reuses the ring-1 review pattern (`reviewed_by` / `reviewed_at` / `rationale` + `APPROVED` / `REJECTED`) and is bound to the exact proposals document by SHA-256. A proposal that is not APPROVED is never applied and never counted.
+- Apply: only into a work copy under the output directory, by exact anchor-text match — if the document moved on, application fails closed. The original project is never written; original bytes are snapshotted for rollback.
+- Verify: the S2.11 exact method/path reconciliation is re-run on the fixed work copy. The fix counts as `VERIFIED` only when the target row becomes `EXACT_MATCH` and no new mismatch appears. This is the targeted check for this fix, not a full re-scan or a full gate re-run.
+
+Example:
+
+```powershell
+python -m usit propose-fixes --gap-backlog .\verification-gap-backlog.json --semantics .\business_semantics.json --project .\target --out .\fix-proposals.json
+python -m usit apply-fix --proposals .\fix-proposals.json --approval-manifest .\fix-approval.json --proposal-id <id> --project .\target --out .\fix-workcopy --authorization-file .\authorization.json --semantics .\business_semantics.json
+```
+
+
 ## S2.19 — 多维度项目质量评估
 
 `assess-quality` combines business semantics, the business graph, optional test-design candidates, optional runtime evidence matrix and optional verification gap backlog into a single traceable report. It deliberately does **not** calculate an aggregate quality score.

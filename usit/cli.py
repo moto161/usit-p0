@@ -16,6 +16,7 @@ from .test_result_importer import ingest_junit_results
 from .coverage_result_importer import ingest_coverage_results
 from .business_evidence_verifier import verify_business_function_evidence
 from .verification_gap_analyzer import build_verification_gap_backlog
+from .fix_proposal import apply_fix, propose_fixes, verify_fix
 from .project_quality_assessment import assess_project_quality
 from .project_quality_report import render_project_quality_markdown
 from .business_traceability import build_business_traceability
@@ -271,6 +272,19 @@ def main(argv=None):
     ga.add_argument('--evidence-matrix',help='Optional verify-evidence output JSON')
     ga.add_argument('--traceability',help='Optional trace-business output JSON; must be bound to the exact graph bytes')
     ga.add_argument('--out',required=True,help='New JSON gap backlog path; existing files are never overwritten')
+    pf=sub.add_parser('propose-fixes',help='Generate structured fix proposals from a gap backlog (read-only; proposes, never applies)')
+    pf.add_argument('--gap-backlog',required=True,help='analyze-gaps output JSON')
+    pf.add_argument('--semantics',required=True,help='business_semantics.json')
+    pf.add_argument('--project',required=True,help='Absolute project root; read-only, used only to locate the target document')
+    pf.add_argument('--out',required=True,help='New JSON proposals path; existing files are never overwritten')
+    af=sub.add_parser('apply-fix',help='Apply one APPROVED fix proposal into a work copy outside the project and verify it; never writes the project')
+    af.add_argument('--proposals',required=True,help='propose-fixes output JSON')
+    af.add_argument('--approval-manifest',required=True,help='Review manifest JSON bound to the proposals document')
+    af.add_argument('--proposal-id',required=True,help='proposal_id to apply')
+    af.add_argument('--project',required=True,help='Absolute project root; read-only, never written')
+    af.add_argument('--out',required=True,help='Work-copy output directory outside the project root')
+    af.add_argument('--authorization-file',required=True,help='External JSON authorization record bound to project, action and output')
+    af.add_argument('--semantics',required=True,help='business_semantics.json for the regression check')
     qa=sub.add_parser('assess-quality',help='Summarize multidimensional project quality from evidence artifacts; no aggregate score')
     qa.add_argument('--semantics',required=True,help='business_semantics.json')
     qa.add_argument('--graph',required=True,help='business_knowledge_graph.json')
@@ -624,6 +638,40 @@ def main(argv=None):
             output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
             summary={key:result[key] for key in ("schema_version","business_function_count","gap_count","gap_kind_counts","priority_counts")}
             summary["result_path"]=str(output)
+            print(json.dumps(summary,ensure_ascii=False,indent=2))
+            return 0
+        if a.cmd=='propose-fixes':
+            gaps_bytes,gaps_doc=_read_bounded_json(a.gap_backlog,20*1024*1024)
+            sem_bytes,sem_doc=_read_bounded_json(a.semantics,20*1024*1024)
+            output=Path(a.out).expanduser()
+            if output.is_symlink(): raise ValueError("output must not be a symbolic link")
+            output=output.resolve()
+            if output.exists(): raise ValueError("proposals output already exists; choose a new path to preserve prior evidence")
+            result=propose_fixes(gaps_doc,sem_doc,a.project)
+            output.parent.mkdir(parents=True,exist_ok=True)
+            output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+            summary={"schema_version":result["schema_version"],"proposal_count":result["proposal_count"],
+                     "status_counts":{s:sum(1 for p in result["proposals"] if p["status"]==s) for s in ("PROPOSED","NEEDS_HUMAN_DECISION")},
+                     "skipped_kinds":result["skipped_kinds"],"result_path":str(output)}
+            print(json.dumps(summary,ensure_ascii=False,indent=2))
+            return 0
+        if a.cmd=='apply-fix':
+            auth=load_authorization_file(a.authorization_file,a.project,a.out)
+            proposals_bytes,proposals_doc=_read_bounded_json(a.proposals,20*1024*1024)
+            manifest_bytes,manifest_doc=_read_bounded_json(a.approval_manifest,20*1024*1024)
+            sem_bytes,sem_doc=_read_bounded_json(a.semantics,20*1024*1024)
+            output=Path(a.out).expanduser()
+            output.parent.mkdir(parents=True,exist_ok=True)
+            applied=apply_fix(proposals_doc,manifest_doc,a.proposal_id,a.project,a.out)
+            proposal=next(p for p in proposals_doc["proposals"] if p["proposal_id"]==a.proposal_id)
+            verification=verify_fix(proposal,a.out,sem_doc)
+            result_path=Path(a.out).expanduser().resolve()/"fix-result.json"
+            result={"schema_version":1,"applied":applied,"verification":verification,
+                    "note":"Work copy only; the original project was never written. Verification re-runs only the S2.11 reconciliation for the fixed row."}
+            result_path.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+            summary={"proposal_id":a.proposal_id,"applied":applied["applied"],"work_copy":applied["work_copy"],
+                     "verification":verification["status"],"gap_closed":verification["gap_closed"],
+                     "new_mismatches":verification["new_mismatches"],"result_path":str(result_path)}
             print(json.dumps(summary,ensure_ascii=False,indent=2))
             return 0
         if a.cmd=='adapt-android-events':

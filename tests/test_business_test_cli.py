@@ -132,6 +132,139 @@ class BusinessTestCliTests(unittest.TestCase):
             self.assertIn("output already exists", stderr.getvalue())
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
 
+    def test_propose_fixes_writes_proposals_outside_project(self):
+        with tempfile.TemporaryDirectory(prefix="usit-business-cli-") as td:
+            base = Path(td).resolve()
+            project = base / "project"
+            (project / "docs").mkdir(parents=True)
+            (project / "server" / "routes").mkdir(parents=True)
+            (project / "docs" / "api.md").write_text(
+                "# API\n\nGET /api/albums\nPOST /api/albums\n", encoding="utf-8")
+            (project / "server" / "routes" / "photos.js").write_text(
+                "router.get('/api/photos', async (req, res) => {});\n", encoding="utf-8")
+            before = {
+                p.relative_to(project).as_posix(): p.read_bytes()
+                for p in project.rglob("*") if p.is_file()
+            }
+            gaps_path = base / "gaps.json"
+            gaps_path.write_text(json.dumps({
+                "schema_version": "usit-verification-gap-backlog-v1",
+                "gaps": [{
+                    "gap_id": "g1", "gap_kind": "UNDOCUMENTED_CODE_ENDPOINT",
+                    "scope": "API_CONTRACT", "target": "GET /api/photos",
+                    "priority": "P1", "reason": "reason", "action": "action",
+                    "evidence": [{"path": "server/routes/photos.js", "line": 1, "kind": "code_route"}],
+                }],
+            }), encoding="utf-8")
+            sem_path = base / "semantics.json"
+            sem_path.write_text(json.dumps({
+                "endpoint_contract_alignment": [
+                    {"status": "EXACT_MATCH", "method": "GET", "path": "/api/albums",
+                     "document_evidence": {"source": "docs/api.md", "line": 3},
+                     "code_evidence": [{"method": "GET", "path": "/api/albums", "source": "server/routes/photos.js", "line": 1}]},
+                    {"status": "EXACT_MATCH", "method": "POST", "path": "/api/albums",
+                     "document_evidence": {"source": "docs/api.md", "line": 4},
+                     "code_evidence": [{"method": "POST", "path": "/api/albums", "source": "server/routes/photos.js", "line": 1}]},
+                    {"status": "CODE_ENDPOINT_NOT_DOCUMENTED", "method": "GET", "path": "/api/photos",
+                     "document_evidence": None,
+                     "code_evidence": [{"method": "GET", "path": "/api/photos", "source": "server/routes/photos.js", "line": 1}]},
+                ],
+            }), encoding="utf-8")
+            out_path = base / "fix-proposals.json"
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main([
+                    "propose-fixes",
+                    "--gap-backlog", str(gaps_path),
+                    "--semantics", str(sem_path),
+                    "--project", str(project),
+                    "--out", str(out_path),
+                ])
+            self.assertEqual(exit_code, 0)
+            proposals = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertEqual(proposals["proposal_count"], 1)
+            self.assertEqual(proposals["proposals"][0]["status"], "PROPOSED")
+            self.assertEqual(proposals["proposals"][0]["change"]["new_text"], "GET /api/photos")
+            after = {
+                p.relative_to(project).as_posix(): p.read_bytes()
+                for p in project.rglob("*") if p.is_file()
+            }
+            self.assertEqual(before, after)
+
+    def test_apply_fix_writes_work_copy_and_verifies(self):
+        from usit.fix_proposal import propose_fixes, review_fix_proposals
+
+        with tempfile.TemporaryDirectory(prefix="usit-business-cli-") as td:
+            base = Path(td).resolve()
+            project = base / "project"
+            (project / "docs").mkdir(parents=True)
+            (project / "server" / "routes").mkdir(parents=True)
+            (project / "docs" / "api.md").write_text(
+                "# API\n\nGET /api/albums\nPOST /api/albums\n", encoding="utf-8")
+            (project / "server" / "routes" / "photos.js").write_text(
+                "router.get('/api/photos', async (req, res) => {});\n", encoding="utf-8")
+            gaps = {"schema_version": "usit-verification-gap-backlog-v1", "gaps": [{
+                "gap_id": "g1", "gap_kind": "UNDOCUMENTED_CODE_ENDPOINT",
+                "scope": "API_CONTRACT", "target": "GET /api/photos",
+                "priority": "P1", "reason": "reason", "action": "action",
+                "evidence": [{"path": "server/routes/photos.js", "line": 1, "kind": "code_route"}],
+            }]}
+            semantics = {"endpoint_contract_alignment": [
+                {"status": "EXACT_MATCH", "method": "GET", "path": "/api/albums",
+                 "document_evidence": {"source": "docs/api.md", "line": 3},
+                 "code_evidence": [{"method": "GET", "path": "/api/albums", "source": "server/routes/photos.js", "line": 1}]},
+                {"status": "EXACT_MATCH", "method": "POST", "path": "/api/albums",
+                 "document_evidence": {"source": "docs/api.md", "line": 4},
+                 "code_evidence": [{"method": "POST", "path": "/api/albums", "source": "server/routes/photos.js", "line": 1}]},
+                {"status": "CODE_ENDPOINT_NOT_DOCUMENTED", "method": "GET", "path": "/api/photos",
+                 "document_evidence": None,
+                 "code_evidence": [{"method": "GET", "path": "/api/photos", "source": "server/routes/photos.js", "line": 1}]},
+            ]}
+            proposals = propose_fixes(gaps, semantics, project)
+            proposal_id = proposals["proposals"][0]["proposal_id"]
+            manifest = review_fix_proposals(proposals, [{
+                "proposal_id": proposal_id, "decision": "APPROVED",
+                "reviewed_by": "owner", "reviewed_at": "2026-11-12T00:00:00Z",
+                "rationale": "internal endpoint, document it",
+            }])
+            proposals_path = base / "fix-proposals.json"
+            proposals_path.write_text(json.dumps(proposals), encoding="utf-8")
+            manifest_path = base / "fix-approval.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            sem_path = base / "semantics.json"
+            sem_path.write_text(json.dumps(semantics), encoding="utf-8")
+            out = base / "fix-work"
+            auth_path = base / "authorization.json"
+            auth_path.write_text(json.dumps(authorization_record(project, out)), encoding="utf-8")
+            before = {
+                p.relative_to(project).as_posix(): p.read_bytes()
+                for p in project.rglob("*") if p.is_file()
+            }
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main([
+                    "apply-fix",
+                    "--proposals", str(proposals_path),
+                    "--approval-manifest", str(manifest_path),
+                    "--proposal-id", proposal_id,
+                    "--project", str(project),
+                    "--out", str(out),
+                    "--authorization-file", str(auth_path),
+                    "--semantics", str(sem_path),
+                ])
+            self.assertEqual(exit_code, 0)
+            summary = json.loads(stdout.getvalue())
+            self.assertEqual(summary["verification"], "VERIFIED")
+            self.assertTrue(summary["gap_closed"])
+            self.assertEqual(
+                (out / "docs" / "api.md").read_text(encoding="utf-8"),
+                "# API\n\nGET /api/albums\nPOST /api/albums\nGET /api/photos\n")
+            after = {
+                p.relative_to(project).as_posix(): p.read_bytes()
+                for p in project.rglob("*") if p.is_file()
+            }
+            self.assertEqual(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()
