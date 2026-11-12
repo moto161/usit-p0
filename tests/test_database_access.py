@@ -422,26 +422,159 @@ class DatabaseAccessExtractionTests(unittest.TestCase):
         self.assertEqual(rows[0]["tables"], ["archive", "photos"])
         self.assertEqual(rows[0]["parse_status"], "RESOLVED")
 
-    def test_intersect_and_except_stay_unknown(self):
+    def test_intersect_and_except_tables_are_resolved(self):
+        # F7 changed this expectation: INTERSECT/EXCEPT branches are now
+        # recognized like UNION branches.
         for keyword in ("INTERSECT", "EXCEPT"):
             rows = extract_database_accesses({
                 "repo/photo_repo.py": f'cursor.execute("SELECT id FROM photos {keyword} SELECT id FROM albums")\n'
             })
             self.assertEqual(len(rows), 1, keyword)
-            self.assertEqual(rows[0]["parse_status"], "UNKNOWN", keyword)
-            self.assertEqual(rows[0]["tables"], [], keyword)
+            self.assertEqual(rows[0]["tables"], ["albums", "photos"], keyword)
+            self.assertEqual(rows[0]["columns"], ["id"], keyword)
+            self.assertEqual(rows[0]["parse_status"], "RESOLVED", keyword)
 
-    def test_non_initial_with_stays_unknown(self):
+    def test_subquery_leading_with_tables_are_resolved(self):
+        # F7 changed this expectation: a WITH inside a subquery is now
+        # collected and only its CTE name is excluded.
         rows = extract_database_accesses({
             "repo/photo_repo.py": 'cursor.execute("SELECT * FROM (WITH x AS (SELECT id FROM albums) SELECT id FROM x) AS s")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_dynamic_table_inside_cte_is_dropped(self):
+        rows = extract_database_accesses({
+            "repo/photoRepo.js": "const rows = await pool.query(`WITH x AS (SELECT id FROM ${table}) SELECT id FROM x`);\n"
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertTrue(rows[0]["has_dynamic_parts"])
+
+    def test_except_basic(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos EXCEPT SELECT id FROM albums")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["columns"], ["id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_intersect_all_with_where_clauses(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos WHERE id = 1 INTERSECT ALL SELECT id FROM albums WHERE id = 2")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_union_intersect_except_mixed_chain(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos UNION SELECT id FROM albums INTERSECT SELECT id FROM users")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos", "users"])
+
+    def test_intersect_mixed_with_comma_join(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM photos, albums INTERSECT SELECT * FROM users")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos", "users"])
+
+    def test_intersect_inside_cte_body(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH x AS (SELECT id FROM photos INTERSECT SELECT id FROM albums) SELECT id FROM x")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_intersect_columns_come_from_first_branch(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id, owner_id FROM photos INTERSECT SELECT id FROM albums")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["columns"], ["id", "owner_id"])
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+
+    def test_with_inside_join_subquery(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM photos JOIN (WITH y AS (SELECT id FROM albums) SELECT id FROM y) AS s ON photos.id = s.id")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_nested_with_inside_cte_body(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH a AS (WITH b AS (SELECT id FROM albums) SELECT id FROM b) SELECT id FROM a")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_two_subqueries_each_with_a_cte(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM (WITH x AS (SELECT id FROM albums) SELECT id FROM x) AS s1 JOIN (WITH y AS (SELECT id FROM users) SELECT id FROM y) AS s2 ON s1.id = s2.id")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "users"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_non_initial_with_shadowing_a_real_table(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM (WITH photos AS (SELECT id FROM albums) SELECT id FROM photos) AS s")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_non_initial_with_with_comma_join(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM (WITH x AS (SELECT id FROM albums) SELECT id FROM x) AS s, photos")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_as_materialized(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH x AS MATERIALIZED (SELECT id FROM photos) SELECT id FROM x")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_as_not_materialized(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH x AS NOT MATERIALIZED (SELECT id FROM photos) SELECT id FROM x")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_non_initial_with_as_materialized(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM (WITH x AS MATERIALIZED (SELECT id FROM albums) SELECT id FROM x) AS s")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_materialized_without_parens_stays_unknown(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM (WITH x AS MATERIALIZED SELECT id FROM albums) AS s")\n'
         })
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
         self.assertEqual(rows[0]["tables"], [])
 
-    def test_dynamic_table_inside_cte_is_dropped(self):
+    def test_dynamic_table_inside_non_initial_with_is_dropped(self):
         rows = extract_database_accesses({
-            "repo/photoRepo.js": "const rows = await pool.query(`WITH x AS (SELECT id FROM ${table}) SELECT id FROM x`);\n"
+            "repo/photoRepo.js": "const rows = await pool.query(`SELECT * FROM (WITH x AS (SELECT id FROM ${table}) SELECT id FROM x) AS s`);\n"
         })
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["tables"], [])

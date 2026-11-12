@@ -13,8 +13,9 @@ identifiers unquoted; a segment that is not a plain identifier is
 dropped, never guessed. Comma-joined tables in a FROM clause are
 recognized together (subquery items and table-function calls excepted).
 A sentence-initial WITH clause is stripped (its CTE names are excluded
-from tables); UNION branches are recognized together (INTERSECT/EXCEPT
-stay UNKNOWN).
+from tables); WITH clauses inside subqueries (possibly nested) are
+likewise collected and their CTE names excluded; UNION/INTERSECT/EXCEPT
+branches are recognized together; `AS [NOT] MATERIALIZED` is accepted.
 """
 from __future__ import annotations
 
@@ -204,15 +205,16 @@ def _scan_balanced_parens(text: str, start: int) -> int | None:
     return None
 
 
-def _strip_cte_clause(text: str) -> tuple[set[str], str] | None:
-    """Parse a sentence-initial WITH clause.
+def _parse_cte_clause(text: str, start: int) -> tuple[set[str], int, list[tuple[int, int]]] | None:
+    """Parse a WITH clause starting at start.
 
-    Returns (cte_names, main_query_text), or None when the clause does
-    not parse (AS MATERIALIZED, unbalanced parens, a missing AS, ...).
-    Only the sentence-initial WITH is handled; a WITH anywhere else is
-    rejected by the caller before this runs.
+    Returns (cte_names, end_pos, bodies), where end_pos is the index
+    just past the clause (start of the main query) and bodies are the
+    (start, end) spans of the CTE subquery bodies, or None when the
+    clause does not parse (AS MATERIALIZED without parens, unbalanced
+    parens, a missing AS, ...).
     """
-    pos = 0
+    pos = start
     with_match = re.match(r"WITH\b", text[pos:], re.I)
     if with_match is None:
         return None
@@ -221,6 +223,7 @@ def _strip_cte_clause(text: str) -> tuple[set[str], str] | None:
     if recursive_match is not None:
         pos += recursive_match.end()
     cte_names: set[str] = set()
+    bodies: list[tuple[int, int]] = []
     while True:
         pos = _skip_ws(text, pos)
         name_match = _TABLE_SEGMENT_RE.match(text, pos)
@@ -242,31 +245,65 @@ def _strip_cte_clause(text: str) -> tuple[set[str], str] | None:
         if as_match is None:
             return None
         pos = _skip_ws(text, pos + as_match.end())
+        # AS [NOT] MATERIALIZED only changes execution, not table identity.
+        materialized_match = re.match(r"(?:NOT\s+)?MATERIALIZED\b", text[pos:], re.I)
+        if materialized_match is not None:
+            pos = _skip_ws(text, pos + materialized_match.end())
+        body_start = pos
         body_close = _scan_balanced_parens(text, pos)
         if body_close is None:
             return None
+        bodies.append((body_start, body_close))
         pos = _skip_ws(text, body_close)
         if pos < len(text) and text[pos] == ",":
             pos += 1
             continue
         break
-    return cte_names, text[pos:]
+    return cte_names, pos, bodies
+
+
+def _collect_all_cte_names(text: str) -> set[str] | None:
+    """Collect every CTE name defined by any WITH clause in text.
+
+    Worklist over all ``\\bWITH\\b`` positions: each position is parsed
+    once; CTE bodies are scanned for further (nested) WITH clauses.
+    Returns None when any WITH clause fails to parse (fail closed).
+    """
+    cte_names: set[str] = set()
+    pending: list[int] = [m.start() for m in re.finditer(r"\bWITH\b", text, re.I)]
+    seen: set[int] = set()
+    while pending:
+        start = pending.pop()
+        if start in seen:
+            continue
+        seen.add(start)
+        parsed = _parse_cte_clause(text, start)
+        if parsed is None:
+            return None
+        names, _end, bodies = parsed
+        cte_names |= names
+        for body_start, body_end in bodies:
+            for match in re.finditer(r"\bWITH\b", text[body_start:body_end], re.I):
+                pending.append(body_start + match.start())
+    return cte_names
 
 
 def _parse_sql(sql: str) -> dict[str, Any]:
     text = sql.strip()
-    if not text or re.search(r"\b(INTERSECT|EXCEPT)\b", text, re.I):
+    if not text:
         return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
     cte_names: set[str] = set()
     main_text = text
-    with_matches = list(re.finditer(r"\bWITH\b", text, re.I))
-    if with_matches:
-        if with_matches[0].start() != 0 or len(with_matches) > 1:
+    if re.search(r"\bWITH\b", text, re.I):
+        collected = _collect_all_cte_names(text)
+        if collected is None:
             return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
-        stripped = _strip_cte_clause(text)
-        if stripped is None:
-            return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
-        cte_names, main_text = stripped
+        cte_names = collected
+        if re.match(r"WITH\b", text, re.I):
+            parsed = _parse_cte_clause(text, 0)
+            if parsed is None:
+                return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
+            main_text = text[parsed[1]:]
     first = re.match(r"^(SELECT|INSERT|UPDATE|DELETE)\b", main_text, re.I)
     if not first:
         return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
