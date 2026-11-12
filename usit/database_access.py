@@ -7,6 +7,10 @@ literals, implicit concatenation, ``+`` chains of literals, multiline
 static skeleton survives with ``?`` placeholders for interpolations. Any
 operand that is not a literal (a variable, a call, ``.format()``, ``%``)
 leaves the statement UNKNOWN -- the static skeleton is never guessed.
+Table names take the last segment of a possibly schema-qualified
+reference (``catalog.schema.table`` -> ``table``), with quoted
+identifiers unquoted; a segment that is not a plain identifier is
+dropped, never guessed.
 """
 from __future__ import annotations
 
@@ -15,10 +19,19 @@ import re
 from typing import Any
 
 _DB_METHODS = {"execute", "query", "raw"}
-_SQL_TABLE = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_$]*)\b", re.I)
+# One identifier segment: a bare identifier, or a quoted identifier
+# (double quotes with "" escapes, backticks, or square brackets).
+_TABLE_SEGMENT = r'(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")*"|`[^`]*`|\[[^\]]*\])'
+_TABLE_SEGMENT_RE = re.compile(_TABLE_SEGMENT)
+# A table reference: one segment, optionally dot-qualified
+# (catalog.schema.table, public."photos", "my schema".photos).
+# All groups are non-capturing, so the capture-group numbers of the
+# regexes below (table reference = 1, columns = 1) stay unchanged.
+_TABLE_REF = _TABLE_SEGMENT + r"(?:\s*\.\s*" + _TABLE_SEGMENT + r")*"
+_SQL_TABLE = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE)\s+(" + _TABLE_REF + r")", re.I)
 _SQL_SELECT = re.compile(r"^\s*SELECT\s+(.*?)\s+FROM\s+", re.I | re.S)
-_SQL_INSERT = re.compile(r"^\s*INSERT\s+INTO\s+[A-Za-z_][A-Za-z0-9_$]*\s*\(([^)]*)\)", re.I | re.S)
-_SQL_UPDATE = re.compile(r"^\s*UPDATE\s+[A-Za-z_][A-Za-z0-9_$]*\s+SET\s+(.*?)(?:\s+WHERE\s+|$)", re.I | re.S)
+_SQL_INSERT = re.compile(r"^\s*INSERT\s+INTO\s+" + _TABLE_REF + r"\s*\(([^)]*)\)", re.I | re.S)
+_SQL_UPDATE = re.compile(r"^\s*UPDATE\s+" + _TABLE_REF + r"\s+SET\s+(.*?)(?:\s+WHERE\s+|$)", re.I | re.S)
 _JS_CALL = re.compile(
     r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(execute|query|raw)\s*\("
 )
@@ -38,6 +51,29 @@ def _simple_columns(value: str) -> list[str]:
     return sorted(set(result))
 
 
+def _normalize_table(reference: str) -> str | None:
+    """Take the last segment of a (possibly qualified/quoted) table reference.
+
+    Schema/catalog qualifiers are dropped; quoted segments are unquoted
+    ("" inside double quotes becomes "). Returns None when the last
+    segment is not a plain identifier, so an unusable table name is
+    dropped instead of guessed.
+    """
+    segments = _TABLE_SEGMENT_RE.findall(reference)
+    if not segments:
+        return None
+    last = segments[-1]
+    if len(last) >= 2 and last[0] == '"' and last[-1] == '"':
+        name = last[1:-1].replace('""', '"')
+    elif len(last) >= 2 and last[0] == "`" and last[-1] == "`":
+        name = last[1:-1]
+    elif len(last) >= 2 and last[0] == "[" and last[-1] == "]":
+        name = last[1:-1]
+    else:
+        name = last
+    return name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name) else None
+
+
 def _parse_sql(sql: str) -> dict[str, Any]:
     text = sql.strip()
     if not text or re.search(r"\b(WITH|UNION|INTERSECT|EXCEPT)\b", text, re.I):
@@ -46,7 +82,12 @@ def _parse_sql(sql: str) -> dict[str, Any]:
     if not first:
         return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
     operation = first.group(1).upper()
-    tables = sorted(set(m.group(1) for m in _SQL_TABLE.finditer(text)))
+    table_names: set[str] = set()
+    for match in _SQL_TABLE.finditer(text):
+        name = _normalize_table(match.group(1))
+        if name is not None:
+            table_names.add(name)
+    tables = sorted(table_names)
     columns: list[str] = []
     if operation == "SELECT":
         match = _SQL_SELECT.match(text)

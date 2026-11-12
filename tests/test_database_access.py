@@ -208,6 +208,74 @@ class DatabaseAccessExtractionTests(unittest.TestCase):
         self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
         self.assertEqual(rows[0]["tables"], [])
 
+    def test_schema_qualified_table_takes_last_segment(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM catalog.dbo.photos WHERE id = 1")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_join_of_two_schema_qualified_tables(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT p.id FROM dbo.photos p JOIN public.albums a ON p.album_id = a.id")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_double_quoted_table_name(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute(\'SELECT id FROM "photos" WHERE id = 1\')\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_backtick_quoted_table_name(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM `photos` WHERE id = 1")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_bracket_quoted_table_name(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM [photos] WHERE id = 1")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_insert_into_schema_qualified_table_keeps_columns(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("INSERT INTO public.photos (id, url) VALUES (?, ?)")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id", "url"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_update_quoted_table_keeps_columns(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute(\'UPDATE "photos" SET url = ? WHERE id = ?\')\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UPDATE")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["url"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_quoted_table_name_with_space_is_dropped_not_guessed(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute(\'SELECT id FROM "my photos" WHERE id = 1\')\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
 
 if __name__ == "__main__":
     unittest.main()
