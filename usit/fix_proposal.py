@@ -255,9 +255,16 @@ def apply_fix(
         raise ValueError("change file must stay inside the project root")
     try:
         original = source.read_bytes()
-        text = original.decode("utf-8")
+        raw = original.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         raise ValueError(f"cannot read change target: {exc}") from exc
+    # Line endings: the proposal's anchor text comes from a universal-newline
+    # read (propose_fixes), but the bytes decoded here keep CRLF on Windows
+    # (write_text translates \n to os.linesep). Normalize for the anchor
+    # comparison and write back in the file's own line-ending style, so a
+    # CRLF document applies and verifies on every platform.
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
     anchor_line = change.get("anchor_line")
     anchor_text = change.get("anchor_text")
@@ -272,12 +279,12 @@ def apply_fix(
     ):
         raise ValueError("anchor line does not match the current document; refusing to apply")
     lines.insert(anchor_line, new_text)
-    fixed_text = "\n".join(lines)
+    fixed_text = newline.join(lines)
     work_file = (out / rel).resolve()
     if not overlaps(out, work_file):
         raise ValueError("work-copy path must stay inside the output directory")
     work_file.parent.mkdir(parents=True, exist_ok=True)
-    work_file.write_text(fixed_text, encoding="utf-8")
+    work_file.write_bytes(fixed_text.encode("utf-8"))
     snapshot_dir = out / ".usit-fix-snapshots" / proposal_id
     snapshot_file = (snapshot_dir / rel).resolve()
     if not overlaps(out, snapshot_file):

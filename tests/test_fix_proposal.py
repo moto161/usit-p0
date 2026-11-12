@@ -255,6 +255,38 @@ class FixProposalTests(unittest.TestCase):
             self.assertTrue(result["gap_closed"])
             self.assertEqual(result["new_mismatches"], [])
 
+    def test_apply_with_crlf_line_endings(self):
+        # Regression for CI Run #1577: on Windows the fixture doc is written
+        # with CRLF (write_text translates \n), while apply_fix decoded the
+        # bytes directly, so the anchor line carried a trailing \r and the
+        # exact-match check failed. CRLF bytes must apply and verify on
+        # every platform, keeping the file's own line-ending style.
+        with tempfile.TemporaryDirectory(prefix="usit-fix-") as td:
+            base = Path(td)
+            project = base / "project"
+            (project / "docs").mkdir(parents=True)
+            (project / "server" / "routes").mkdir(parents=True)
+            (project / "docs" / "api.md").write_bytes(
+                DOC_TEXT.replace("\n", "\r\n").encode("utf-8"))
+            (project / "server" / "routes" / "photos.js").write_text(ROUTE_TEXT, encoding="utf-8")
+            proposals = propose_fixes(self._backlog([self._undocumented_gap()]), self._semantics(), project)
+            proposal = proposals["proposals"][0]
+            self.assertEqual(proposal["status"], "PROPOSED")
+            manifest = review_fix_proposals(proposals, [{
+                "proposal_id": proposal["proposal_id"], "decision": "APPROVED",
+                "reviewed_by": "owner", "reviewed_at": "2026-11-12T00:00:00Z",
+                "rationale": "internal endpoint, document it",
+            }])
+            work = base / "work"
+            applied = apply_fix(proposals, manifest, proposal["proposal_id"], project, work)
+            self.assertTrue(applied["applied"])
+            self.assertEqual(
+                (work / "docs" / "api.md").read_bytes(),
+                "# API\r\n\r\nGET /api/albums\r\nPOST /api/albums\r\nGET /api/photos\r\n".encode("utf-8"),
+            )
+            result = verify_fix(proposal, work, self._semantics())
+            self.assertEqual(result["status"], "VERIFIED")
+
     def test_verify_unfixed_doc(self):
         with tempfile.TemporaryDirectory(prefix="usit-fix-") as td:
             base = Path(td)
