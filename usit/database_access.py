@@ -16,6 +16,9 @@ A sentence-initial WITH clause is stripped (its CTE names are excluded
 from tables); WITH clauses inside subqueries (possibly nested) are
 likewise collected and their CTE names excluded; UNION/INTERSECT/EXCEPT
 branches are recognized together; `AS [NOT] MATERIALIZED` is accepted.
+A literal holding several statements separated by top-level semicolons
+yields one record per SELECT/INSERT/UPDATE/DELETE statement (same source
+line); other fragments (BEGIN/COMMIT/SET/...) yield no record.
 """
 from __future__ import annotations
 
@@ -37,6 +40,9 @@ _SQL_TABLE = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE)\s+(" + _TABLE_REF + r")", 
 _SQL_SELECT = re.compile(r"^\s*SELECT\s+(.*?)\s+FROM\s+", re.I | re.S)
 _SQL_INSERT = re.compile(r"^\s*INSERT\s+INTO\s+" + _TABLE_REF + r"\s*\(([^)]*)\)", re.I | re.S)
 _SQL_UPDATE = re.compile(r"^\s*UPDATE\s+" + _TABLE_REF + r"\s+SET\s+(.*?)(?:\s+WHERE\s+|$)", re.I | re.S)
+# First word of a statement that yields a record: the four DML operations
+# plus WITH, whose main query is parsed by _parse_sql.
+_DML_FIRST = re.compile(r"^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b", re.I)
 _JS_CALL = re.compile(
     r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(execute|query|raw)\s*\("
 )
@@ -131,6 +137,86 @@ def _split_top_level_commas(segment: str) -> list[str]:
         i += 1
     parts.append("".join(current))
     return parts
+
+
+def _split_top_level_statements(text: str) -> list[str]:
+    """Split on semicolons at paren depth 0, outside quotes and comments.
+
+    Same single-pass scan shape as _split_top_level_commas, plus ``--``
+    line comments and ``/* ... */`` block comments treated as opaque:
+    a semicolon inside a string literal, a comment, or parentheses does
+    not split. Empty fragments (leading/trailing/double semicolons, blank
+    text) are dropped.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote: str | None = None
+    comment: str | None = None  # "--" or "/*"
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if comment == "--":
+            current.append(ch)
+            if ch == "\n":
+                comment = None
+            i += 1
+            continue
+        if comment == "/*":
+            current.append(ch)
+            if ch == "*" and i + 1 < len(text) and text[i + 1] == "/":
+                current.append("/")
+                comment = None
+                i += 2
+                continue
+            i += 1
+            continue
+        if quote is not None:
+            current.append(ch)
+            if quote in ("'", '"') and ch == quote:
+                if i + 1 < len(text) and text[i + 1] == quote:
+                    current.append(quote)
+                    i += 2
+                    continue
+                quote = None
+            elif quote == "`" and ch == "`":
+                quote = None
+            elif quote == "]" and ch == "]":
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            current.append(ch)
+        elif ch == "[":
+            quote = "]"
+            current.append(ch)
+        elif ch == "-" and i + 1 < len(text) and text[i + 1] == "-":
+            comment = "--"
+            current.append("-")
+            current.append("-")
+            i += 2
+            continue
+        elif ch == "/" and i + 1 < len(text) and text[i + 1] == "*":
+            comment = "/*"
+            current.append("/")
+            current.append("*")
+            i += 2
+            continue
+        elif ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif ch == ";" and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    parts.append("".join(current))
+    return [p for p in parts if p.strip()]
 
 
 def _from_clause_tables(text: str) -> set[str]:
@@ -602,7 +688,14 @@ def _extract_js(source: str) -> list[tuple[int, str, str | None, str, bool]]:
 
 
 def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, Any]]:
-    """Extract SQL calls whose statement is a literal expression; preserve UNKNOWN otherwise."""
+    """Extract SQL calls whose statement is a literal expression; preserve UNKNOWN otherwise.
+
+    A literal holding several statements separated by top-level semicolons
+    yields one record per SELECT/INSERT/UPDATE/DELETE statement (same
+    source line); other fragments yield no record. A call with no DML
+    fragment keeps today's single UNKNOWN record, parsed from the whole
+    text, so the fail-closed shape is unchanged.
+    """
     records: list[dict[str, Any]] = []
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
@@ -610,14 +703,20 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
         else:
             found = _extract_js(source)
         for line_no, callee, sql, parser, dynamic in found:
-            parsed = _parse_sql(sql) if isinstance(sql, str) else {
-                "operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"
-            }
-            records.append({
-                "source": path, "line": line_no, "callee": callee,
-                "access_method": callee.rsplit(".", 1)[-1],
-                **parsed, "parser": parser, "has_dynamic_parts": dynamic,
-                "confidence": "STATIC_INFERENCE",
-                "verification_status": "NOT_VERIFIED",
-            })
+            if isinstance(sql, str):
+                statements = _split_top_level_statements(sql)
+                dml = [s for s in statements if _DML_FIRST.match(s)]
+                parsed_list = [_parse_sql(s) for s in dml] if dml else [_parse_sql(sql)]
+            else:
+                parsed_list = [{
+                    "operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"
+                }]
+            for parsed in parsed_list:
+                records.append({
+                    "source": path, "line": line_no, "callee": callee,
+                    "access_method": callee.rsplit(".", 1)[-1],
+                    **parsed, "parser": parser, "has_dynamic_parts": dynamic,
+                    "confidence": "STATIC_INFERENCE",
+                    "verification_status": "NOT_VERIFIED",
+                })
     return records

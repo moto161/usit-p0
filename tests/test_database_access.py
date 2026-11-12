@@ -581,6 +581,155 @@ class DatabaseAccessExtractionTests(unittest.TestCase):
         self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
         self.assertTrue(rows[0]["has_dynamic_parts"])
 
+    # F8: multi-statement literals split on top-level semicolons.
+
+    def test_two_select_statements_yield_two_records(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos; SELECT id FROM albums")\n'
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r["operation"] for r in rows], ["SELECT", "SELECT"])
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[1]["tables"], ["albums"])
+        self.assertEqual(rows[0]["columns"], ["id"])
+        self.assertEqual(rows[1]["columns"], ["id"])
+        self.assertEqual(rows[0]["line"], rows[1]["line"])
+        self.assertEqual(rows[0]["callee"], rows[1]["callee"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+        self.assertEqual(rows[1]["parse_status"], "RESOLVED")
+
+    def test_select_then_insert_yields_two_records(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos; INSERT INTO albums (title) VALUES (%s)")\n'
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id"])
+        self.assertEqual(rows[1]["operation"], "INSERT")
+        self.assertEqual(rows[1]["tables"], ["albums"])
+        self.assertEqual(rows[1]["columns"], ["title"])
+
+    def test_update_then_delete_yields_two_records(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("UPDATE photos SET title=%s; DELETE FROM albums WHERE id=%s")\n'
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["operation"], "UPDATE")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["title"])
+        self.assertEqual(rows[1]["operation"], "DELETE")
+        self.assertEqual(rows[1]["tables"], ["albums"])
+        self.assertEqual(rows[1]["columns"], [])
+
+    def test_begin_before_select_is_skipped_not_unknown(self):
+        # Headline F8 fix: today this whole call is one UNKNOWN record.
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("BEGIN; SELECT id FROM photos")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_set_and_commit_fragments_yield_no_record(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SET x = 1; SELECT id FROM photos; COMMIT")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_three_selects_with_comma_join_in_third(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos; SELECT name FROM albums; SELECT * FROM users, logs")\n'
+        })
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[1]["tables"], ["albums"])
+        self.assertEqual(rows[2]["tables"], ["logs", "users"])
+
+    def test_cte_scope_is_isolated_per_statement(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM recent; WITH recent AS (SELECT id FROM logs) SELECT id FROM recent")\n'
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["tables"], ["recent"])
+        self.assertEqual(rows[1]["tables"], ["logs"])
+
+    def test_trailing_and_double_semicolons_yield_no_empty_record(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos;")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos;; SELECT id FROM albums;")\n'
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[1]["tables"], ["albums"])
+
+    def test_semicolon_inside_string_literal_does_not_split(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("INSERT INTO logs (note) VALUES (\'a;b\')")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["logs"])
+
+    def test_semicolon_inside_line_comment_does_not_split(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("""SELECT id FROM photos -- 备注; 换行\nWHERE id = 1; SELECT id FROM albums""")\n'
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[1]["tables"], ["albums"])
+
+    def test_dynamic_second_statement_is_unknown_not_guessed(self):
+        rows = extract_database_accesses({
+            "repo/photoRepo.js": "const rows = await pool.query(`SELECT id FROM photos; SELECT id FROM ${t}`);\n"
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+        self.assertTrue(rows[1]["has_dynamic_parts"])
+        self.assertEqual(rows[1]["tables"], [])
+        self.assertEqual(rows[1]["parse_status"], "UNKNOWN")
+
+    def test_pure_non_dml_keeps_one_unknown_record(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("BEGIN; COMMIT")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_javascript_multi_statement_yields_two_records(self):
+        rows = extract_database_accesses({
+            "repo/photoRepo.js": 'await pool.query("SELECT id FROM photos; SELECT id FROM albums");\n'
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[1]["tables"], ["albums"])
+
+    def test_with_leading_statement_then_select(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH recent AS (SELECT id FROM photos) SELECT id FROM recent; SELECT id FROM albums")\n'
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[1]["tables"], ["albums"])
+
+    def test_drop_fragment_yields_no_record(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos; DROP TABLE albums")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
 
 if __name__ == "__main__":
     unittest.main()
