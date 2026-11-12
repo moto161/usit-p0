@@ -12,6 +12,9 @@ reference (``catalog.schema.table`` -> ``table``), with quoted
 identifiers unquoted; a segment that is not a plain identifier is
 dropped, never guessed. Comma-joined tables in a FROM clause are
 recognized together (subquery items and table-function calls excepted).
+A sentence-initial WITH clause is stripped (its CTE names are excluded
+from tables); UNION branches are recognized together (INTERSECT/EXCEPT
+stay UNKNOWN).
 """
 from __future__ import annotations
 
@@ -156,11 +159,115 @@ def _from_clause_tables(text: str) -> set[str]:
     return found
 
 
+def _skip_ws(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    return pos
+
+
+def _scan_balanced_parens(text: str, start: int) -> int | None:
+    """Index just past the ')' matching the '(' at start, or None.
+
+    Quote-aware: a ')' inside a single/double/backtick/bracket quoted
+    region does not close the parens.
+    """
+    if start >= len(text) or text[start] != "(":
+        return None
+    depth = 0
+    quote: str | None = None
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if quote is not None:
+            if quote in ("'", '"') and ch == quote:
+                if i + 1 < len(text) and text[i + 1] == quote:
+                    i += 2
+                    continue
+                quote = None
+            elif quote == "`" and ch == "`":
+                quote = None
+            elif quote == "]" and ch == "]":
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+        elif ch == "[":
+            quote = "]"
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _strip_cte_clause(text: str) -> tuple[set[str], str] | None:
+    """Parse a sentence-initial WITH clause.
+
+    Returns (cte_names, main_query_text), or None when the clause does
+    not parse (AS MATERIALIZED, unbalanced parens, a missing AS, ...).
+    Only the sentence-initial WITH is handled; a WITH anywhere else is
+    rejected by the caller before this runs.
+    """
+    pos = 0
+    with_match = re.match(r"WITH\b", text[pos:], re.I)
+    if with_match is None:
+        return None
+    pos += with_match.end()
+    recursive_match = re.match(r"\s+RECURSIVE\b", text[pos:], re.I)
+    if recursive_match is not None:
+        pos += recursive_match.end()
+    cte_names: set[str] = set()
+    while True:
+        pos = _skip_ws(text, pos)
+        name_match = _TABLE_SEGMENT_RE.match(text, pos)
+        if name_match is None:
+            return None
+        name = _normalize_table(name_match.group(0))
+        if name is not None:
+            cte_names.add(name)
+        pos = _skip_ws(text, name_match.end())
+        # Optional column list "(...)" -- only a column list when AS follows it.
+        if pos < len(text) and text[pos] == "(":
+            close = _scan_balanced_parens(text, pos)
+            if close is None:
+                return None
+            if not re.match(r"AS\b", text[close:].lstrip(), re.I):
+                return None
+            pos = _skip_ws(text, close)
+        as_match = re.match(r"AS\b", text[pos:], re.I)
+        if as_match is None:
+            return None
+        pos = _skip_ws(text, pos + as_match.end())
+        body_close = _scan_balanced_parens(text, pos)
+        if body_close is None:
+            return None
+        pos = _skip_ws(text, body_close)
+        if pos < len(text) and text[pos] == ",":
+            pos += 1
+            continue
+        break
+    return cte_names, text[pos:]
+
+
 def _parse_sql(sql: str) -> dict[str, Any]:
     text = sql.strip()
-    if not text or re.search(r"\b(WITH|UNION|INTERSECT|EXCEPT)\b", text, re.I):
+    if not text or re.search(r"\b(INTERSECT|EXCEPT)\b", text, re.I):
         return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
-    first = re.match(r"^(SELECT|INSERT|UPDATE|DELETE)\b", text, re.I)
+    cte_names: set[str] = set()
+    main_text = text
+    with_matches = list(re.finditer(r"\bWITH\b", text, re.I))
+    if with_matches:
+        if with_matches[0].start() != 0 or len(with_matches) > 1:
+            return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
+        stripped = _strip_cte_clause(text)
+        if stripped is None:
+            return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
+        cte_names, main_text = stripped
+    first = re.match(r"^(SELECT|INSERT|UPDATE|DELETE)\b", main_text, re.I)
     if not first:
         return {"operation": "UNKNOWN", "tables": [], "columns": [], "parse_status": "UNKNOWN"}
     operation = first.group(1).upper()
@@ -170,18 +277,21 @@ def _parse_sql(sql: str) -> dict[str, Any]:
         if name is not None:
             table_names.add(name)
     table_names |= _from_clause_tables(text)
+    if cte_names:
+        lowered_cte = {name.lower() for name in cte_names}
+        table_names = {name for name in table_names if name.lower() not in lowered_cte}
     tables = sorted(table_names)
     columns: list[str] = []
     if operation == "SELECT":
-        match = _SQL_SELECT.match(text)
+        match = _SQL_SELECT.match(main_text)
         if match:
             columns = _simple_columns(match.group(1))
     elif operation == "INSERT":
-        match = _SQL_INSERT.match(text)
+        match = _SQL_INSERT.match(main_text)
         if match:
             columns = _simple_columns(match.group(1))
     elif operation == "UPDATE":
-        match = _SQL_UPDATE.match(text)
+        match = _SQL_UPDATE.match(main_text)
         if match:
             names = re.findall(r"(?:^|,)\s*([A-Za-z_][A-Za-z0-9_$]*)\s*=", match.group(1))
             columns = sorted(set(names))

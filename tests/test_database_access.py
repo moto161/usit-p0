@@ -44,12 +44,17 @@ class DatabaseAccessExtractionTests(unittest.TestCase):
         self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
         self.assertEqual(rows[0]["operation"], "UNKNOWN")
 
-    def test_cte_and_union_are_not_overclaimed(self):
+    def test_cte_tables_are_resolved_not_the_cte_name(self):
+        # F6 changed this expectation: the CTE's inner table is now
+        # recognized and only the CTE name itself is excluded.
         rows = extract_database_accesses({
             "repo/photo_repo.py": 'cursor.execute("WITH x AS (SELECT id FROM photos) SELECT id FROM x")\n'
         })
-        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
-        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
 
     def test_python_implicit_concatenation_across_lines(self):
         source = (
@@ -343,6 +348,105 @@ class DatabaseAccessExtractionTests(unittest.TestCase):
         self.assertEqual(rows[0]["operation"], "INSERT")
         self.assertEqual(rows[0]["tables"], ["albums", "archive", "photos"])
         self.assertEqual(rows[0]["columns"], [])
+
+    def test_union_two_branches(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos UNION SELECT id FROM albums")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["columns"], ["id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_union_all_with_where_clauses(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos WHERE id = 1 UNION ALL SELECT id FROM albums WHERE id = 2")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_union_three_branches(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT id FROM photos UNION SELECT id FROM albums UNION SELECT id FROM users")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos", "users"])
+
+    def test_union_mixed_with_comma_join(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM photos, albums UNION SELECT * FROM users")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos", "users"])
+
+    def test_cte_with_column_list(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH recent(id, owner_id) AS (SELECT id, owner_id FROM photos) SELECT id FROM recent")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["columns"], ["id"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_multiple_ctes_joined_in_main_query(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH a AS (SELECT id FROM photos), b AS (SELECT id FROM albums) SELECT id FROM a JOIN b ON a.id = b.id")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_cte_name_shadowing_a_real_table(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH photos AS (SELECT id FROM albums) SELECT id FROM photos")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_recursive_cte(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH RECURSIVE r AS (SELECT id FROM photos UNION ALL SELECT id FROM photos WHERE id > 1) SELECT id FROM r")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_with_clause_before_insert(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("WITH x AS (SELECT id FROM photos) INSERT INTO archive SELECT id FROM x")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["archive", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_intersect_and_except_stay_unknown(self):
+        for keyword in ("INTERSECT", "EXCEPT"):
+            rows = extract_database_accesses({
+                "repo/photo_repo.py": f'cursor.execute("SELECT id FROM photos {keyword} SELECT id FROM albums")\n'
+            })
+            self.assertEqual(len(rows), 1, keyword)
+            self.assertEqual(rows[0]["parse_status"], "UNKNOWN", keyword)
+            self.assertEqual(rows[0]["tables"], [], keyword)
+
+    def test_non_initial_with_stays_unknown(self):
+        rows = extract_database_accesses({
+            "repo/photo_repo.py": 'cursor.execute("SELECT * FROM (WITH x AS (SELECT id FROM albums) SELECT id FROM x) AS s")\n'
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+
+    def test_dynamic_table_inside_cte_is_dropped(self):
+        rows = extract_database_accesses({
+            "repo/photoRepo.js": "const rows = await pool.query(`WITH x AS (SELECT id FROM ${table}) SELECT id FROM x`);\n"
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertTrue(rows[0]["has_dynamic_parts"])
 
 
 if __name__ == "__main__":
