@@ -456,6 +456,70 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(chains[0]["endpoint_node_id"], endpoints[0]["id"])
         self.assertEqual(chains[0]["handler_symbol_id"], handler)
 
+    def test_literal_value_matches_single_route_parameter_endpoint(self):
+        result, endpoints = _api_link_result(
+            ["/photos/:id"], [_api_edge("/photos/123", resolution="LITERAL_METHOD_PATH")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "VALUE_MATCH")
+        self.assertEqual(links[0]["endpoint_node_id"], endpoints[0]["id"])
+        self.assertEqual(links[0]["path"], "/photos/123")
+
+    def test_exact_match_wins_over_value_match(self):
+        result, endpoints = _api_link_result(
+            ["/photos/list", "/photos/:id"],
+            [_api_edge("/photos/list", resolution="LITERAL_METHOD_PATH")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "EXACT_MATCH")
+        self.assertEqual(links[0]["endpoint_node_id"], endpoints[0]["id"])
+
+    def test_literal_value_with_two_same_shape_endpoints_is_ambiguous(self):
+        result, endpoints = _api_link_result(
+            ["/photos/:id", "/photos/:photoId"],
+            [_api_edge("/photos/123", resolution="LITERAL_METHOD_PATH")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "AMBIGUOUS")
+        self.assertEqual(links[0]["candidate_endpoint_ids"],
+                         sorted(n["id"] for n in endpoints))
+
+    def test_literal_value_without_param_endpoint_is_no_match(self):
+        result, _endpoints = _api_link_result(
+            ["/photos/list"], [_api_edge("/photos/123", resolution="LITERAL_METHOD_PATH")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "NO_MATCH")
+
+    def test_literal_value_matches_brace_style_route_parameter(self):
+        result, endpoints = _api_link_result(
+            ["/photos/{id}"], [_api_edge("/photos/123", resolution="LITERAL_METHOD_PATH")])
+        links = result["business_understanding"]["frontend_api_endpoint_links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["resolution_status"], "VALUE_MATCH")
+        self.assertEqual(links[0]["endpoint_node_id"], endpoints[0]["id"])
+
+    def test_frontend_chain_includes_value_match(self):
+        handler = "symbol:web/app.tsx#loadPhoto:8"
+        binding_edge = {
+            "source": "file:web/app.tsx", "target": handler, "type": "references",
+            "method": "typescript-jsx-event-handler-binding",
+            "resolution_status": "RESOLVED", "event_name": "onClick",
+            "binding_expression": "onClick={loadPhoto}",
+            "evidence": {"path": "web/app.tsx", "line": 10},
+        }
+        result, endpoints = _api_link_result(
+            ["/photos/:id"],
+            [_api_edge("/photos/123", resolution="LITERAL_METHOD_PATH", caller=handler)],
+            extra_nodes=[{"id": "file:web/app.tsx", "type": "file",
+                          "label": "web/app.tsx", "evidence": {"path": "web/app.tsx"}}],
+            extra_edges=[binding_edge])
+        chains = result["business_understanding"]["frontend_business_chains"]
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0]["resolution_status"], "VALUE_MATCH")
+        self.assertEqual(chains[0]["endpoint_node_id"], endpoints[0]["id"])
+        self.assertEqual(chains[0]["handler_symbol_id"], handler)
+
     def test_duplicate_same_file_handler_symbols_remain_ambiguous(self):
         source = graph()
         for line in (30, 45):

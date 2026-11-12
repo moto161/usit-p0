@@ -234,14 +234,14 @@ Important: `DETECTED` means only that a recognized source pattern was found. `NO
 
 ## S2.13-B — 前端 API 调用与后端接口候选关联
 
-TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调用形态提取 HTTP 方法、URL 字面量、调用文件/行号及所属函数符号。只有明确的绝对路径字面量（以 `/` 开头且不含查询/片段/模板变量）才参与精确匹配；模板字面量与字面量 `+` 链重建为静态骨架（插值以 `{?}` 占位），按段与路由模板匹配（`{?}` 段只匹配 `:id` / `{id}` / `*` 参数段），恰一个匹配记 `TEMPLATE_MATCH`；动态 URL 保留为未解析候选。与代码端点仅按大写 HTTP 方法 + 原始路径完全相等关联，不做路径归一化或猜测。
+TypeScript Compiler API 对有限的 `fetch`、`axios/http/api/client` 常见调用形态提取 HTTP 方法、URL 字面量、调用文件/行号及所属函数符号。只有明确的绝对路径字面量（以 `/` 开头且不含查询/片段/模板变量）才参与精确匹配；模板字面量与字面量 `+` 链重建为静态骨架（插值以 `{?}` 占位），按段与路由模板匹配（`{?}` 段只匹配 `:id` / `{id}` / `*` 参数段），恰一个匹配记 `TEMPLATE_MATCH`；字面量调用段也可填路由参数段（`/photos/123` 对 `/photos/:id`），恰一个匹配记 `VALUE_MATCH`，精确匹配优先于两者；动态 URL 保留为未解析候选。与代码端点仅按大写 HTTP 方法 + 原始路径完全相等关联，不做路径归一化或猜测。
 
 当 JSX 事件绑定唯一指向 handler，且通过唯一已解析函数调用边可达某 API 调用点时，业务摘要输出 `frontend_business_chains`。这是静态候选链，不证明 UI 运行时触发、网络请求成功、后端实际路由生效或业务结果正确；深度上限 8、访问符号上限 100。当前只覆盖有限 TS/JS 调用形态，不代表对所有前端框架/客户端封装的支持。
 
 
 ## S2.13-C — 跨前后端业务链测试候选
 
-对唯一精确匹配或唯一模板匹配的 UI 事件 → 命名 Handler → 有界已解析调用链 → HTTP 客户端调用 → 后端 method/path endpoint，进一步关联既有 endpoint execution path（后端 Handler、调用链、数据库访问、授权和身份/资源证据），由业务测试规划器生成 `frontend_backend_flow` 候选。只有 EXACT_MATCH 或 TEMPLATE_MATCH 且 endpoint execution path 唯一时才生成；动态 URL、未匹配或歧义链不生成此类候选。测试步骤覆盖真实页面触发、网络请求、后端执行、数据副作用、授权/资源边界和 UI 状态核对，但全部保持 CANDIDATE_NEEDS_REQUIREMENTS / NOT_EXECUTED。该候选是测试设计线索，不代表运行时功能已验证。
+对唯一精确匹配、唯一模板匹配或唯一值匹配的 UI 事件 → 命名 Handler → 有界已解析调用链 → HTTP 客户端调用 → 后端 method/path endpoint，进一步关联既有 endpoint execution path（后端 Handler、调用链、数据库访问、授权和身份/资源证据），由业务测试规划器生成 `frontend_backend_flow` 候选。只有 EXACT_MATCH、TEMPLATE_MATCH 或 VALUE_MATCH 且 endpoint execution path 唯一时才生成；动态 URL、未匹配或歧义链不生成此类候选。测试步骤覆盖真实页面触发、网络请求、后端执行、数据副作用、授权/资源边界和 UI 状态核对，但全部保持 CANDIDATE_NEEDS_REQUIREMENTS / NOT_EXECUTED。该候选是测试设计线索，不代表运行时功能已验证。
 
 
 ## S2.14 — 业务功能视图与测试覆盖关联

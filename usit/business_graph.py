@@ -331,6 +331,30 @@ def _match_template_path(skeleton_path: str, route_path: str) -> bool:
     return True
 
 
+def _match_value_path(call_path: str, route_path: str) -> bool:
+    """Match a literal call path against a route pattern, segment by segment.
+
+    A literal call segment matches one route parameter segment (":id",
+    "{id}" or "*"); literal segments must match exactly; the segment
+    counts must agree. A literal segment and a parameter value are
+    indistinguishable statically, so a match here is a STATIC_INFERENCE
+    only -- never proof the call hit that route.
+    """
+    call = _strip_url_suffix(call_path)
+    route = _strip_url_suffix(route_path)
+    call_segments = [seg for seg in call.split("/") if seg]
+    route_segments = [seg for seg in route.split("/") if seg]
+    if len(call_segments) != len(route_segments):
+        return False
+    for call_segment, route_segment in zip(call_segments, route_segments):
+        if call_segment == route_segment:
+            continue
+        if _is_route_param_segment(route_segment):
+            continue
+        return False
+    return True
+
+
 def project_business_graph(graph: Mapping[str, Any],
                            semantics: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copied graph with evidence-linked business candidate nodes.
@@ -1162,6 +1186,34 @@ def project_business_graph(graph: Mapping[str, Any],
                 "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
             })
             continue
+        # F3: a literal call segment fills one route parameter segment.
+        value_matches: list[dict[str, Any]] = []
+        if (edge.get("resolution_status") == "LITERAL_METHOD_PATH"
+                and method and isinstance(path, str)):
+            value_matches = [
+                node for route_path, node in endpoints_by_method.get(method, [])
+                if _match_value_path(path, route_path)
+            ]
+        if len(value_matches) == 1:
+            endpoint = value_matches[0]
+            api_endpoint_links.append({
+                "api_call_node_id": edge.get("target"), "endpoint_node_id": endpoint.get("id"),
+                "method": method, "path": path, "source_file": evidence.get("path"),
+                "line": evidence.get("line"), "caller_symbol_id": edge.get("caller_symbol_id"),
+                "resolution_status": "VALUE_MATCH", "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+            })
+            continue
+        if value_matches:
+            api_endpoint_links.append({
+                "api_call_node_id": edge.get("target"), "method": method or None, "path": path,
+                "source_file": evidence.get("path"), "line": evidence.get("line"),
+                "caller_symbol_id": edge.get("caller_symbol_id"),
+                "resolution_status": "AMBIGUOUS",
+                "candidate_endpoint_ids": sorted(item.get("id") for item in value_matches),
+                "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
+            })
+            continue
         resolution = edge.get("resolution_status")
         if resolution in ("LITERAL_METHOD_PATH", "TEMPLATE_METHOD_PATH"):
             resolution = "NO_MATCH" if not matches else "AMBIGUOUS"
@@ -1203,7 +1255,7 @@ def project_business_graph(graph: Mapping[str, Any],
             if depth < 8:
                 queue.extend((target, depth + 1) for target in sorted(calls_by_caller.get(symbol_id, [])))
         for link in found:
-            if link.get("resolution_status") not in ("EXACT_MATCH", "TEMPLATE_MATCH"):
+            if link.get("resolution_status") not in ("EXACT_MATCH", "TEMPLATE_MATCH", "VALUE_MATCH"):
                 continue
             frontend_business_chains.append({
                 "source_file": binding.get("source_file"), "event_line": binding.get("line"),
