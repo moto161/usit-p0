@@ -227,9 +227,12 @@ class FixProposalTests(unittest.TestCase):
                 "# API\n\nGET /api/albums\nPOST /api/albums\nGET /api/photos\n",
             )
             self.assertEqual((project / "docs" / "api.md").read_text(encoding="utf-8"), DOC_TEXT)
+            # The snapshot must hold the file's exact original bytes, whatever
+            # line endings the platform wrote (CRLF on Windows, LF elsewhere).
+            original_bytes = (project / "docs" / "api.md").read_bytes()
             snapshot = Path(applied["snapshot_path"])
-            self.assertEqual(snapshot.read_bytes(), DOC_TEXT.encode("utf-8"))
-            self.assertEqual(applied["snapshot_sha256"], hashlib.sha256(DOC_TEXT.encode("utf-8")).hexdigest())
+            self.assertEqual(snapshot.read_bytes(), original_bytes)
+            self.assertEqual(applied["snapshot_sha256"], hashlib.sha256(original_bytes).hexdigest())
             rolled = rollback_fix(applied, work)
             self.assertTrue(rolled["rolled_back"])
             self.assertEqual(work_doc.read_text(encoding="utf-8"), DOC_TEXT)
