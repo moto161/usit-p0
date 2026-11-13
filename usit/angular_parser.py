@@ -27,6 +27,7 @@ from typing import Any
 _COMPONENT_RE = re.compile(r"@Component\b")
 _CLASS_RE = re.compile(r"(?:export\s+)?(?:default\s+)?class\s+([A-Za-z_$][\w$]*)")
 _TEMPLATE_URL_RE = re.compile(r"""templateUrl\s*:\s*(?:"([^"]*)"|'([^']*)')""")
+_TEMPLATE_RE = re.compile(r"""template\s*:\s*(["'`])""")
 # <!-- ... --> comments are blanked (newlines kept) before matching, so a
 # commented-out binding never matches and offsets stay valid.
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
@@ -79,15 +80,15 @@ def _scan_balanced_parens(content: str, open_index: int) -> int | None:
     return None
 
 
-def find_angular_components(ts_source: str) -> list[dict[str, Any]]:
-    """Find ``@Component`` classes with a literal external ``templateUrl``.
+def _iter_component_decorators(ts_source: str):
+    """Yield ``(decorator_text, open_paren, close, line)`` per ``@Component``.
 
-    Returns ``{"class_name", "template_url", "line"}`` per component, in
-    file order.  Components without a literal ``templateUrl`` (inline
-    ``template:`` or no template) are skipped: inline templates are a
-    documented A1 limitation, not a failed parse.
+    ``decorator_text`` spans the balanced parens (inclusive);
+    ``open_paren``/``close`` are indexes into ``ts_source`` so a match
+    inside the decorator can be located in the file; ``line`` is the
+    1-based line of the ``@Component`` token.  Unbalanced decorators are
+    skipped (fail-closed).
     """
-    components: list[dict[str, Any]] = []
     for match in _COMPONENT_RE.finditer(ts_source):
         open_paren = ts_source.find("(", match.end())
         if open_paren < 0:
@@ -95,7 +96,41 @@ def find_angular_components(ts_source: str) -> list[dict[str, Any]]:
         close = _scan_balanced_parens(ts_source, open_paren)
         if close is None:
             continue
-        decorator = ts_source[open_paren:close]
+        line, _column = _line_col(ts_source, match.start())
+        yield ts_source[open_paren:close], open_paren, close, line
+
+
+def _scan_string(ts_source: str, open_quote_index: int) -> int | None:
+    """End index (exclusive) of the string starting at ``open_quote_index``.
+
+    Backslash escapes are honored, so an escaped quote never ends the
+    string.  ``None`` when the string never closes (fail-closed).
+    """
+    quote = ts_source[open_quote_index]
+    index = open_quote_index + 1
+    escaped = False
+    while index < len(ts_source):
+        char = ts_source[index]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            return index + 1
+        index += 1
+    return None
+
+
+def find_angular_components(ts_source: str) -> list[dict[str, Any]]:
+    """Find ``@Component`` classes with a literal external ``templateUrl``.
+
+    Returns ``{"class_name", "template_url", "line"}`` per component, in
+    file order.  Components without a literal ``templateUrl`` (inline
+    ``template:`` or no template) are skipped: inline templates are
+    handled by :func:`find_inline_templates`, not a failed parse.
+    """
+    components: list[dict[str, Any]] = []
+    for decorator, _open_paren, close, line in _iter_component_decorators(ts_source):
         url_match = _TEMPLATE_URL_RE.search(decorator)
         if url_match is None:
             continue
@@ -105,13 +140,60 @@ def find_angular_components(ts_source: str) -> list[dict[str, Any]]:
         class_match = _CLASS_RE.search(ts_source, close, close + 1000)
         if class_match is None:
             continue
-        line, _column = _line_col(ts_source, match.start())
         components.append({
             "class_name": class_match.group(1),
             "template_url": template_url,
             "line": line,
         })
     return components
+
+
+def find_inline_templates(ts_source: str) -> list[dict[str, Any]]:
+    """Find ``@Component`` classes with a literal inline ``template:``.
+
+    Returns ``{"class_name", "text", "start_line", "start_column", "line"}``
+    per component, in file order.  ``text`` is the raw string content
+    (quotes removed); ``start_line``/``start_column`` locate its first
+    character in the file; ``line`` is the ``@Component`` line.  A
+    component carrying a literal ``templateUrl`` is skipped (Angular
+    forbids both; the external template wins), as are non-literal
+    template values (a constant or variable reference) and unclosed
+    strings (fail-closed).
+    """
+    templates: list[dict[str, Any]] = []
+    for decorator, open_paren, close, line in _iter_component_decorators(ts_source):
+        if _TEMPLATE_URL_RE.search(decorator):
+            continue
+        template_match = _TEMPLATE_RE.search(decorator)
+        if template_match is None:
+            continue
+        quote_index = open_paren + template_match.start(1)
+        end = _scan_string(ts_source, quote_index)
+        if end is None:
+            continue
+        class_match = _CLASS_RE.search(ts_source, close, close + 1000)
+        if class_match is None:
+            continue
+        start_line, start_column = _line_col(ts_source, quote_index + 1)
+        templates.append({
+            "class_name": class_match.group(1),
+            "text": ts_source[quote_index + 1:end - 1],
+            "start_line": start_line,
+            "start_column": start_column,
+            "line": line,
+        })
+    return templates
+
+
+def inline_template_for_binding(text: str, start_line: int, start_column: int) -> str:
+    """Line/column-padded template text for binding extraction.
+
+    The padding aligns the template string's first content character with
+    its file position, so :func:`extract_angular_template_bindings`
+    returns file-relative line/column numbers directly (the same trick
+    Vue's line-padded script block uses).
+    """
+    return "\n" * (start_line - 1) + " " * (start_column - 1) + text
 
 
 def _blank_comments(html_source: str) -> str:

@@ -444,6 +444,69 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
             self.assertEqual(chain["handler_symbol_id"],
                              "symbol:web/photo-card.component.ts#savePhoto:11")
 
+    def test_angular_inline_template_binding_links_to_api_endpoint(self):
+        # A2: the template string lives in the component file; the binding
+        # evidence path is the .ts file and its line is the button's file line.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            web = root / "web"
+            web.mkdir()
+            (web / "photo-card.component.ts").write_text(
+                "import { Component } from '@angular/core';\n"
+                "import { HttpClient } from '@angular/common/http';\n"
+                "\n"
+                "@Component({\n"
+                "  selector: 'app-photo-card',\n"
+                "  template: `\n"
+                "    <button (click)=\"savePhoto()\">Save</button>\n"
+                "  `,\n"
+                "})\n"
+                "export class PhotoCardComponent {\n"
+                "  constructor(private http: HttpClient) {}\n"
+                "\n"
+                "  savePhoto() {\n"
+                "    this.http.get('/api/photos').subscribe((rows) => console.log(rows));\n"
+                "  }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            routes = root / "server" / "routes"
+            routes.mkdir(parents=True)
+            (routes / "photos.ts").write_text(
+                "import { Router } from 'express';\n"
+                "export function getPhotos(req: any, res: any) { res.json([]); }\n"
+                "export const router = Router();\n"
+                "router.get('/api/photos', getPhotos);\n",
+                encoding="utf-8",
+            )
+            from tests.synthetic_scan import scan_project
+            out = root.parent / (root.name + "-ng-inline-output")
+            scan_project(str(root), str(out), force=True)
+            graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+            bindings = [edge for edge in graph["edges"]
+                        if edge.get("method") == "angular-template-event-handler-binding"]
+            self.assertEqual(len(bindings), 1)
+            binding = bindings[0]
+            self.assertEqual(binding["event_name"], "click")
+            self.assertEqual(binding["resolution_status"], "RESOLVED")
+            self.assertEqual(binding["target"],
+                             "symbol:web/photo-card.component.ts#savePhoto:13")
+            self.assertEqual(binding["evidence"]["path"],
+                             "web/photo-card.component.ts")
+            self.assertEqual(binding["evidence"]["line"], 7)
+            from usit.business_graph import project_business_graph
+            semantics = {"features": [], "entities": [], "endpoints": [{
+                "method": "GET", "path": "/api/photos",
+                "source": "server/routes/photos.ts:4", "line": 4,
+                "handler_reference": "getPhotos"}]}
+            projected = project_business_graph(graph, semantics)
+            summary = projected["business_understanding"]
+            self.assertEqual(summary["frontend_business_chain_count"], 1)
+            chain = summary["frontend_business_chains"][0]
+            self.assertEqual((chain["method"], chain["path"]), ("GET", "/api/photos"))
+            self.assertEqual(chain["handler_symbol_id"],
+                             "symbol:web/photo-card.component.ts#savePhoto:13")
+
 
 if __name__ == "__main__":
     unittest.main()

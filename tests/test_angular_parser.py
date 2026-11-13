@@ -6,6 +6,8 @@ import unittest
 from usit.angular_parser import (
     extract_angular_template_bindings,
     find_angular_components,
+    find_inline_templates,
+    inline_template_for_binding,
     resolve_angular_bindings,
 )
 
@@ -168,6 +170,98 @@ class ResolveAngularBindingsTests(unittest.TestCase):
             "symbol:web/photo-card.component.ts#savePhoto:11",
             "symbol:web/photo-card.component.ts#savePhoto:30",
         ])
+
+
+class FindInlineTemplatesTests(unittest.TestCase):
+    _INLINE_COMPONENT_TS = (
+        "import { Component } from '@angular/core';\n"
+        "import { HttpClient } from '@angular/common/http';\n"
+        "\n"
+        "@Component({\n"
+        "  selector: 'app-photo-card',\n"
+        "  template: `\n"
+        "    <button (click)=\"savePhoto()\">Save</button>\n"
+        "  `,\n"
+        "})\n"
+        "export class PhotoCardComponent {\n"
+        "  constructor(private http: HttpClient) {}\n"
+        "\n"
+        "  savePhoto() {\n"
+        "    this.http.get('/api/photos').subscribe();\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def test_finds_backtick_multiline_inline_template(self):
+        templates = find_inline_templates(self._INLINE_COMPONENT_TS)
+        self.assertEqual(len(templates), 1)
+        template = templates[0]
+        self.assertEqual(template["class_name"], "PhotoCardComponent")
+        self.assertEqual(template["text"],
+                         "\n    <button (click)=\"savePhoto()\">Save</button>\n  ")
+        self.assertEqual((template["start_line"], template["start_column"]), (6, 14))
+        self.assertEqual(template["line"], 4)
+
+    def test_single_quote_single_line_template(self):
+        source = (
+            "@Component({ selector: 'app-x', template: '<button (click)=\"go()\">x</button>' })\n"
+            "export class InlineComponent {}\n"
+        )
+        templates = find_inline_templates(source)
+        self.assertEqual(len(templates), 1)
+        self.assertEqual(templates[0]["text"], '<button (click)="go()">x</button>')
+        self.assertEqual((templates[0]["start_line"], templates[0]["start_column"]),
+                         (1, 44))
+
+    def test_template_url_component_has_no_inline_template(self):
+        self.assertEqual(find_inline_templates(_COMPONENT_TS), [])
+
+    def test_non_literal_template_is_skipped(self):
+        source = (
+            "@Component({ selector: 'app-x', template: MY_TEMPLATE })\n"
+            "export class RefComponent {}\n"
+        )
+        self.assertEqual(find_inline_templates(source), [])
+
+    def test_multiple_inline_components_in_one_file(self):
+        source = (
+            "@Component({ template: `<button (click)=\"a()\">x</button>` })\n"
+            "export class AComponent {}\n"
+            "@Component({ template: `<button (click)=\"b()\">y</button>` })\n"
+            "export class BComponent {}\n"
+        )
+        templates = find_inline_templates(source)
+        self.assertEqual([t["class_name"] for t in templates],
+                         ["AComponent", "BComponent"])
+
+    def test_template_key_outside_decorator_is_ignored(self):
+        source = "const cfg = { template: '<button (click)=\"x()\">y</button>' };\n"
+        self.assertEqual(find_inline_templates(source), [])
+
+    def test_padded_binding_lines_map_to_file_lines(self):
+        template = find_inline_templates(self._INLINE_COMPONENT_TS)[0]
+        padded = inline_template_for_binding(
+            template["text"], template["start_line"], template["start_column"])
+        bindings = extract_angular_template_bindings(padded)
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual((bindings[0]["line"], bindings[0]["column"]), (7, 13))
+        self.assertEqual(bindings[0]["binding_expression"], "savePhoto()")
+
+    def test_inline_binding_resolves_to_component_method(self):
+        template = find_inline_templates(self._INLINE_COMPONENT_TS)[0]
+        padded = inline_template_for_binding(
+            template["text"], template["start_line"], template["start_column"])
+        symbols = [
+            {"name": "PhotoCardComponent", "kind": "class", "line": 10},
+            {"name": "savePhoto", "kind": "method", "line": 13},
+        ]
+        item = resolve_angular_bindings(
+            extract_angular_template_bindings(padded), symbols,
+            "web/photo-card.component.ts", "web/photo-card.component.ts")[0]
+        self.assertEqual(item["resolution_status"], "RESOLVED")
+        self.assertEqual(item["target"]["id"],
+                         "symbol:web/photo-card.component.ts#savePhoto:13")
+        self.assertEqual(item["target"]["path"], "web/photo-card.component.ts")
 
 
 if __name__ == "__main__":

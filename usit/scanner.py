@@ -10,7 +10,7 @@ from .parser_contract import CONTRACT_VERSION, parser_capabilities, adapt_graph_
 from .file_understanding import build_file_understanding, verify_understanding_identities
 from .js_ts_parser import analyze_js_ts_project, parser_availability
 from .vue_parser import vue_script_for_adapter, extract_vue_template_bindings, resolve_vue_bindings
-from .angular_parser import find_angular_components, extract_angular_template_bindings, resolve_angular_bindings
+from .angular_parser import find_angular_components, find_inline_templates, inline_template_for_binding, extract_angular_template_bindings, resolve_angular_bindings
 from .safety import (MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_READ_BYTES, MAX_SCAN_SECONDS,
                      MAX_OUTPUT_BYTES, MAX_CONCURRENCY, MAX_PARSER_TASK_SECONDS, ScanAuthorization, ScanBlocked,
                      canonical_project, canonical_output, is_reparse_point, overlaps)
@@ -1103,6 +1103,16 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                 resolve_angular_bindings(
                     extract_angular_template_bindings(template_text),
                     row.get('symbols', []), template_rel, row['path']))
+        # A2: inline `template:` strings live in the component file itself;
+        # their bindings hang on the component row (evidence path is the .ts
+        # file, at the template's file lines).
+        for inline in find_inline_templates(text):
+            padded = inline_template_for_binding(
+                inline["text"], inline["start_line"], inline["start_column"])
+            row.setdefault('angular_event_bindings', []).extend(
+                resolve_angular_bindings(
+                    extract_angular_template_bindings(padded),
+                    row.get('symbols', []), row['path'], row['path']))
     # P0.7.4: cross-file resolution runs as a supervised *subprocess* task too,
     # obeying the same per-task timeout and concurrency cap as per-file analysis.
     # The worker receives the Python source text the parent already read (never
