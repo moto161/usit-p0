@@ -774,6 +774,26 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(links[0]["resolution_status"], "TEMPLATE_MATCH")
         self.assertEqual(links[0]["endpoint_node_id"], endpoints[0]["id"])
 
+    def test_vue_template_binding_joins_frontend_chain(self):
+        handler = "symbol:web/PhotoCard.vue#savePhoto:7"
+        binding_edge = {
+            "source": "file:web/PhotoCard.vue", "target": handler, "type": "references",
+            "method": "vue-template-event-handler-binding",
+            "resolution_status": "RESOLVED", "event_name": "click",
+            "binding_expression": "savePhoto",
+            "evidence": {"path": "web/PhotoCard.vue", "line": 2},
+        }
+        result, endpoints = _api_link_result(
+            ["/photos"], [_api_edge("/photos", resolution="LITERAL_METHOD_PATH", caller=handler)],
+            extra_nodes=[{"id": "file:web/PhotoCard.vue", "type": "file",
+                          "label": "web/PhotoCard.vue", "evidence": {"path": "web/PhotoCard.vue"}}],
+            extra_edges=[binding_edge])
+        chains = result["business_understanding"]["frontend_business_chains"]
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0]["resolution_status"], "EXACT_MATCH")
+        self.assertEqual(chains[0]["endpoint_node_id"], endpoints[0]["id"])
+        self.assertEqual(chains[0]["handler_symbol_id"], handler)
+
     def test_frontend_chain_includes_template_match(self):
         handler = "symbol:web/app.tsx#loadPhoto:8"
         binding_edge = {

@@ -9,6 +9,7 @@ from .python_resolver import resolve_python_calls
 from .parser_contract import CONTRACT_VERSION, parser_capabilities, adapt_graph_v1
 from .file_understanding import build_file_understanding, verify_understanding_identities
 from .js_ts_parser import analyze_js_ts_project, parser_availability
+from .vue_parser import vue_script_for_adapter, extract_vue_template_bindings, resolve_vue_bindings
 from .safety import (MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_READ_BYTES, MAX_SCAN_SECONDS,
                      MAX_OUTPUT_BYTES, MAX_CONCURRENCY, MAX_PARSER_TASK_SECONDS, ScanAuthorization, ScanBlocked,
                      canonical_project, canonical_output, is_reparse_point, overlaps)
@@ -988,8 +989,18 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
         # root tsconfig/jsconfig) to the adapter.  The adapter then analyzes
         # in-memory content and never re-opens a project file by path, eliminating
         # the check-then-read race on JS/TS source that P0.7.4 still carried.
-        js_ts_source={rel:content_by_path[rel] for rel in content_by_path
-                      if Path(rel).suffix.lower() in {'.js','.jsx','.mjs','.cjs','.ts','.tsx'}}
+        # V1: a Vue SFC is not TypeScript, so only its <script> block (line
+        # padded, so adapter line numbers stay file-relative) is handed to
+        # the adapter; the template bindings are extracted separately below.
+        js_ts_source={}
+        for rel in content_by_path:
+            suffix=Path(rel).suffix.lower()
+            if suffix in {'.js','.jsx','.mjs','.cjs','.ts','.tsx'}:
+                js_ts_source[rel]=content_by_path[rel]
+            elif suffix=='.vue':
+                script=vue_script_for_adapter(content_by_path[rel])
+                if script is not None:
+                    js_ts_source[rel]=script
         js_ts_config={}
         for rel,raw in raw_by_rel.items():
             name=Path(rel).name
@@ -1009,7 +1020,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
     if any(d.get('code') in fatal_parser_codes for d in js_ts_result.get('project_diagnostics',[])):
         code=next(d['code'] for d in js_ts_result.get('project_diagnostics',[]) if d.get('code') in fatal_parser_codes)
         raise ScanBlocked(code,'The JavaScript/TypeScript parser did not complete; no graph was published.')
-    js_ts_paths={r['path'] for r in rows if r.get('language') in {'JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX'}}
+    js_ts_paths={r['path'] for r in rows if r.get('language') in {'JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX','Vue'}}
     js_ts_capabilities=parser_capabilities()['languages']
     if not js_ts_result.get('available'):
         for language in ('JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX'):
@@ -1056,6 +1067,17 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                 diags.append({'code':'SEMANTIC_PARSER_UNAVAILABLE','severity':'UNKNOWN',
                     'message':'Text candidates are not semantic parse results; syntax validity is not measured.'})
         row['analysis_degradation']=_degradation_metadata(row, row['language'])
+    # V1: Vue template event bindings resolve against the merged script
+    # symbols (adapter output when available, regex candidates otherwise).
+    for row in rows:
+        if row.get('language') != 'Vue':
+            continue
+        text = content_by_path.get(row['path'])
+        if not isinstance(text, str):
+            row['vue_event_bindings'] = []
+            continue
+        row['vue_event_bindings'] = resolve_vue_bindings(
+            extract_vue_template_bindings(text), row.get('symbols', []), row['path'])
     # P0.7.4: cross-file resolution runs as a supervised *subprocess* task too,
     # obeying the same per-task timeout and concurrency cap as per-file analysis.
     # The worker receives the Python source text the parent already read (never
@@ -1077,7 +1099,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
         raise ScanBlocked('PARSER_CRASHED',
                           f'Cross-file resolution failed ({type(exc).__name__}); no graph was published.') from exc
     for row in rows:
-        if row.get('language')!='Python' and row.get('language') not in {'JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX'}:
+        if row.get('language')!='Python' and row.get('language') not in {'JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX','Vue'}:
             for call in row.get('calls',[]):
                 call['heuristic_resolved_candidate']=bool(call.get('resolved'))
                 call['resolved']=False
@@ -1187,6 +1209,30 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                 {'path': f['path'], 'line': ui_binding.get('line'), 'column': ui_binding.get('column'),
                  'event_name': ui_binding.get('event_name'), 'binding_expression': ui_binding.get('binding_expression')},
                 method='typescript-jsx-event-handler-binding', confidence='high' if extras['resolved'] else 'low', **extras))
+        # V1: Vue SFC template bindings, same shape as the JSX ones above.
+        for ui_binding in f.get('vue_event_bindings', []):
+            state = ui_binding.get('resolution_status', 'UNKNOWN')
+            target = ui_binding.get('target') or {}
+            extras = {'resolution_status': state, 'event_name': ui_binding.get('event_name', ''),
+                'binding_expression': ui_binding.get('binding_expression'), 'candidate': True,
+                'verified': False, 'verification_status': 'NOT_VERIFIED',
+                'evidence_chain': ui_binding.get('evidence_chain', [])}
+            target_id = target.get('id') if state == 'RESOLVED' else None
+            if target_id not in all_symbol_ids:
+                target_id = 'unresolved-ui-event:' + f['path'] + ':' + str(ui_binding.get('line')) + ':' + str(ui_binding.get('event_name'))
+                if not any(n['id'] == target_id for n in nodes):
+                    nodes.append({'id': target_id, 'type': 'unresolved',
+                        'label': ui_binding.get('binding_expression') or ui_binding.get('event_name') or 'UI event',
+                        'evidence': {'path': f['path'], 'line': ui_binding.get('line'), 'resolution_status': state}})
+                extras['resolved'] = False
+                if ui_binding.get('candidate_targets'):
+                    extras['candidate_targets'] = ui_binding['candidate_targets']
+            else:
+                extras['resolved'] = True
+            edges.append(_edge(fid, target_id, 'references',
+                {'path': f['path'], 'line': ui_binding.get('line'), 'column': ui_binding.get('column'),
+                 'event_name': ui_binding.get('event_name'), 'binding_expression': ui_binding.get('binding_expression')},
+                method='vue-template-event-handler-binding', confidence='high' if extras['resolved'] else 'low', **extras))
         for c in f['calls']:
             state=c.get('resolution_status','UNKNOWN')
             target=c.get('target') or {}

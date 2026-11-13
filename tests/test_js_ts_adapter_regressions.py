@@ -1,12 +1,37 @@
 """Regression tests for JavaScript/TypeScript adapter ownership and API detection."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from usit.js_ts_parser import analyze_js_ts_project
 from usit.scanner import discover_files
+from usit.vue_parser import vue_script_for_adapter
+
+_VUE_SETUP_SFC = """<template>
+  <button @click="savePhoto">Save</button>
+</template>
+
+<script setup lang="ts">
+import { savePhotoApi } from './api';
+const savePhoto = async () => { await savePhotoApi(1); };
+</script>
+"""
+
+_VUE_OPTIONS_SFC = """<template>
+  <button @click="save">Save</button>
+</template>
+
+<script>
+export default {
+  methods: {
+    save() { return 1; },
+  },
+};
+</script>
+"""
 
 
 class JsTsAdapterRegressionTests(unittest.TestCase):
@@ -165,6 +190,86 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertIsNone(calls[0]["path"])
             self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_vue_sfc_script_is_analyzed_with_file_relative_lines(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            web = root / "web"
+            web.mkdir()
+            sfc = web / "PhotoCard.vue"
+            sfc.write_text(_VUE_SETUP_SFC, encoding="utf-8")
+            api = web / "api.ts"
+            api.write_text(
+                "export async function savePhotoApi(id: number) {"
+                " return fetch('/photos', { method: 'POST' }); }\n",
+                encoding="utf-8",
+            )
+            source = {
+                "web/PhotoCard.vue": vue_script_for_adapter(sfc.read_text(encoding="utf-8")),
+                "web/api.ts": api.read_text(encoding="utf-8"),
+            }
+            parsed = analyze_js_ts_project(root, discover_files(root), js_ts_source=source)
+            row = parsed["files"]["web/PhotoCard.vue"]
+            self.assertEqual([(item["name"], item["line"]) for item in row["symbols"]],
+                             [("savePhoto", 7)])
+            call = next(item for item in row["calls"] if item["callee"] == "savePhotoApi")
+            self.assertEqual(call["resolution_status"], "RESOLVED", call)
+            self.assertEqual(call["target"]["id"], "symbol:web/api.ts#savePhotoApi:1")
+
+    def test_vue_sfc_template_binding_links_to_api_endpoint(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            web = root / "web"
+            web.mkdir()
+            (web / "PhotoCard.vue").write_text(_VUE_SETUP_SFC, encoding="utf-8")
+            (web / "PhotoForm.vue").write_text(_VUE_OPTIONS_SFC, encoding="utf-8")
+            (web / "api.ts").write_text(
+                "export async function savePhotoApi(id: number) {"
+                " return fetch('/photos', { method: 'POST' }); }\n",
+                encoding="utf-8",
+            )
+            (web / "routes.ts").write_text(
+                "import { savePhotoApi } from './api';\n"
+                "router.post('/photos', savePhotoApi);\n",
+                encoding="utf-8",
+            )
+            from tests.synthetic_scan import scan_project
+            out = root.parent / (root.name + "-vue-output")
+            scan_project(str(root), str(out), force=True)
+            graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+            bindings = [edge for edge in graph["edges"]
+                        if edge.get("method") == "vue-template-event-handler-binding"]
+            self.assertEqual(len(bindings), 2)
+            setup_binding = next(edge for edge in bindings
+                                 if edge["evidence"]["path"] == "web/PhotoCard.vue")
+            self.assertEqual(setup_binding["event_name"], "click")
+            self.assertEqual(setup_binding["resolution_status"], "RESOLVED")
+            self.assertEqual(setup_binding["target"],
+                             "symbol:web/PhotoCard.vue#savePhoto:7")
+            options_binding = next(edge for edge in bindings
+                                   if edge["evidence"]["path"] == "web/PhotoForm.vue")
+            self.assertEqual(options_binding["resolution_status"], "RESOLVED")
+            self.assertEqual(options_binding["target"], "symbol:web/PhotoForm.vue#save:8")
+            from usit.business_graph import project_business_graph
+            semantics = {"features": [], "entities": [], "endpoints": [{
+                "method": "POST", "path": "/photos", "source": "web/routes.ts:2", "line": 2,
+                "handler_reference": "savePhotoApi"}]}
+            projected = project_business_graph(graph, semantics)
+            summary = projected["business_understanding"]
+            self.assertEqual(summary["frontend_api_endpoint_link_count"], 1)
+            self.assertEqual(summary["frontend_api_endpoint_links"][0]["resolution_status"],
+                             "EXACT_MATCH")
+            self.assertEqual(summary["frontend_business_chain_count"], 1)
+            chain = summary["frontend_business_chains"][0]
+            self.assertEqual((chain["method"], chain["path"]), ("POST", "/photos"))
+            self.assertEqual(chain["handler_symbol_id"], "symbol:web/PhotoCard.vue#savePhoto:7")
+            self.assertEqual(chain["verification_status"], "NOT_VERIFIED")
+            # The router.post registration must not be misclassified as a
+            # frontend API client call.
+            api_call_edges = [edge for edge in graph["edges"]
+                              if edge.get("method") == "typescript-api-client-call"]
+            self.assertEqual(len(api_call_edges), 1)
+            self.assertEqual(api_call_edges[0].get("route_path"), "/photos")
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ const CONTRACT = "usit-parser-result-v1";
 const PARSER = "typescript-compiler-api";
 const MAX_FILES = 500;
 const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
-const EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"]);
+const EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue"]);
 const EXPECTED_TS_VERSION = "6.0.3";
 
 // The analyzer's own TypeScript install. Files under this directory are the
@@ -289,6 +289,13 @@ function main(input) {
     for (const rel of entries) {
       const ext = path.extname(String(rel)).toLowerCase();
       if (!EXTENSIONS.has(ext)) continue;
+      // V1: legacy disk mode has no parent-supplied script text, so a Vue
+      // SFC cannot be reduced to its <script> block here; parsing the full
+      // SFC as TypeScript would manufacture garbage symbols. Skip it.
+      if (ext === ".vue") {
+        addFileDiag(String(rel), diagnostic("VUE_SCRIPT_EXTRACTION_REQUIRES_MEMORY_MODE", "UNKNOWN", "Legacy disk mode cannot extract a Vue <script> block; the file is not analyzed."));
+        continue;
+      }
       const full = safePath(projectRoot, rel);
       if (!full) {
         addFileDiag(String(rel), diagnostic("PATH_OUTSIDE_PROJECT", "ERROR", "Source path is missing, symbolic-link escaped, or outside the project root."));
@@ -308,6 +315,29 @@ function main(input) {
       accepted.push({ rel: String(rel).replace(/\\/g, "/"), full });
       sourcePaths.push(full);
     }
+  }
+
+  // V1: TypeScript drops a `.vue` root before ever asking the host for it
+  // (unsupported extension), so a Vue script can never join the program
+  // under its own path and checker resolution degrades to DYNAMIC.  Give
+  // each memory-mode `.vue` entry a virtual `.ts` twin root carrying the
+  // same line-padded script: the checker resolves the twin, while every
+  // result still reports the `.vue` rel (rows, symbol ids and evidence all
+  // use entry.rel, never the twin path).  Twins are program roots only and
+  // never produce their own analysis row.  A twin is skipped when a real
+  // file already occupies that path, or when the entry came from disk mode
+  // (its content is the full SFC, not the padded script).
+  const vueTwins = new Map();
+  const acceptedFulls = new Set(accepted.map((entry) => path.resolve(entry.full)));
+  for (const entry of accepted) {
+    if (path.extname(entry.rel).toLowerCase() !== ".vue") continue;
+    const twinFull = entry.full + ".ts";
+    if (acceptedFulls.has(path.resolve(twinFull))) continue;
+    const text = contentByFull.get(keyOf(entry.full));
+    if (text == null) continue;
+    contentByFull.set(keyOf(twinFull), text);
+    vueTwins.set(entry.rel, { full: twinFull });
+    acceptedFulls.add(path.resolve(twinFull));
   }
 
   // Config: prefer parent-verified content (memory mode); otherwise read the
@@ -454,13 +484,25 @@ function main(input) {
   for (const entry of accepted) {
     if (!includedRoots.includes(entry.full)) addFileDiag(entry.rel, diagnostic("CONFIG_EXCLUDED_SOURCE", "UNKNOWN", "The source was discovered but excluded by the project config; syntax-only fallback is used."));
   }
-  const roots = includedRoots.length ? includedRoots : sourcePaths;
+  const roots = [...(includedRoots.length ? includedRoots : sourcePaths),
+    ...Array.from(vueTwins.values(), (twin) => twin.full)];
   const program = ts.createProgram({ rootNames: roots, options, host });
   const checker = program.getTypeChecker();
   const discoveredByFull = new Map(accepted.map((entry) => [path.resolve(entry.full), entry.rel]));
+  for (const [rel, twin] of vueTwins) discoveredByFull.set(path.resolve(twin.full), rel);
   const rows = {};
   const records = [];
-  const sourceFiles = accepted.map((entry) => program.getSourceFile(entry.full) || ts.createSourceFile(entry.full, safeRead(entry.full), ts.ScriptTarget.Latest, true, scriptKind(entry.full)));
+  // V1: a Vue entry is analyzed through its twin program file; every other
+  // entry keeps the existing program-or-standalone fallback.
+  function sourceFileFor(entry) {
+    const twin = vueTwins.get(entry.rel);
+    if (twin) {
+      const fromProgram = program.getSourceFile(twin.full);
+      if (fromProgram) return fromProgram;
+    }
+    return program.getSourceFile(entry.full) || ts.createSourceFile(entry.full, safeRead(entry.full), ts.ScriptTarget.Latest, true, scriptKind(entry.full));
+  }
+  const sourceFiles = accepted.map((entry) => sourceFileFor(entry));
 
   function safeRead(full) {
     const k = keyOf(full);
@@ -732,7 +774,7 @@ function main(input) {
   }
 
   for (const entry of accepted) {
-    const sourceFile = program.getSourceFile(entry.full) || ts.createSourceFile(entry.full, safeRead(entry.full), ts.ScriptTarget.Latest, true, scriptKind(entry.full));
+    const sourceFile = sourceFileFor(entry);
     const row = { path: entry.rel, language: languageFor(entry.full), parser_name: PARSER, parser_version: ts.version, syntax_status: "VALID", symbols: [], imports: [], calls: [], api_client_calls: [], diagnostics: [] };
     const syntaxErrors = sourceFile.parseDiagnostics || [];
     for (const d of syntaxErrors) {

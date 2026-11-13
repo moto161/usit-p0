@@ -1198,9 +1198,13 @@ def project_business_graph(graph: Mapping[str, Any],
         }
 
     # S2.13-A: explicit JSX event-handler entrypoints; not yet linked to API routes.
+    # V1: Vue SFC template bindings (vue-template-event-handler-binding) are
+    # collected the same way; the join below only needs a RESOLVED handler
+    # symbol id and call edges, which the Vue script analysis provides.
     frontend_interaction_bindings = []
     for edge in edges:
-        if edge.get("method") != "typescript-jsx-event-handler-binding":
+        if edge.get("method") not in {"typescript-jsx-event-handler-binding",
+                                      "vue-template-event-handler-binding"}:
             continue
         evidence = edge.get("evidence") if isinstance(edge.get("evidence"), Mapping) else {}
         frontend_interaction_bindings.append({

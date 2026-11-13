@@ -19,7 +19,7 @@ MAX_ADAPTER_SECONDS = MAX_PARSER_TASK_SECONDS
 if MAX_ADAPTER_SECONDS != MAX_PARSER_TASK_SECONDS:
     raise ScanBlocked("SAFETY_LIMIT_CONFIGURATION_INVALID", "Adapter timeout must equal the protocol parser-task limit.")
 EXPECTED_TYPESCRIPT_VERSION = "6.0.3"
-SOURCE_EXTENSIONS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
+SOURCE_EXTENSIONS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue"}
 USIT_ROOT = Path(__file__).resolve().parents[1]
 
 
