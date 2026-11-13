@@ -273,6 +273,229 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertNotEqual(binding["resolution_status"], "RESOLVED")
         self.assertFalse(binding["resolved"])
 
+    def test_python_imported_handler_resolves_to_symbol(self):
+        (self.root / "routes.py").write_text(
+            "from controllers.photos import list_photos\n"
+            "app.get('/photos', list_photos)\n",
+            encoding="utf-8",
+        )
+        (self.root / "controllers").mkdir(exist_ok=True)
+        (self.root / "controllers" / "photos.py").write_text(
+            "def list_photos():\n    return []\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "py-imported-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "python-route-handler-binding"
+                       and edge.get("route_path") == "/photos")
+        self.assertEqual(binding["resolution_status"], "RESOLVED", msg=repr(binding))
+        self.assertEqual(binding["target"], "symbol:controllers/photos.py#list_photos:1")
+        chain = binding["evidence_chain"]
+        self.assertTrue(any(item.get("kind") == "handler_import"
+                            and item.get("file") == "routes.py" for item in chain))
+        self.assertTrue(any(item.get("kind") == "handler_definition"
+                            and item.get("file") == "controllers/photos.py" for item in chain))
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"endpoints": [{
+            "method": "GET", "path": "/photos", "source": "routes.py:2",
+            "line": 2, "handler_reference": "list_photos",
+        }]})
+        endpoint = next(node for node in projected["nodes"] if node.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "RESOLVED")
+        self.assertEqual(endpoint["handler_association"]["target_symbol_id"],
+                         "symbol:controllers/photos.py#list_photos:1")
+
+    def test_python_aliased_import_handler_resolves(self):
+        (self.root / "routes.py").write_text(
+            "from controllers.photos import upload_photo as upload\n"
+            "router.post('/photos', upload)\n",
+            encoding="utf-8",
+        )
+        (self.root / "controllers").mkdir(exist_ok=True)
+        (self.root / "controllers" / "photos.py").write_text(
+            "def upload_photo():\n    return {}\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "py-aliased-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "python-route-handler-binding"
+                       and edge.get("route_path") == "/photos")
+        self.assertEqual(binding["resolution_status"], "RESOLVED", msg=repr(binding))
+        self.assertEqual(binding["evidence"]["handler_reference"], "upload")
+        self.assertEqual(binding["target"], "symbol:controllers/photos.py#upload_photo:1")
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "routes.py:2",
+            "line": 2, "handler_reference": "upload",
+        }]})
+        endpoint = next(node for node in projected["nodes"] if node.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "RESOLVED")
+        self.assertEqual(endpoint["handler_association"]["target_symbol_id"],
+                         "symbol:controllers/photos.py#upload_photo:1")
+
+    def test_python_member_handler_resolves_through_module_import(self):
+        (self.root / "routes.py").write_text(
+            "import controllers.photos as photos\n"
+            "router.post('/photos', photos.upload_photo)\n",
+            encoding="utf-8",
+        )
+        (self.root / "controllers").mkdir(exist_ok=True)
+        (self.root / "controllers" / "photos.py").write_text(
+            "def upload_photo():\n    return {}\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "py-member-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "python-route-handler-binding"
+                       and edge.get("route_path") == "/photos")
+        self.assertEqual(binding["resolution_status"], "RESOLVED", msg=repr(binding))
+        self.assertEqual(binding["target"], "symbol:controllers/photos.py#upload_photo:1")
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "routes.py:2",
+            "line": 2, "handler_reference": "photos.upload_photo",
+        }]})
+        endpoint = next(node for node in projected["nodes"] if node.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "RESOLVED")
+        self.assertEqual(endpoint["handler_association"]["target_symbol_id"],
+                         "symbol:controllers/photos.py#upload_photo:1")
+
+    def test_python_ambiguous_handler_lists_candidates(self):
+        (self.root / "routes.py").write_text(
+            "from services.a import handle\n"
+            "from services.b import handle\n"
+            "app.get('/x', handle)\n",
+            encoding="utf-8",
+        )
+        services = self.root / "services"
+        services.mkdir(exist_ok=True)
+        (services / "a.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+        (services / "b.py").write_text("def handle():\n    return 2\n", encoding="utf-8")
+        out = self.root.parent / "py-ambiguous-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "python-route-handler-binding"
+                       and edge.get("route_path") == "/x")
+        self.assertEqual(binding["resolution_status"], "AMBIGUOUS", msg=repr(binding))
+        self.assertEqual(set(binding["candidate_targets"]),
+                         {"symbol:services/a.py#handle:1", "symbol:services/b.py#handle:1"})
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"endpoints": [{
+            "method": "GET", "path": "/x", "source": "routes.py:3",
+            "line": 3, "handler_reference": "handle",
+        }]})
+        endpoint = next(node for node in projected["nodes"] if node.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["resolution_status"], "AMBIGUOUS")
+        self.assertEqual(endpoint["handler_association"]["reason"],
+                         "PYTHON_SYMBOL_HAS_MULTIPLE_DECLARATIONS")
+
+    def test_python_dynamic_handler_is_not_guessed(self):
+        (self.root / "routes.py").write_text(
+            "app.get('/dynamic', registry[name])\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "py-dynamic-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "python-route-handler-binding"
+                       and edge.get("route_path") == "/dynamic")
+        self.assertNotEqual(binding["resolution_status"], "RESOLVED")
+        self.assertFalse(binding["resolved"])
+
+    def test_python_decorator_route_produces_no_binding_edge(self):
+        (self.root / "routes.py").write_text(
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@bp.route('/photos', methods=['GET'])\n"
+            "def list_photos():\n"
+            "    return []\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "py-decorator-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        bindings = [edge for edge in graph["edges"]
+                    if edge.get("method") == "python-route-handler-binding"
+                    and edge.get("route_path") == "/photos"]
+        self.assertEqual(bindings, [])
+
+    def test_python_add_url_rule_and_add_api_route_resolve(self):
+        (self.root / "routes.py").write_text(
+            "from controllers.photos import list_photos\n"
+            "from controllers.photos import upload_photo\n"
+            "app.add_url_rule('/photos', view_func=list_photos)\n"
+            "app.add_api_route('/upload', upload_photo, methods=['POST'])\n",
+            encoding="utf-8",
+        )
+        (self.root / "controllers").mkdir(exist_ok=True)
+        (self.root / "controllers" / "photos.py").write_text(
+            "def list_photos():\n    return []\n"
+            "def upload_photo():\n    return {}\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "py-add-url-rule-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        by_path = {edge.get("route_path"): edge for edge in graph["edges"]
+                   if edge.get("method") == "python-route-handler-binding"}
+        self.assertEqual(set(by_path), {"/photos", "/upload"})
+        self.assertEqual(by_path["/photos"]["resolution_status"], "RESOLVED")
+        self.assertEqual(by_path["/photos"]["target"], "symbol:controllers/photos.py#list_photos:1")
+        self.assertEqual(by_path["/upload"]["resolution_status"], "RESOLVED")
+        self.assertEqual(by_path["/upload"]["route_method"], "POST")
+        self.assertEqual(by_path["/upload"]["target"], "symbol:controllers/photos.py#upload_photo:3")
+        from usit.business_graph import project_business_graph
+        projected = project_business_graph(graph, {"endpoints": [
+            {"method": "GET", "path": "/photos", "source": "routes.py:3",
+             "line": 3, "handler_reference": "list_photos"},
+            {"method": "POST", "path": "/upload", "source": "routes.py:4",
+             "line": 4, "handler_reference": "upload_photo"},
+        ]})
+        endpoints = [node for node in projected["nodes"] if node.get("business_kind") == "endpoint"]
+        self.assertEqual(len(endpoints), 2)
+        self.assertTrue(all(node["handler_association"]["resolution_status"] == "RESOLVED"
+                            for node in endpoints))
+
+    def test_non_route_get_call_is_not_a_route_registration(self):
+        (self.root / "cache.py").write_text(
+            "default = 0\n"
+            "value = cache.get('key', default)\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "py-non-route-get-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        bindings = [edge for edge in graph["edges"]
+                    if edge.get("method") == "python-route-handler-binding"
+                    and (edge.get("evidence") or {}).get("path") == "cache.py"]
+        self.assertEqual(bindings, [])
+
+    def test_python_same_file_handler_resolves(self):
+        (self.root / "routes.py").write_text(
+            "def local_handler():\n"
+            "    return []\n"
+            "\n"
+            "app.get('/x', local_handler)\n",
+            encoding="utf-8",
+        )
+        out = self.root.parent / "py-same-file-handler-output"
+        scan_project(str(self.root), str(out), force=True)
+        graph = json.loads((out / "knowledge_graph.json").read_text(encoding="utf-8"))
+        binding = next(edge for edge in graph["edges"]
+                       if edge.get("method") == "python-route-handler-binding"
+                       and edge.get("route_path") == "/x")
+        self.assertEqual(binding["resolution_status"], "RESOLVED", msg=repr(binding))
+        self.assertEqual(binding["target"], "symbol:routes.py#local_handler:1")
+
     def test_jsx_event_handler_binding_resolves_unique_named_handler(self):
         (self.root / "PhotoPage.tsx").write_text(
             "export function PhotoPage() { return <button onClick={loadPhotos}>Load</button>; }\n"

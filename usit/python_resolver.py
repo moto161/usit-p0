@@ -136,6 +136,219 @@ def _attribute_parts(node: ast.AST) -> list[str] | None:
     return list(reversed(parts))
 
 
+def _methods_keyword(call: ast.Call) -> list[str] | None:
+    """``methods=[...]`` keyword of an ``add_url_rule``/``add_api_route`` call.
+
+    Returns the uppercased string literals, ``["GET"]`` when the keyword is
+    absent, and None when it is present but yields no string literal (fail
+    closed: do not guess the methods).
+    """
+    for kw in call.keywords:
+        if kw.arg == "methods":
+            if not isinstance(kw.value, (ast.List, ast.Tuple)):
+                return None
+            methods = [elt.value.upper() for elt in kw.value.elts
+                       if isinstance(elt, ast.Constant) and isinstance(elt.value, str)]
+            return methods or None
+    return ["GET"]
+
+
+_ROUTE_VERBS = {"get", "post", "put", "patch", "delete", "head", "options"}
+
+
+def _route_registration(call: ast.Call) -> tuple[list[str], str, ast.AST] | None:
+    """Recognize a call-style route registration.
+
+    Returns (methods, path, handler_arg) or None. The first positional
+    argument must be a string literal starting with ``/`` (a route path);
+    that alone rejects ``dict.get('key', default)`` and similar non-route
+    calls. A handler argument is required, so decorator calls
+    (``@app.route('/x')`` — one positional argument) are never reported
+    here; H1 already covers them through the decorator's following `def`.
+    """
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    verb = func.attr
+    if not call.args:
+        return None
+    first = call.args[0]
+    if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+        return None
+    path = first.value
+    if not path.startswith("/"):
+        return None
+    if verb in _ROUTE_VERBS:
+        if len(call.args) < 2:
+            return None
+        return ([verb.upper()], path, call.args[-1])
+    if verb == "add_url_rule":
+        handler = None
+        for kw in call.keywords:
+            if kw.arg == "view_func":
+                handler = kw.value
+        if handler is None and len(call.args) >= 3:
+            handler = call.args[2]
+        if handler is None:
+            return None
+        methods = _methods_keyword(call)
+        if methods is None:
+            return None
+        return (methods, path, handler)
+    if verb == "add_api_route":
+        if len(call.args) < 2:
+            return None
+        methods = _methods_keyword(call)
+        if methods is None:
+            return None
+        return (methods, path, call.args[1])
+    return None
+
+
+def _resolve_route_handler_arg(arg: ast.AST, *, bindings: dict[str, list[dict[str, Any]]],
+                               top_symbols: dict[tuple[str, str], list[dict[str, Any]]],
+                               module: str, module_paths: dict[str, list[str]],
+                               has_star_import: bool, module_shadows: set[str],
+                               shadowed: set[str]) -> tuple[str, dict[str, Any] | None,
+                                                            list[dict[str, Any]],
+                                                            dict[str, Any] | None, str | None]:
+    """Resolve a route handler argument through import evidence.
+
+    Mirrors the Name/Attribute branches of the call resolver, with one
+    deliberate difference: a decorated target still resolves as RESOLVED.
+    The call resolver marks decorated callees UNKNOWN because a decorator
+    may replace the callable's runtime behavior; a handler binding asks
+    which definition handles the route, and a decorated `def` is still that
+    definition, so the link is definitional, not a runtime-call claim.
+
+    Returns (state, target, candidates, import_binding, imported_as).
+    `import_binding` is the import record the resolution went through (None
+    for a same-file definition); `imported_as` is the local name it was
+    imported as (None when no import was involved).
+    """
+    if isinstance(arg, ast.Name):
+        name = arg.id
+        candidates = top_symbols.get((module, name), [])
+        imported = bindings.get(name, [])
+        if name in shadowed or name in module_shadows:
+            return ("DYNAMIC", None, [], None, None)
+        if len(imported) > 1:
+            found = [item["target"] for item in imported
+                     if item.get("kind") == "symbol" and item.get("target")]
+            found.extend(target for item in imported for target in item.get("targets", []))
+            return ("AMBIGUOUS", None, found, None, None)
+        if imported:
+            binding = imported[0]
+            if binding.get("conditional"):
+                found = [binding["target"]] if binding.get("target") else []
+                found.extend(binding.get("targets", []))
+                return ("UNKNOWN", None, found, binding, name)
+            if binding["kind"] == "symbol":
+                return ("RESOLVED", binding["target"], [], binding, name)
+            if binding["kind"] == "external":
+                return ("EXTERNAL", None, [], binding, name)
+            if binding["kind"] == "ambiguous":
+                return ("AMBIGUOUS", None, binding.get("targets", []), binding, name)
+            if binding["kind"] == "unresolved":
+                return ("UNRESOLVED", None, [], binding, name)
+            return ("UNKNOWN", None, [], binding, name)
+        if len(candidates) == 1:
+            return ("RESOLVED", candidates[0], [], None, None)
+        if len(candidates) > 1:
+            return ("AMBIGUOUS", None, candidates, None, None)
+        if name in vars(builtins):
+            return ("EXTERNAL", None, [], None, None)
+        if has_star_import:
+            return ("UNKNOWN", None, [], None, None)
+        return ("UNRESOLVED", None, [], None, None)
+    if isinstance(arg, ast.Attribute):
+        parts = _attribute_parts(arg)
+        if parts and (parts[0] in shadowed or parts[0] in module_shadows):
+            return ("DYNAMIC", None, [], None, None)
+        if parts and bindings.get(parts[0]):
+            imported = bindings[parts[0]]
+            if len(imported) > 1:
+                return ("AMBIGUOUS", None, [], None, None)
+            binding = imported[0]
+            suffix = parts[1:]
+            if binding.get("conditional"):
+                return ("UNKNOWN", None, [], binding, parts[0])
+            if binding["kind"] == "module" and suffix:
+                member = suffix[-1]
+                mod = binding["module"]
+                candidates = top_symbols.get((mod, member), [])
+                if binding.get("external"):
+                    return ("EXTERNAL", None, [], binding, parts[0])
+                if len(module_paths.get(mod, [])) > 1 or len(candidates) > 1:
+                    return ("AMBIGUOUS", None, candidates, binding, parts[0])
+                if len(candidates) == 1:
+                    return ("RESOLVED", candidates[0], [], binding, parts[0])
+                return ("UNRESOLVED", None, [], binding, parts[0])
+            if binding["kind"] == "external":
+                return ("EXTERNAL", None, [], binding, parts[0])
+            if binding["kind"] == "ambiguous":
+                return ("AMBIGUOUS", None, [], binding, parts[0])
+            return ("UNKNOWN", None, [], binding, parts[0])
+        return ("UNKNOWN", None, [], None, None)
+    return ("UNKNOWN", None, [], None, None)
+
+
+def _detect_route_handlers(rel: str, calls: list[tuple[ast.Call, set[str], tuple[str, int] | None]],
+                           *, bindings: dict[str, list[dict[str, Any]]],
+                           top_symbols: dict[tuple[str, str], list[dict[str, Any]]],
+                           module: str, module_paths: dict[str, list[str]],
+                           has_star_import: bool,
+                           module_shadows: set[str]) -> list[dict[str, Any]]:
+    """Build `route_handlers` records for a file's call-style registrations.
+
+    Every detected registration yields a record (UNKNOWN when the handler
+    cannot be resolved — the TypeScript adapter does the same), in the
+    adapter's record shape, so the scanner can emit the same binding edges
+    for Python as for TypeScript.
+    """
+    out: list[dict[str, Any]] = []
+    for call, shadowed, _caller in calls:
+        registration = _route_registration(call)
+        if registration is None:
+            continue
+        methods, path, handler_arg = registration
+        state, target, candidates, import_binding, imported_as = _resolve_route_handler_arg(
+            handler_arg, bindings=bindings, top_symbols=top_symbols, module=module,
+            module_paths=module_paths, has_star_import=has_star_import,
+            module_shadows=module_shadows, shadowed=shadowed)
+        if state not in STATUSES:
+            state = "UNKNOWN"
+        for method in methods:
+            chain: list[dict[str, Any]] = [{
+                "kind": "route_registration", "file": rel,
+                "line": call.lineno, "column": call.col_offset + 1,
+            }]
+            if state == "RESOLVED" and import_binding is not None and imported_as is not None:
+                chain.append({
+                    "kind": "handler_import", "file": rel, "line": import_binding["line"],
+                    "module": import_binding.get("module"), "imported_as": imported_as,
+                })
+            if state == "RESOLVED" and target is not None:
+                chain.append({
+                    "kind": "handler_definition", "file": target["file"],
+                    "line": target["line"], "name": target["name"],
+                })
+            record: dict[str, Any] = {
+                "method": method, "path": path,
+                "line": call.lineno, "column": call.col_offset + 1,
+                "handler_reference": ast.unparse(handler_arg),
+                "resolution_status": state,
+                "evidence_chain": chain,
+            }
+            if state == "RESOLVED" and target is not None:
+                record["target"] = {"id": target["id"], "path": target["file"],
+                                    "name": target["name"], "line": target["line"]}
+            if state == "AMBIGUOUS" and candidates:
+                record["candidate_targets"] = [item["id"] for item in candidates]
+            out.append(record)
+    return out
+
+
 def resolve_python_calls(root: str, rows: list[dict[str, Any]], *,
                          contents: dict[str, str] | None = None) -> dict[str, Any]:
     """Annotate Python call rows with conservative local/cross-module resolution.
@@ -485,6 +698,10 @@ def resolve_python_calls(root: str, rows: list[dict[str, Any]], *,
         rows_by_path = next(row for row in rows if row.get("path") == rel)
         rows_by_path["calls"] = calls
         rows_by_path["module"] = module or None
+        rows_by_path["route_handlers"] = _detect_route_handlers(
+            rel, visitor.calls, bindings=bindings, top_symbols=top_symbols,
+            module=module, module_paths=module_paths, has_star_import=has_star_import,
+            module_shadows=module_shadows)
     return {"counts": result_counts, "files_with_parse_errors": unknown_files,
             "modules_indexed": sum(len(paths) for paths in module_paths.values()),
             "symbols_indexed": sum(len(items) for items in top_symbols.values())}

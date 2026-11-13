@@ -1115,6 +1115,11 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
         for route_handler in f.get('route_handlers', []):
             state = route_handler.get('resolution_status', 'UNKNOWN')
             target = route_handler.get('target') or {}
+            # The binding edge method follows the row language: the TypeScript
+            # Compiler API produces these rows for JS/TS, the Python AST
+            # resolver produces the same shape for Python.
+            binding_method = ('python-route-handler-binding' if f.get('language') == 'Python'
+                              else 'typescript-route-handler-binding')
             extras = {
                 'resolution_status': state,
                 'handler_reference': route_handler.get('handler_reference', ''),
@@ -1131,7 +1136,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                     {'path': f['path'], 'line': route_handler.get('line'),
                      'column': route_handler.get('column'),
                      'handler_reference': route_handler.get('handler_reference')},
-                    method='typescript-route-handler-binding', confidence='high', **extras))
+                    method=binding_method, confidence='high', **extras))
             else:
                 extras['resolved'] = False
                 if route_handler.get('candidate_targets'):
@@ -1140,7 +1145,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                     str(route_handler.get('line')) + ':' + str(route_handler.get('handler_reference')),
                     'references', {'path': f['path'], 'line': route_handler.get('line'),
                     'handler_reference': route_handler.get('handler_reference')},
-                    method='typescript-route-handler-binding', confidence='low', **extras))
+                    method=binding_method, confidence='low', **extras))
         for api_call in f.get('api_client_calls', []):
             call_id = 'api-client-call:' + f['path'] + ':' + str(api_call.get('line')) + ':' + str(api_call.get('column') or 0)
             if not any(n['id'] == call_id for n in nodes):

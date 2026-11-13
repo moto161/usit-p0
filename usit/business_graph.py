@@ -504,13 +504,16 @@ def project_business_graph(graph: Mapping[str, Any],
                 imported_matches = [
                     edge for edge in edges
                     if edge.get("type") == "references"
-                    and edge.get("method") == "typescript-route-handler-binding"
+                    and edge.get("method") in {"typescript-route-handler-binding",
+                                               "python-route-handler-binding"}
                     and (edge.get("evidence") or {}).get("path") == path
                     and (edge.get("evidence") or {}).get("line") == route_line
                     and (edge.get("evidence") or {}).get("handler_reference") == handler_ref
                 ]
                 if not matches and len(imported_matches) == 1:
                     imported_edge = imported_matches[0]
+                    binding_kind = ("PYTHON" if imported_edge.get("method") == "python-route-handler-binding"
+                                    else "TYPESCRIPT")
                     imported_status = imported_edge.get("resolution_status", "UNKNOWN")
                     imported_target = imported_edge.get("target")
                     if imported_status == "RESOLVED" and imported_target in {n.get("id") for n in nodes}:
@@ -521,7 +524,7 @@ def project_business_graph(graph: Mapping[str, Any],
                             endpoint_node["handler_association"] = {
                                 "reference": handler_ref, "resolution_status": "AMBIGUOUS",
                                 "candidate_targets": imported_edge.get("candidate_targets", []),
-                                "reason": "TYPESCRIPT_SYMBOL_HAS_MULTIPLE_DECLARATIONS",
+                                "reason": f"{binding_kind}_SYMBOL_HAS_MULTIPLE_DECLARATIONS",
                             }
                         continue
                     else:
@@ -529,7 +532,7 @@ def project_business_graph(graph: Mapping[str, Any],
                         if endpoint_node is not None:
                             endpoint_node["handler_association"] = {
                                 "reference": handler_ref, "resolution_status": imported_status,
-                                "reason": "TYPESCRIPT_IMPORT_BINDING_NOT_UNIQUELY_RESOLVED",
+                                "reason": f"{binding_kind}_IMPORT_BINDING_NOT_UNIQUELY_RESOLVED",
                                 "evidence": imported_edge.get("evidence_chain", []),
                             }
                         continue
