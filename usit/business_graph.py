@@ -128,6 +128,43 @@ def _collect_call_chains(edges: list[dict[str, Any]], root_symbol_id: str,
     return chains, truncated
 
 
+def _reachable_symbols(edges: list[dict[str, Any]], root_symbol_id: str,
+                       symbol_ids: set[str]) -> tuple[set[str], int]:
+    """BFS over RESOLVED call edges from a root symbol.
+
+    Returns (reachable set including the root, max depth reached). This is
+    the set the endpoint's database/identity attachment is judged against,
+    and it is deliberately separate from `_collect_call_chains`: enumerating
+    chains explodes combinatorially and needs a depth/chain cap, while a
+    visited-set BFS is linear in the graph and needs neither. The max depth
+    is reported, not enforced. Unresolved/external edges are not followed,
+    matching the chain walk's follow rule.
+    """
+    adjacency: dict[str, list[str]] = {}
+    for edge in edges:
+        caller = edge.get("caller_symbol_id")
+        target = edge.get("target")
+        if (edge.get("type") == "calls"
+                and edge.get("resolution_status") == "RESOLVED"
+                and isinstance(caller, str) and isinstance(target, str)
+                and target in symbol_ids):
+            adjacency.setdefault(caller, []).append(target)
+    if not isinstance(root_symbol_id, str):
+        return set(), 0
+    reachable = {root_symbol_id}
+    max_depth = 0
+    queue: list[tuple[str, int]] = [(root_symbol_id, 0)]
+    while queue:
+        current, depth = queue.pop(0)
+        for target in adjacency.get(current, []):
+            if target in reachable:
+                continue
+            reachable.add(target)
+            max_depth = max(max_depth, depth + 1)
+            queue.append((target, depth + 1))
+    return reachable, max_depth
+
+
 def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Summarize only explicit endpoint → handler → call → DB/auth/identity evidence."""
     paths: list[dict[str, Any]] = []
@@ -889,18 +926,23 @@ def project_business_graph(graph: Mapping[str, Any],
         authorization_linked += 1
 
     # Attach database evidence to endpoints only when its owner is present in
-    # the endpoint's already-resolved, bounded call-chain symbol sequence.
+    # the endpoint's BFS-reachable symbol set. The set comes from
+    # `_reachable_symbols`, not from the enumerated call chains, so database
+    # evidence is not lost when chain enumeration truncates at its depth or
+    # chain caps; the chain detail itself stays capped (see `call_chain_*`).
+    symbol_ids = {
+        item.get("id") for item in nodes
+        if item.get("type") in {"function", "method"}
+        and isinstance(item.get("id"), str)
+    }
     for endpoint_node in nodes:
         association = endpoint_node.get("handler_association")
         if not isinstance(association, dict) or association.get("resolution_status") != "RESOLVED":
             continue
-        reachable_symbols = {association.get("target_symbol_id")}
-        for chain in association.get("call_chain_evidence", []):
-            for step in chain.get("steps", []):
-                if isinstance(step.get("caller_symbol_id"), str):
-                    reachable_symbols.add(step["caller_symbol_id"])
-                if isinstance(step.get("target_id"), str):
-                    reachable_symbols.add(step["target_id"])
+        reachable_symbols, reachable_max_depth = _reachable_symbols(
+            edges, association.get("target_symbol_id"), symbol_ids)
+        association["reachable_symbol_count"] = len(reachable_symbols)
+        association["reachable_max_depth"] = reachable_max_depth
         related = []
         for access in nodes:
             details = access.get("business_details", {})
@@ -940,14 +982,11 @@ def project_business_graph(graph: Mapping[str, Any],
         # S2.30-C: propagate identity expressions across exact, uniquely resolved
         # caller→callee parameter mappings. Each hop is recorded independently;
         # no return/field/collection flow or runtime execution is inferred.
+        # The reachable set is the same BFS set as the database attachment
+        # above, so propagation is not cut off by chain-enumeration caps.
         identity_parameter_evidence: list[dict[str, Any]] = []
-        reachable_symbols = {association.get("target_symbol_id")}
-        for chain in association.get("call_chain_evidence", []):
-            for step in chain.get("steps", []):
-                if isinstance(step.get("caller_symbol_id"), str):
-                    reachable_symbols.add(step["caller_symbol_id"])
-                if isinstance(step.get("target_id"), str):
-                    reachable_symbols.add(step["target_id"])
+        reachable_symbols, _ = _reachable_symbols(
+            edges, association.get("target_symbol_id"), symbol_ids)
 
         call_edges_by_caller: dict[str, list[dict[str, Any]]] = {}
         for candidate_edge in edges:

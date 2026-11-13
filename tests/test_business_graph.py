@@ -319,6 +319,256 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(len(association["call_chain_evidence"][0]["steps"]), 8)
         self.assertTrue(association["call_chain_evidence"][0]["depth_limit_reached"])
 
+    def test_deep_database_access_attaches_despite_chain_truncation(self):
+        source = graph()
+        handler = "symbol:server/routes/photos.js#uploadPhoto:35"
+        symbols = [handler] + [
+            f"symbol:module_{index}.py#step_{index}:{index + 1}"
+            for index in range(9)
+        ]
+        for index, symbol in enumerate(symbols):
+            path = "server/routes/photos.js" if index == 0 else f"module_{index}.py"
+            name = "uploadPhoto" if index == 0 else f"step_{index - 1}"
+            source["nodes"].append({
+                "id": symbol, "type": "function", "label": name,
+                "evidence": {"path": path, "line": 35 if index == 0 else index},
+            })
+            source["nodes"].append({
+                "id": "file:" + path, "type": "file", "label": path,
+                "evidence": {"path": path},
+            })
+        for index in range(len(symbols) - 1):
+            path = "server/routes/photos.js" if index == 0 else f"module_{index}.py"
+            source["edges"].append({
+                "source": "file:" + path, "target": symbols[index + 1],
+                "type": "calls", "caller_symbol_id": symbols[index],
+                "resolution_status": "RESOLVED", "resolved": True,
+                "evidence": {"path": path, "line": index + 40},
+                "method": "typescript-compiler-api", "confidence": "high",
+            })
+        deep = symbols[-1]
+        source["edges"].append({
+            "source": "file:module_9.py", "target": "external:db.execute",
+            "type": "calls", "caller_symbol_id": deep, "resolution_status": "EXTERNAL",
+            "evidence": {"path": "module_9.py", "line": 99},
+        })
+        result = project_business_graph(source, {
+            "endpoints": [{
+                "method": "POST", "path": "/photos",
+                "source": "server/routes/photos.js:20", "line": 20,
+                "handler_reference": "uploadPhoto",
+            }],
+            "database_accesses": [{
+                "source": "module_9.py", "line": 99,
+                "callee": "db.execute", "operation": "SELECT", "tables": ["photos"],
+                "columns": ["id"], "parse_status": "RESOLVED",
+                "parser": "python-ast-single-line",
+            }],
+        })
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        association = endpoint["handler_association"]
+        # Chain detail still truncates at depth 8, but the database evidence
+        # must not be lost with it.
+        self.assertTrue(association["call_chain_truncated"])
+        self.assertEqual(len(association["call_chain_evidence"][0]["steps"]), 8)
+        self.assertEqual(association["reachable_symbol_count"], 10)
+        self.assertEqual(association["reachable_max_depth"], 9)
+        evidence = association["database_access_evidence"]
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["owner_symbol_id"], deep)
+        self.assertEqual(evidence[0]["tables"], ["photos"])
+
+    def test_wide_fanout_database_access_attaches_despite_chain_cap(self):
+        source = graph()
+        handler = "symbol:server/routes/photos.js#uploadPhoto:35"
+        leaf_path = "server/leaves.py"
+        source["nodes"].append({
+            "id": handler, "type": "function", "label": "uploadPhoto",
+            "evidence": {"path": "server/routes/photos.js", "line": 35},
+        })
+        source["nodes"].append({
+            "id": "file:" + leaf_path, "type": "file", "label": leaf_path,
+            "evidence": {"path": leaf_path},
+        })
+        leaves = [f"symbol:{leaf_path}#leaf_{index}:{index + 1}" for index in range(150)]
+        for index, leaf in enumerate(leaves):
+            source["nodes"].append({
+                "id": leaf, "type": "function", "label": f"leaf_{index}",
+                "evidence": {"path": leaf_path, "line": index + 1},
+            })
+            source["edges"].append({
+                "source": "file:server/routes/photos.js", "target": leaf,
+                "type": "calls", "caller_symbol_id": handler,
+                "resolution_status": "RESOLVED", "resolved": True,
+                "evidence": {"path": "server/routes/photos.js", "line": 40 + index},
+                "method": "typescript-compiler-api", "confidence": "high",
+            })
+        last_leaf = leaves[-1]
+        source["edges"].append({
+            "source": "file:" + leaf_path, "target": "external:db.execute",
+            "type": "calls", "caller_symbol_id": last_leaf,
+            "resolution_status": "EXTERNAL",
+            "evidence": {"path": leaf_path, "line": 200},
+        })
+        result = project_business_graph(source, {
+            "endpoints": [{
+                "method": "POST", "path": "/photos",
+                "source": "server/routes/photos.js:20", "line": 20,
+                "handler_reference": "uploadPhoto",
+            }],
+            "database_accesses": [{
+                "source": leaf_path, "line": 200,
+                "callee": "db.execute", "operation": "SELECT", "tables": ["photos"],
+                "columns": ["id"], "parse_status": "RESOLVED",
+                "parser": "python-ast-single-line",
+            }],
+        })
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        association = endpoint["handler_association"]
+        self.assertTrue(association["call_chain_truncated"])
+        self.assertEqual(len(association["call_chain_evidence"]), 100)
+        self.assertEqual(association["reachable_symbol_count"], 151)
+        evidence = association["database_access_evidence"]
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["owner_symbol_id"], last_leaf)
+
+    def test_unreachable_database_access_is_not_attached(self):
+        source = graph()
+        handler = "symbol:server/routes/photos.js#listPhotos:10"
+        service = "symbol:server/services/photo_service.py#listPhotos:4"
+        orphan = "symbol:server/repos/photo_repo.py#load:4"
+        for path in ("server/services/photo_service.py", "server/repos/photo_repo.py"):
+            source["nodes"].append({
+                "id": "file:" + path, "type": "file", "label": path,
+                "evidence": {"path": path},
+            })
+        source["nodes"].extend([
+            {"id": handler, "type": "function", "label": "listPhotos",
+             "evidence": {"path": "server/routes/photos.js", "line": 10}},
+            {"id": service, "type": "function", "label": "listPhotos",
+             "evidence": {"path": "server/services/photo_service.py", "line": 4}},
+            {"id": orphan, "type": "function", "label": "load",
+             "evidence": {"path": "server/repos/photo_repo.py", "line": 4}},
+        ])
+        source["edges"].extend([
+            {"source": "file:server/routes/photos.js", "target": service,
+             "type": "calls", "caller_symbol_id": handler,
+             "resolution_status": "RESOLVED",
+             "evidence": {"path": "server/routes/photos.js", "line": 15}},
+            {"source": "file:server/repos/photo_repo.py", "target": "external:db.execute",
+             "type": "calls", "caller_symbol_id": orphan,
+             "resolution_status": "EXTERNAL",
+             "evidence": {"path": "server/repos/photo_repo.py", "line": 22}},
+        ])
+        result = project_business_graph(source, {
+            "endpoints": [{
+                "method": "GET", "path": "/photos",
+                "source": "server/routes/photos.js:20", "line": 20,
+                "handler_reference": "listPhotos",
+            }],
+            "database_accesses": [{
+                "source": "server/repos/photo_repo.py", "line": 22,
+                "callee": "db.execute", "operation": "SELECT", "tables": ["photos"],
+                "columns": ["id"], "parse_status": "RESOLVED",
+                "parser": "python-ast-single-line",
+            }],
+        })
+        # The orphan's access exists in the graph with a resolved owner, but
+        # it is not reachable from the handler, so the endpoint must not claim it.
+        access = next(n for n in result["nodes"] if n.get("business_kind") == "database_access")
+        self.assertEqual(access["business_details"]["owner_symbol_id"], orphan)
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        self.assertEqual(endpoint["handler_association"]["database_access_evidence"], [])
+
+    def test_identity_propagates_beyond_chain_depth_limit(self):
+        source = graph()
+        route_path = "server/routes/photos.py"
+        symbols = ["symbol:" + route_path + "#listPhotos:10"] + [
+            f"symbol:module_{index}.py#step_{index}:{index + 1}"
+            for index in range(9)
+        ]
+        for index, symbol in enumerate(symbols):
+            path = route_path if index == 0 else f"module_{index}.py"
+            name = "listPhotos" if index == 0 else f"step_{index - 1}"
+            source["nodes"].append({
+                "id": symbol, "type": "function", "label": name,
+                "evidence": {"path": path, "line": 10 if index == 0 else index},
+            })
+            source["nodes"].append({
+                "id": "file:" + path, "type": "file", "label": path,
+                "evidence": {"path": path},
+            })
+
+        def call_edge(caller, callee, path, line, expression, parameter):
+            return {
+                "source": "file:" + path, "target": callee, "type": "calls",
+                "caller_symbol_id": caller, "resolution_status": "RESOLVED",
+                "evidence": {"path": path, "line": line},
+                "argument_binding_status": "EXACT_STATIC_MAPPING",
+                "argument_bindings": [{
+                    "argument_index": 0, "argument_kind": "POSITIONAL",
+                    "argument_expression": expression,
+                    "argument_location": {"path": path, "line": line, "column": 20},
+                    "parameter_name": parameter, "parameter_index": 0,
+                    "parameter_kind": "positional_or_keyword",
+                    "parameter_declaration": {"path": path, "line": line, "column": 24},
+                }],
+                "target_location": {"path": path, "line": line},
+            }
+
+        for index in range(len(symbols) - 1):
+            path = route_path if index == 0 else f"module_{index}.py"
+            expression = "uid" if index == 0 else f"p{index}"
+            source["edges"].append(call_edge(
+                symbols[index], symbols[index + 1], path, 14 + index,
+                expression, f"p{index + 1}"))
+        result = project_business_graph(source, {
+            "endpoints": [{
+                "method": "GET", "path": "/photos",
+                "source": route_path + ":5", "line": 5,
+                "handler_reference": "listPhotos",
+            }],
+            "identity_evidence": [{
+                "evidence_id": "identity-source-deep",
+                "kind": "authenticated_identity_source",
+                "source": route_path, "line": 12,
+                "details": {"identity_expressions": ["request.user.id"],
+                            "source_variable": "uid"},
+                "scope": "SAME_LINE_PATTERN",
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "owner_symbol_id": symbols[0],
+                "owner_resolution_status": "RESOLVED",
+            }, {
+                "evidence_id": "sql-owner-binding-deep",
+                "kind": "sql_owner_parameter_binding",
+                "source": "module_9.py", "line": 11,
+                "details": {"binding_parameters": ["p9"],
+                            "resource_fields": ["owner_id"],
+                            "binding_status": "EXACT_BARE_IDENTIFIER_ARGUMENT"},
+                "scope": "SAME_LINE_PATTERN",
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "owner_symbol_id": symbols[-1],
+                "owner_resolution_status": "RESOLVED",
+            }],
+        })
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        association = endpoint["handler_association"]
+        self.assertTrue(association["call_chain_truncated"])
+        propagated = association["identity_parameter_propagation_evidence"]
+        self.assertEqual(len(propagated), 9)
+        by_depth = {item["propagation_depth"]: item for item in propagated}
+        self.assertEqual(by_depth[9]["parameter_name"], "p9")
+        self.assertEqual(by_depth[9]["propagation_status"],
+                         "MULTI_HOP_STATIC_PARAMETER_MAPPING")
+        self.assertEqual(len(by_depth[9]["propagation_chain"]), 9)
+        sql_links = association["identity_sql_sink_evidence"]
+        self.assertEqual(len(sql_links), 1)
+        self.assertEqual(sql_links[0]["binding_parameter"], "p9")
+        self.assertEqual(sql_links[0]["binding_status"],
+                         "PROPAGATED_PARAMETER_TO_SQL_OWNER_BINDING")
+
     def test_database_access_links_exact_owner_and_documented_table(self):
         source = graph()
         source["nodes"].extend([
