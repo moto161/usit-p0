@@ -134,6 +134,94 @@ def _owner_scope_endpoint_graph(identity_records):
     return project_business_graph(source, semantics), handler, load
 
 
+_TS_OWNER_SCOPE_LOAD = "symbol:web/photos.ts#loadPhotos:3"
+
+
+def _ts_owner_scope_identity_record(evidence_id, kind, line, owner=None, details=None):
+    record = {
+        "evidence_id": evidence_id, "kind": kind,
+        "source": "web/photos.ts", "line": line,
+        "details": details or {"identity_expressions": ["req.user.id"]},
+        "scope": "SAME_LINE_PATTERN",
+    }
+    if owner is not None:
+        record["owner_symbol_id"] = owner
+        record["owner_resolution_status"] = "RESOLVED"
+    return record
+
+
+def _ts_owner_scope_db_graph(db_lines, identity_records, extra_symbols=()):
+    """TS repo file: function `loadPhotos` (line 3) owns every DB call line."""
+    load = _TS_OWNER_SCOPE_LOAD
+    source = graph()
+    source["nodes"].extend([
+        {"id": "file:web/photos.ts", "type": "file", "label": "web/photos.ts",
+         "evidence": {"path": "web/photos.ts"}},
+        {"id": load, "type": "function", "label": "loadPhotos",
+         "evidence": {"path": "web/photos.ts", "line": 3}},
+    ])
+    for symbol_id, path, line in extra_symbols:
+        source["nodes"].append({
+            "id": symbol_id, "type": "function", "label": symbol_id.rsplit("#", 1)[-1],
+            "evidence": {"path": path, "line": line},
+        })
+    for line in db_lines:
+        source["edges"].append({
+            "source": "file:web/photos.ts", "target": "external:db", "type": "calls",
+            "caller_symbol_id": load, "resolution_status": "EXTERNAL",
+            "evidence": {"path": "web/photos.ts", "line": line},
+        })
+    semantics = {
+        "endpoints": [],
+        "database_accesses": [{
+            "source": "web/photos.ts", "line": line, "callee": "db.query",
+            "operation": "SELECT", "tables": ["photos"], "columns": ["id", "owner_id"],
+            "parse_status": "RESOLVED",
+        } for line in db_lines],
+        "authorization_checks": [],
+        "identity_evidence": identity_records,
+    }
+    return project_business_graph(source, semantics), load
+
+
+def _ts_owner_scope_endpoint_graph(identity_records):
+    """Route handler getPhotos calls repo function loadPhotos; loadPhotos runs the DB call."""
+    route_path = "web/routes.ts"
+    repo_path = "web/photos.ts"
+    handler = "symbol:" + route_path + "#getPhotos:2"
+    load = _TS_OWNER_SCOPE_LOAD
+    source = graph()
+    source["nodes"].extend([
+        {"id": "file:" + route_path, "type": "file", "label": route_path,
+         "evidence": {"path": route_path}},
+        {"id": "file:" + repo_path, "type": "file", "label": repo_path,
+         "evidence": {"path": repo_path}},
+        {"id": handler, "type": "function", "label": "getPhotos",
+         "evidence": {"path": route_path, "line": 2}},
+        {"id": load, "type": "function", "label": "loadPhotos",
+         "evidence": {"path": repo_path, "line": 3}},
+    ])
+    source["edges"].extend([
+        {"source": "file:" + route_path, "target": load, "type": "calls",
+         "caller_symbol_id": handler, "resolution_status": "RESOLVED",
+         "evidence": {"path": route_path, "line": 5}},
+        {"source": "file:" + repo_path, "target": "external:db", "type": "calls",
+         "caller_symbol_id": load, "resolution_status": "EXTERNAL",
+         "evidence": {"path": repo_path, "line": 6}},
+    ])
+    semantics = {
+        "endpoints": [{"method": "GET", "path": "/photos",
+                       "source": route_path + ":3", "line": 3,
+                       "handler_reference": "getPhotos"}],
+        "database_accesses": [{"source": repo_path, "line": 6, "callee": "db.query",
+                               "operation": "SELECT", "tables": ["photos"],
+                               "columns": ["id", "owner_id"], "parse_status": "RESOLVED"}],
+        "authorization_checks": [],
+        "identity_evidence": identity_records,
+    }
+    return project_business_graph(source, semantics), handler, load
+
+
 class BusinessGraphProjectionTests(unittest.TestCase):
     def test_links_records_only_to_exact_source_files(self):
         semantics = {
@@ -1265,6 +1353,105 @@ class BusinessGraphProjectionTests(unittest.TestCase):
                 details={"comparisons": [{"resource_field": "owner_id",
                                           "identity_expression": "request.user.id",
                                           "operator": "=="}]},
+            ),
+        ])
+        self.assertEqual(result["business_understanding"]["identity_evidence_owner_scope_links"], 2)
+        self.assertEqual(result["business_understanding"]["identity_evidence_records"], 2)
+
+    # P3: S2.9 owner-scope identity linking, TypeScript shape (records carry
+    # the function owner resolved by the TS parser; the graph logic is the
+    # same one P1 added for Python).
+
+    def test_ts_owner_scope_links_comparison_on_another_line_to_database_access(self):
+        result, handler, load = _ts_owner_scope_endpoint_graph([
+            _ts_owner_scope_identity_record(
+                "identity-ts-compare-1", "resource_owner_comparison", 5,
+                owner=_TS_OWNER_SCOPE_LOAD,
+                details={"comparisons": [{"resource_field": "owner_id",
+                                          "identity_expression": "req.user.id",
+                                          "operator": "==="}]},
+            ),
+        ])
+        db = next(n for n in result["nodes"] if n.get("business_kind") == "database_access")
+        self.assertEqual(db["business_details"].get("identity_evidence_ids"),
+                         ["identity-ts-compare-1"])
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        linked = endpoint["handler_association"]["identity_dataflow_evidence"]
+        self.assertEqual([row["identity_evidence_id"] for row in linked],
+                         ["identity-ts-compare-1"])
+        self.assertEqual(linked[0]["link_method"], "SAME_FUNCTION_SCOPE")
+        self.assertEqual(linked[0]["verification_status"], "NOT_VERIFIED")
+        self.assertEqual(result["business_understanding"]["identity_evidence_owner_scope_links"], 1)
+        flow = result["business_understanding"]["endpoint_execution_paths"][0]
+        self.assertEqual(flow["stage_status"]["identity_resource"], "DETECTED")
+
+    def test_ts_same_line_link_wins_without_duplicate(self):
+        result, handler, load = _ts_owner_scope_endpoint_graph([
+            _ts_owner_scope_identity_record(
+                "identity-ts-sink-1", "direct_authenticated_identity_to_sql_owner_binding",
+                6, owner=_TS_OWNER_SCOPE_LOAD,
+                details={"identity_expressions": ["req.user.id"],
+                         "resource_fields": ["owner_id"],
+                         "binding_status": "SAME_LINE_PARAMETER_EXPRESSION"},
+            ),
+        ])
+        endpoint = next(n for n in result["nodes"] if n.get("business_kind") == "endpoint")
+        linked = endpoint["handler_association"]["identity_dataflow_evidence"]
+        self.assertEqual(len(linked), 1)
+        self.assertEqual(linked[0]["link_method"], "SAME_LINE")
+        self.assertEqual(result["business_understanding"]["identity_evidence_owner_scope_links"], 0)
+
+    def test_ts_owner_scope_does_not_link_across_functions(self):
+        other = "symbol:web/photos.ts#other:20"
+        result, load = _ts_owner_scope_db_graph([6], [
+            _ts_owner_scope_identity_record(
+                "identity-ts-compare-2", "resource_owner_comparison", 21, owner=other,
+                details={"comparisons": [{"resource_field": "owner_id",
+                                          "identity_expression": "req.user.id",
+                                          "operator": "==="}]},
+            ),
+        ], extra_symbols=[(other, "web/photos.ts", 20)])
+        db = next(n for n in result["nodes"] if n.get("business_kind") == "database_access")
+        self.assertFalse(db["business_details"].get("identity_evidence_ids"))
+        self.assertEqual(result["business_understanding"]["identity_evidence_owner_scope_links"], 0)
+
+    def test_ts_owner_scope_does_not_link_without_resolved_owner(self):
+        # Parser-unavailable shape: no owner_symbol_id, not on the DB line.
+        result, load = _ts_owner_scope_db_graph([6], [
+            _ts_owner_scope_identity_record(
+                "identity-ts-compare-3", "resource_owner_comparison", 5),
+        ])
+        db = next(n for n in result["nodes"] if n.get("business_kind") == "database_access")
+        self.assertFalse(db["business_details"].get("identity_evidence_ids"))
+        self.assertEqual(result["business_understanding"]["identity_evidence_owner_scope_links"], 0)
+
+    def test_ts_sink_binding_kind_does_not_link_by_owner_scope(self):
+        result, load = _ts_owner_scope_db_graph([6], [
+            _ts_owner_scope_identity_record(
+                "identity-ts-sink-2", "direct_authenticated_identity_to_sql_owner_binding",
+                5, owner=_TS_OWNER_SCOPE_LOAD,
+                details={"identity_expressions": ["req.user.id"],
+                         "resource_fields": ["owner_id"],
+                         "binding_status": "INTRAPROCEDURAL_LINEAR_ASSIGNMENT",
+                         "propagation": [{"path": "web/photos.ts", "line": 4, "variable": "uid"}]},
+            ),
+        ])
+        db = next(n for n in result["nodes"] if n.get("business_kind") == "database_access")
+        self.assertFalse(db["business_details"].get("identity_evidence_ids"))
+        self.assertEqual(result["business_understanding"]["identity_evidence_owner_scope_links"], 0)
+
+    def test_ts_owner_scope_link_count_leaves_record_count_unchanged(self):
+        result, load = _ts_owner_scope_db_graph([6], [
+            _ts_owner_scope_identity_record(
+                "identity-ts-source-4", "authenticated_identity_source", 4,
+                owner=_TS_OWNER_SCOPE_LOAD,
+            ),
+            _ts_owner_scope_identity_record(
+                "identity-ts-compare-4", "resource_owner_comparison", 5,
+                owner=_TS_OWNER_SCOPE_LOAD,
+                details={"comparisons": [{"resource_field": "owner_id",
+                                          "identity_expression": "req.user.id",
+                                          "operator": "==="}]},
             ),
         ])
         self.assertEqual(result["business_understanding"]["identity_evidence_owner_scope_links"], 2)

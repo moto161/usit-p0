@@ -271,12 +271,19 @@ def _python_function_owners(path: str, source: str) -> dict[int, str]:
     return owners
 
 
-def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, Any]]:
+def extract_identity_evidence(code_by_file: dict[str, str],
+                              function_owners_by_file: dict[str, dict[int, str]] | None = None) -> list[dict[str, Any]]:
     """Extract identity evidence plus bounded, same-scope local-variable propagation.
 
     Propagation is intentionally limited to straight-line assignments within one
     brace/indent scope. Entering or leaving a block resets aliases; function and
     class declarations reset them too. This is not interprocedural taint analysis.
+
+    ``function_owners_by_file`` (P3) optionally supplies, per non-Python file, a
+    line-to-symbol map built from the TS parser's function line ranges
+    (``js_ts_parser.ts_function_owners``). Python files always keep their
+    AST-proven owners; without the map, non-Python records stay owner-less
+    (``UNKNOWN``), exactly as before.
     """
     records: list[dict[str, Any]] = []
     assignment = re.compile(
@@ -284,7 +291,13 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
     )
     identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
     for path, source in sorted(code_by_file.items()):
-        function_owners = _python_function_owners(path, source)
+        if path.lower().endswith(".py"):
+            function_owners = _python_function_owners(path, source)
+        elif function_owners_by_file is not None:
+            supplied = function_owners_by_file.get(path)
+            function_owners = supplied if isinstance(supplied, dict) else {}
+        else:
+            function_owners = {}
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0

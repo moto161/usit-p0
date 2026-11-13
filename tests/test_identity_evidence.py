@@ -370,6 +370,65 @@ class IdentityEvidenceTests(unittest.TestCase):
                          "MULTI_LINE_CALL_PARAMETER_EXPRESSION")
         self.assertEqual(binding["details"]["request_expressions"], ["request.body.user_id"])
 
+    # P3: TS/JS function owners supplied by the caller (TS parser ranges).
+
+    _P3_TS_SOURCE = (
+        "import { db } from './db';\n"
+        "\n"
+        "export async function loadPhotos(req: any) {\n"
+        "  const photo = await db.getPhoto(req.params.id);\n"
+        "  if (photo.owner_id === req.user.id) {\n"
+        "    const rows = await db.query(\"SELECT id FROM photos WHERE owner_id = ?\", [req.user.id]);\n"
+        "    return rows;\n"
+        "  }\n"
+        "  return [];\n"
+        "}\n"
+    )
+    _P3_TS_OWNERS = {"web/photos.ts": {
+        line: "symbol:web/photos.ts#loadPhotos:3" for line in range(3, 11)
+    }}
+
+    def test_typescript_comparison_resolves_function_owner_from_supplied_map(self):
+        rows = extract_identity_evidence(
+            {"web/photos.ts": self._P3_TS_SOURCE}, self._P3_TS_OWNERS)
+        comparison = next(row for row in rows
+                          if row["kind"] == "resource_owner_comparison")
+        self.assertEqual(comparison["line"], 5)
+        self.assertEqual(comparison["owner_symbol_id"],
+                         "symbol:web/photos.ts#loadPhotos:3")
+        self.assertEqual(comparison["owner_resolution_status"], "RESOLVED")
+
+    def test_typescript_record_outside_any_function_stays_unknown(self):
+        rows = extract_identity_evidence(
+            {"web/photos.ts": "const uid = req.user.id;\n" + self._P3_TS_SOURCE},
+            {"web/photos.ts": {
+                line: "symbol:web/photos.ts#loadPhotos:4" for line in range(4, 12)
+            }})
+        top_level = next(row for row in rows
+                         if row["kind"] == "authenticated_identity_source"
+                         and row["line"] == 1)
+        self.assertIsNone(top_level["owner_symbol_id"])
+        self.assertEqual(top_level["owner_resolution_status"], "UNKNOWN")
+        # Without a map the same file stays fully owner-less, as before P3.
+        unmapped = extract_identity_evidence({"web/photos.ts": self._P3_TS_SOURCE})
+        comparison = next(row for row in unmapped
+                          if row["kind"] == "resource_owner_comparison")
+        self.assertIsNone(comparison["owner_symbol_id"])
+        self.assertEqual(comparison["owner_resolution_status"], "UNKNOWN")
+
+    def test_python_owners_ignore_supplied_map(self):
+        rows = extract_identity_evidence(
+            {"repo/photos.py": (
+                "def load(request):\n"
+                "    uid = request.user.id\n"
+                "    return uid\n"
+            )},
+            {"repo/photos.py": {2: "symbol:repo/photos.py#bogus:99"}},
+        )
+        source = next(row for row in rows if row["kind"] == "authenticated_identity_source")
+        self.assertEqual(source["owner_symbol_id"], "symbol:repo/photos.py#load:1")
+        self.assertEqual(source["owner_resolution_status"], "RESOLVED")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from usit.js_ts_parser import analyze_js_ts_project
+from usit.js_ts_parser import analyze_js_ts_project, ts_function_owners
 from usit.scanner import discover_files
 from usit.vue_parser import vue_script_for_adapter
 
@@ -270,6 +270,66 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
                               if edge.get("method") == "typescript-api-client-call"]
             self.assertEqual(len(api_call_edges), 1)
             self.assertEqual(api_call_edges[0].get("route_path"), "/photos")
+
+    # P3: symbols carry their closing line, so a source line can be mapped
+    # to its innermost enclosing function.
+
+    _P3_SOURCE = (
+        "import { db } from './db';\n"
+        "\n"
+        "export async function loadPhotos(req: any) {\n"
+        "  const photo = await db.getPhoto(req.params.id);\n"
+        "  if (photo.owner_id === req.user.id) {\n"
+        "    const rows = await db.query(\"SELECT id FROM photos WHERE owner_id = ?\", [req.user.id]);\n"
+        "    return rows;\n"
+        "  }\n"
+        "  return [];\n"
+        "}\n"
+        "\n"
+        "export class PhotoRepo {\n"
+        "  async find(id: string) {\n"
+        "    const run = async () => {\n"
+        "      return 1;\n"
+        "    };\n"
+        "    return run();\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def _p3_parsed(self, root):
+        (root / "photos.ts").write_text(self._P3_SOURCE, encoding="utf-8")
+        (root / "db.ts").write_text(
+            "export const db = {\n"
+            "  async getPhoto(id: string) { return { owner_id: 1 }; },\n"
+            "  async query(sql: string, params: any[]) { return []; },\n"
+            "};\n",
+            encoding="utf-8",
+        )
+        return analyze_js_ts_project(root, discover_files(root))
+
+    def test_function_symbols_carry_end_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            parsed = self._p3_parsed(Path(td))
+            by_id = {item["symbol_id"]: item
+                     for item in parsed["files"]["photos.ts"]["symbols"]}
+            load = by_id["symbol:photos.ts#loadPhotos:3"]
+            self.assertEqual((load["line"], load["end_line"]), (3, 10))
+            find = by_id["symbol:photos.ts#PhotoRepo.find:13"]
+            self.assertEqual((find["line"], find["end_line"]), (13, 18))
+            run = by_id["symbol:photos.ts#PhotoRepo.run:14"]
+            self.assertEqual((run["line"], run["end_line"]), (14, 16))
+
+    def test_ts_function_owners_resolves_innermost_enclosing_function(self):
+        with tempfile.TemporaryDirectory() as td:
+            parsed = self._p3_parsed(Path(td))
+            owners = ts_function_owners(parsed)
+            photo = owners["photos.ts"]
+            self.assertEqual(photo[5], "symbol:photos.ts#loadPhotos:3")
+            self.assertEqual(photo[6], "symbol:photos.ts#loadPhotos:3")
+            self.assertEqual(photo[15], "symbol:photos.ts#PhotoRepo.run:14")
+            self.assertEqual(photo[17], "symbol:photos.ts#PhotoRepo.find:13")
+            self.assertNotIn(1, photo)
+            self.assertNotIn(12, photo)
 
 
 if __name__ == "__main__":

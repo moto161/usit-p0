@@ -22,6 +22,58 @@ EXPECTED_TYPESCRIPT_VERSION = "6.0.3"
 SOURCE_EXTENSIONS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue"}
 USIT_ROOT = Path(__file__).resolve().parents[1]
 
+# P3: only function-like symbols own source lines. Classes, interfaces,
+# types and enums do not; lines inside them belong to their methods (or to
+# no function at all when outside any method).
+_FUNCTION_OWNER_KINDS = frozenset({"function", "method"})
+
+
+def ts_function_owners(adapter_result: dict[str, Any]) -> dict[str, dict[int, str]]:
+    """Map source lines to the innermost enclosing TS/JS function symbol.
+
+    Pure function over an ``analyze_js_ts_project`` result (its ``files``
+    mapping). A symbol owns the closed line interval ``[line, end_line]``;
+    nested functions resolve to the innermost one (smallest span wins, then
+    earliest start, then symbol id — the same rule as
+    ``identity_evidence._python_function_owners``). Symbols without a
+    usable ``end_line`` are skipped (fail closed). The adapter's
+    ``symbol_id`` is reused verbatim, so the owner id always matches the
+    symbol the scanner records for the same file.
+    """
+    owners: dict[str, dict[int, str]] = {}
+    files = adapter_result.get("files")
+    if not isinstance(files, dict):
+        return owners
+    for path, parsed in files.items():
+        if not isinstance(path, str) or not isinstance(parsed, dict):
+            continue
+        symbols = parsed.get("symbols")
+        if not isinstance(symbols, list):
+            continue
+        scopes: list[tuple[int, int, int, str]] = []
+        for symbol in symbols:
+            if not isinstance(symbol, dict):
+                continue
+            if symbol.get("kind") not in _FUNCTION_OWNER_KINDS:
+                continue
+            start = symbol.get("line")
+            end = symbol.get("end_line")
+            symbol_id = symbol.get("symbol_id")
+            if (not isinstance(start, int) or not isinstance(end, int)
+                    or not isinstance(symbol_id, str) or not symbol_id
+                    or end < start):
+                continue
+            scopes.append((start, end, end - start, symbol_id))
+        if not scopes:
+            continue
+        file_owners: dict[int, str] = {}
+        for start, end, _span, symbol_id in sorted(
+                scopes, key=lambda item: (item[2], item[0], item[3])):
+            for line_no in range(start, end + 1):
+                file_owners.setdefault(line_no, symbol_id)
+        owners[path] = file_owners
+    return owners
+
 
 def _canonical_key(path: Path) -> str:
     """Comparison key for canonical paths: resolved, separator- and case-normalised.

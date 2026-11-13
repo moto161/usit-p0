@@ -33,8 +33,9 @@ from typing import Any
 from . import safety
 from .safeio import open_no_follow
 from .database_access import extract_database_accesses
-from .permission_evidence import extract_authorization_evidence
 from .identity_evidence import extract_identity_evidence
+from .js_ts_parser import SOURCE_EXTENSIONS, analyze_js_ts_project, ts_function_owners
+from .permission_evidence import extract_authorization_evidence
 
 SCHEMA_VERSION = "usit-business-semantics-v1"
 
@@ -397,6 +398,38 @@ class BusinessSemanticsAdapter:
             if p.suffix in (".js", ".ts", ".kt", ".java", ".py", ".sql", ".rb", ".go", ".cs", ".php"):
                 out.append(p)
         return out
+
+    def _js_ts_function_owners(self, code_blob_by_file: dict[str, str]) -> dict[str, dict[int, str]]:
+        """P3: line -> function-symbol map for JS/TS files, via the TS parser.
+
+        Memory mode over the already-read sources (the same shape the scanner
+        uses). Vue files are excluded on purpose (P3 is TS/JS only; a Vue
+        follow-up reuses the scanner's line-padded script wiring). Any parser
+        failure — unavailable parser, adapter error, no JS/TS files — degrades
+        to an empty map, so identity records stay UNKNOWN exactly as before.
+        """
+        js_ts_source = {
+            rel: text for rel, text in code_blob_by_file.items()
+            if Path(rel).suffix.lower() in SOURCE_EXTENSIONS
+            and Path(rel).suffix.lower() != ".vue"
+        }
+        if not js_ts_source:
+            return {}
+        try:
+            result = analyze_js_ts_project(
+                self.root, [self.root / rel for rel in js_ts_source],
+                js_ts_source=js_ts_source)
+        except Exception:
+            return {}
+        if not isinstance(result, dict) or not result.get("available", True):
+            return {}
+        fatal_codes = {"ADAPTER_TIMEOUT", "ADAPTER_START_FAILED", "ADAPTER_FAILED",
+                       "ADAPTER_INVALID_JSON"}
+        diagnostics = result.get("project_diagnostics", [])
+        if isinstance(diagnostics, list) and any(
+                isinstance(d, dict) and d.get("code") in fatal_codes for d in diagnostics):
+            return {}
+        return ts_function_owners(result)
 
     # ------------------------------------------------- markdown table parsing
     def _parse_md_tables(self, text: str) -> list[dict[str, Any]]:
@@ -806,7 +839,10 @@ class BusinessSemanticsAdapter:
         all_code = "\n".join(code_blob_by_file.values())
         database_accesses = extract_database_accesses(code_blob_by_file)
         authorization_checks = extract_authorization_evidence(code_blob_by_file)
-        identity_evidence = extract_identity_evidence(code_blob_by_file)
+        # P3: TS/JS identity records resolve their function owner through the
+        # TS parser's function line ranges; Python keeps its AST owners.
+        identity_evidence = extract_identity_evidence(
+            code_blob_by_file, self._js_ts_function_owners(code_blob_by_file))
 
         # (3) PRD features marked ✅ DONE whose backing permission field is never
         #     referenced in code.  This is the strongest "documented-but-fake"

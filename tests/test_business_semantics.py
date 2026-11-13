@@ -458,5 +458,38 @@ class PythonDecoratorRouteTests(unittest.TestCase):
         self.assertEqual(result["endpoints"], [])
 
 
+class IdentityFunctionScopeSemanticsTests(unittest.TestCase):
+    def test_typescript_comparison_record_resolves_function_owner_end_to_end(self):
+        # P3: analyze() runs the TS parser over the already-read sources and
+        # hands the function line ranges to identity extraction, so the
+        # comparison on line 5 resolves to the enclosing loadPhotos.
+        p = SyntheticProject(self)
+        p.route("web/photos.ts", (
+            "import { db } from './db';\n"
+            "\n"
+            "export async function loadPhotos(req: any) {\n"
+            "  const photo = await db.getPhoto(req.params.id);\n"
+            "  if (photo.owner_id === req.user.id) {\n"
+            "    const rows = await db.query(\"SELECT id FROM photos WHERE owner_id = ?\", [req.user.id]);\n"
+            "    return rows;\n"
+            "  }\n"
+            "  return [];\n"
+            "}\n"
+        ))
+        p.route("web/db.ts", (
+            "export const db = {\n"
+            "  async getPhoto(id: string) { return { owner_id: 1 }; },\n"
+            "  async query(sql: string, params: any[]) { return []; },\n"
+            "};\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        comparison = next(row for row in result["identity_evidence"]
+                          if row["kind"] == "resource_owner_comparison")
+        self.assertEqual(comparison["line"], 5)
+        self.assertEqual(comparison["owner_symbol_id"],
+                         "symbol:web/photos.ts#loadPhotos:3")
+        self.assertEqual(comparison["owner_resolution_status"], "RESOLVED")
+
+
 if __name__ == "__main__":
     unittest.main()

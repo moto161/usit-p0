@@ -1068,7 +1068,12 @@ function main(input) {
       if (name && kind) {
         const position = loc(sourceFile, node);
         const qn = parentNames.concat(name).join(".");
-        const item = { name, qualified_name: qn, kind, line: position.line, column: position.column, evidence: node.getText(sourceFile).slice(0, 240), parser_name: PARSER, parser_version: ts.version, symbol_id: "symbol:" + entry.rel + "#" + qn + ":" + position.line };
+        // P3: the closing line of the node's span, so callers can map a
+        // source line to its innermost enclosing function symbol. getEnd()
+        // excludes trailing trivia, so end_line is the line of the closing
+        // brace (or the declaration's last token).
+        const endPosition = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+        const item = { name, qualified_name: qn, kind, line: position.line, column: position.column, end_line: endPosition.line + 1, evidence: node.getText(sourceFile).slice(0, 240), parser_name: PARSER, parser_version: ts.version, symbol_id: "symbol:" + entry.rel + "#" + qn + ":" + position.line };
         row.symbols.push(item);
         record(entry, kind, qn, "defines", "UNKNOWN", 0.0, { definition: { path: entry.rel, line: position.line, column: position.column } }, position, []);
       }
