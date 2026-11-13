@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-import ast, base64, hashlib, json, os, re, sys, tempfile, time, shutil
+import ast, base64, hashlib, json, os, posixpath, re, sys, tempfile, time, shutil
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
@@ -10,6 +10,7 @@ from .parser_contract import CONTRACT_VERSION, parser_capabilities, adapt_graph_
 from .file_understanding import build_file_understanding, verify_understanding_identities
 from .js_ts_parser import analyze_js_ts_project, parser_availability
 from .vue_parser import vue_script_for_adapter, extract_vue_template_bindings, resolve_vue_bindings
+from .angular_parser import find_angular_components, extract_angular_template_bindings, resolve_angular_bindings
 from .safety import (MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_READ_BYTES, MAX_SCAN_SECONDS,
                      MAX_OUTPUT_BYTES, MAX_CONCURRENCY, MAX_PARSER_TASK_SECONDS, ScanAuthorization, ScanBlocked,
                      canonical_project, canonical_output, is_reparse_point, overlaps)
@@ -1078,6 +1079,30 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             continue
         row['vue_event_bindings'] = resolve_vue_bindings(
             extract_vue_template_bindings(text), row.get('symbols', []), row['path'])
+    # A1: Angular template event bindings: a component .ts row declares its
+    # template via templateUrl; the bindings live on the template (.html)
+    # row and resolve against the component row's merged method symbols.
+    # A templateUrl escaping the project never matches a row (fail-closed).
+    rows_by_path = {row['path']: row for row in rows}
+    for row in rows:
+        if row.get('language') not in {'TypeScript', 'TypeScript/JSX', 'JavaScript', 'JavaScript/JSX'}:
+            continue
+        text = content_by_path.get(row['path'])
+        if not isinstance(text, str):
+            continue
+        for component in find_angular_components(text):
+            template_rel = posixpath.normpath(posixpath.join(
+                posixpath.dirname(row['path']), component['template_url']))
+            template_row = rows_by_path.get(template_rel)
+            if template_row is None:
+                continue
+            template_text = content_by_path.get(template_rel)
+            if not isinstance(template_text, str):
+                continue
+            template_row.setdefault('angular_event_bindings', []).extend(
+                resolve_angular_bindings(
+                    extract_angular_template_bindings(template_text),
+                    row.get('symbols', []), template_rel, row['path']))
     # P0.7.4: cross-file resolution runs as a supervised *subprocess* task too,
     # obeying the same per-task timeout and concurrency cap as per-file analysis.
     # The worker receives the Python source text the parent already read (never
@@ -1233,6 +1258,32 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                 {'path': f['path'], 'line': ui_binding.get('line'), 'column': ui_binding.get('column'),
                  'event_name': ui_binding.get('event_name'), 'binding_expression': ui_binding.get('binding_expression')},
                 method='vue-template-event-handler-binding', confidence='high' if extras['resolved'] else 'low', **extras))
+        # A1: Angular template bindings, same shape as the Vue ones above.
+        # The edge source is the template (.html) file node; the target is
+        # the handler method symbol in the component .ts file.
+        for ui_binding in f.get('angular_event_bindings', []):
+            state = ui_binding.get('resolution_status', 'UNKNOWN')
+            target = ui_binding.get('target') or {}
+            extras = {'resolution_status': state, 'event_name': ui_binding.get('event_name', ''),
+                'binding_expression': ui_binding.get('binding_expression'), 'candidate': True,
+                'verified': False, 'verification_status': 'NOT_VERIFIED',
+                'evidence_chain': ui_binding.get('evidence_chain', [])}
+            target_id = target.get('id') if state == 'RESOLVED' else None
+            if target_id not in all_symbol_ids:
+                target_id = 'unresolved-ui-event:' + f['path'] + ':' + str(ui_binding.get('line')) + ':' + str(ui_binding.get('event_name'))
+                if not any(n['id'] == target_id for n in nodes):
+                    nodes.append({'id': target_id, 'type': 'unresolved',
+                        'label': ui_binding.get('binding_expression') or ui_binding.get('event_name') or 'UI event',
+                        'evidence': {'path': f['path'], 'line': ui_binding.get('line'), 'resolution_status': state}})
+                extras['resolved'] = False
+                if ui_binding.get('candidate_targets'):
+                    extras['candidate_targets'] = ui_binding['candidate_targets']
+            else:
+                extras['resolved'] = True
+            edges.append(_edge(fid, target_id, 'references',
+                {'path': f['path'], 'line': ui_binding.get('line'), 'column': ui_binding.get('column'),
+                 'event_name': ui_binding.get('event_name'), 'binding_expression': ui_binding.get('binding_expression')},
+                method='angular-template-event-handler-binding', confidence='high' if extras['resolved'] else 'low', **extras))
         for c in f['calls']:
             state=c.get('resolution_status','UNKNOWN')
             target=c.get('target') or {}

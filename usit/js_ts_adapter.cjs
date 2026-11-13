@@ -903,7 +903,12 @@ function main(input) {
           if (ts.isCallExpression(node)) {
             const calleeText = node.expression.getText(sourceFile);
             const isFetch = ts.isIdentifier(node.expression) && node.expression.text === "fetch";
-            const isAxios = /^(?:axios|http|api|client)\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText);
+            const isAxios = /^(?:axios|http|api|client)\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText)
+              // A1: Angular HttpClient is conventionally injected as `http`
+              // (`this.http.get(...)`); service wrappers (`this.api.*`,
+              // `this.client.*`) are internal calls, not direct HTTP calls,
+              // so only the `this.http` member matches.
+              || /^this\.http\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText);
             if (isFetch || isAxios) {
               const args = node.arguments || [];
               const urlArg = args[0];

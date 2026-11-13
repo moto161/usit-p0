@@ -231,7 +231,7 @@ Important: `DETECTED` means only that a recognized source pattern was found. `NO
 
 扫描器通过 TypeScript Compiler API 识别有限 JSX/TSX 事件属性（`onClick`、`onSubmit`、`onChange`、`onPress`、`onTap`、`onLongPress`），并在事件属性绑定到唯一命名函数/方法时建立带文件/行号的候选引用。业务理解摘要输出 `frontend_interaction_bindings`。内联回调、动态表达式、歧义符号和外部目标不会被伪装成已解析 handler。
 
-本切片只建立“UI 事件属性 → handler 符号”入口证据，尚未建立 handler → API client → 后端 endpoint → 数据库的完整业务链；Vue SFC 的模板事件绑定（`@event` / `v-on:event`，script 块按 TS 解析）已覆盖，Angular/XML/Jetpack Compose 等其他 UI 语法仍不覆盖，不证明事件在运行时触发或页面可达。所有记录保持 `STATIC_INFERENCE` / `NOT_VERIFIED`。
+本切片只建立“UI 事件属性 → handler 符号”入口证据，尚未建立 handler → API client → 后端 endpoint → 数据库的完整业务链；Vue SFC 的模板事件绑定（`@event` / `v-on:event`，script 块按 TS 解析）与 Angular 外部模板事件绑定（`(event)` / `on-event`，经 `templateUrl` 关联组件类；组件方法里的 `this.http.*` 识别为 API client 调用）已覆盖，内联 `template:`、XML/Jetpack Compose 等其他 UI 语法仍不覆盖，不证明事件在运行时触发或页面可达。所有记录保持 `STATIC_INFERENCE` / `NOT_VERIFIED`。
 
 
 ## S2.13-B — 前端 API 调用与后端接口候选关联

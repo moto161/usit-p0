@@ -882,6 +882,26 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(chains[0]["endpoint_node_id"], endpoints[0]["id"])
         self.assertEqual(chains[0]["handler_symbol_id"], handler)
 
+    def test_angular_template_binding_joins_frontend_chain(self):
+        handler = "symbol:web/photo-card.component.ts#savePhoto:11"
+        binding_edge = {
+            "source": "file:web/photo-card.component.html", "target": handler, "type": "references",
+            "method": "angular-template-event-handler-binding",
+            "resolution_status": "RESOLVED", "event_name": "click",
+            "binding_expression": "savePhoto()",
+            "evidence": {"path": "web/photo-card.component.html", "line": 1},
+        }
+        result, endpoints = _api_link_result(
+            ["/api/photos"], [_api_edge("/api/photos", resolution="LITERAL_METHOD_PATH", caller=handler)],
+            extra_nodes=[{"id": "file:web/photo-card.component.html", "type": "file",
+                          "label": "web/photo-card.component.html", "evidence": {"path": "web/photo-card.component.html"}}],
+            extra_edges=[binding_edge])
+        chains = result["business_understanding"]["frontend_business_chains"]
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0]["resolution_status"], "EXACT_MATCH")
+        self.assertEqual(chains[0]["endpoint_node_id"], endpoints[0]["id"])
+        self.assertEqual(chains[0]["handler_symbol_id"], handler)
+
     def test_frontend_chain_includes_template_match(self):
         handler = "symbol:web/app.tsx#loadPhoto:8"
         binding_edge = {

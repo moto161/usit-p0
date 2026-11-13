@@ -36,9 +36,13 @@ def ts_function_owners(adapter_result: dict[str, Any]) -> dict[str, dict[int, st
     nested functions resolve to the innermost one (smallest span wins, then
     earliest start, then symbol id — the same rule as
     ``identity_evidence._python_function_owners``). Symbols without a
-    usable ``end_line`` are skipped (fail closed). The adapter's
-    ``symbol_id`` is reused verbatim, so the owner id always matches the
-    symbol the scanner records for the same file.
+    usable ``end_line`` are skipped (fail closed). The owner id is built
+    from the symbol's bare ``name`` and ``line`` (``symbol:<path>#<name>:<line>``):
+    that is the form the scanner uses for graph symbol node ids and the
+    adapter uses for ``caller_symbol_id``, so the owner matches the
+    database-access owner and the graph's symbol lookup. The adapter's
+    ``symbol_id`` field must NOT be reused here: it carries the qualified
+    name (``Class.method``), which matches neither.
     """
     owners: dict[str, dict[int, str]] = {}
     files = adapter_result.get("files")
@@ -58,12 +62,13 @@ def ts_function_owners(adapter_result: dict[str, Any]) -> dict[str, dict[int, st
                 continue
             start = symbol.get("line")
             end = symbol.get("end_line")
-            symbol_id = symbol.get("symbol_id")
+            name = symbol.get("name")
             if (not isinstance(start, int) or not isinstance(end, int)
-                    or not isinstance(symbol_id, str) or not symbol_id
+                    or not isinstance(name, str) or not name
                     or end < start):
                 continue
-            scopes.append((start, end, end - start, symbol_id))
+            scopes.append((start, end, end - start,
+                           f"symbol:{path}#{name}:{start}"))
         if not scopes:
             continue
         file_owners: dict[int, str] = {}
