@@ -10,9 +10,9 @@
       "reason": "Maintained graph-v1 validation to enforce structured argument-to-parameter evidence and preserve business-relationship metadata without promoting static evidence to runtime verification; successor blob is pinned while historical PRE SHA-256 remains unchanged."
     },
     "usit/scanner.py": {
-      "git_blob_sha1": "caf38ceccecde60213f50e06fdc7a4d63e9e0553",
+      "git_blob_sha1": "83d6fc9c4e379e6f6608732f3b2fc125d41e8c22",
       "historical_sha256": "c70a1a4baf3a6a17cb7ec0ed4748db7194d70e3008ab32f0ac05e3e55f797912",
-      "reason": "Maintained scanner pipeline for route-handler, UI-event and API-client relationships, stronger discovery-to-open identity checks, explicit evidence propagation, and bounded no-follow previous-manifest loading; historical PRE SHA-256 remains unchanged."
+      "reason": "Maintained scanner pipeline for route-handler, UI-event and API-client relationships, stronger discovery-to-open identity checks, explicit evidence propagation, and bounded no-follow previous-manifest loading; historical PRE SHA-256 remains unchanged. H2 (2026-11-13) selects the route-handler binding edge method by row language (Python rows emit python-route-handler-binding, others emit typescript-route-handler-binding); successor blob updated accordingly."
     },
     "tests/test_graph_validation.py": {
       "git_blob_sha1": "a7cc5b0feb38971e6d0301e11909bcdd7e474917",
