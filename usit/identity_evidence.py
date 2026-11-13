@@ -1,7 +1,10 @@
 """Conservative identity-to-resource data-flow evidence.
 
-Only same-line, syntactically explicit patterns are emitted. This is not a
-general taint engine and never proves runtime identity or authorization.
+Only same-line, syntactically explicit patterns are emitted, except that
+a database call spanning several lines is joined on balanced parens (at
+most 10 physical lines) for the sink check; the record lands on the
+call's first line. This is not a general taint engine and never proves
+runtime identity or authorization.
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ _REQUEST = re.compile(
 _OWNER_FIELD = re.compile(r"\b(owner_?id|user_?id|created_?by|account_?id)\b", re.I)
 _DB_CALL = re.compile(r"\.(?:execute|query|raw)\s*\(")
 _OWNER_PREDICATE = re.compile(
-    r"\b(?:owner_?id|user_?id|created_?by|account_?id)\s*=\s*(?:\?|\$\d+|:[A-Za-z_]\w*)",
+    r"\b(?:owner_?id|user_?id|created_?by|account_?id)\s*=\s*(?:\?|\$\d+|:[A-Za-z_]\w*|%s|%\([A-Za-z_]\w*\)s)",
     re.I,
 )
 _COMPARE = re.compile(
@@ -193,6 +196,56 @@ def _call_parameter_expressions(line: str, call_start: int) -> list[str]:
     return cleaned
 
 
+def _join_balanced_call(lines: list[str], start_index: int, call_start: int) -> tuple[str, int] | None:
+    """Join physical lines until the call's parens balance, or None.
+
+    Scans from just after the call's opening paren, tracking the bracket
+    stack and string quotes (``'``/``"``/backtick, ``\\`` escapes) exactly
+    like _call_parameter_code; a paren inside a string literal does not
+    count. At most 10 physical lines; unbalanced within the cap returns
+    None (fail-closed, the caller falls back to the first line alone).
+    """
+    stack = ["("]
+    quote: str | None = None
+    escaped = False
+    parts = [lines[start_index]]
+    current = lines[start_index]
+    pos = call_start + 1
+    end_index = start_index
+    while True:
+        while pos < len(current):
+            char = current[pos]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+            elif char in {"'", '"'} or char == chr(96):
+                quote = char
+            elif char in "([{":
+                stack.append(char)
+            elif char in ")]}":
+                if not stack:
+                    return None
+                expected = {")": "(", "]": "[", "}": "{"}[char]
+                if stack[-1] != expected:
+                    return None
+                stack.pop()
+                if not stack:
+                    return ("\n".join(parts), end_index)
+            pos += 1
+        if end_index - start_index >= 9:
+            return None
+        end_index += 1
+        if end_index >= len(lines):
+            return None
+        parts.append(lines[end_index])
+        current = lines[end_index]
+        pos = 0
+
+
 def _python_function_owners(path: str, source: str) -> dict[int, str]:
     """Map source lines to the innermost AST-proven Python function symbol.
 
@@ -238,7 +291,8 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
         previous_indent = 0
         python_scope_indent: int | None = None
         is_python = path.lower().endswith(".py")
-        for line_no, line in enumerate(source.splitlines(), 1):
+        all_lines = source.splitlines()
+        for line_no, line in enumerate(all_lines, 1):
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
             if is_python:
@@ -284,11 +338,27 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
             if comparisons:
                 kinds.append(("resource_owner_comparison", {"comparisons": comparisons}))
 
-            sink = bool(_DB_CALL.search(line) and _OWNER_PREDICATE.search(line))
+            # P2: a DB call may span lines (SQL on one line, parameters on
+            # the next). Join the call on balanced parens (at most 10
+            # physical lines) and run the sink checks on the joined text;
+            # the record still lands on the call's first line.
+            call_match = _DB_CALL.search(line)
+            effective_line = line
+            call_end_line = line_no
+            multi_line_call = False
+            if call_match:
+                joined = _join_balanced_call(all_lines, line_no - 1, call_match.end() - 1)
+                if joined is not None:
+                    effective_line, end_index = joined
+                    call_end_line = end_index + 1
+                    multi_line_call = call_end_line > line_no
+            sink = bool(call_match and _OWNER_PREDICATE.search(effective_line))
             if sink:
-                call_match = _DB_CALL.search(line)
-                parameter_code = _call_parameter_code(line, call_match.end() - 1)
-                parameter_expressions = _call_parameter_expressions(line, call_match.end() - 1)
+                sink_span: dict[str, Any] = {"multi_line_call": multi_line_call}
+                if multi_line_call:
+                    sink_span["call_lines"] = [line_no, call_end_line]
+                parameter_code = _call_parameter_code(effective_line, call_match.end() - 1)
+                parameter_expressions = _call_parameter_expressions(effective_line, call_match.end() - 1)
                 parameter_trusted = sorted(set(
                     match.group(0) for match in _TRUSTED.finditer(parameter_code)
                 ))
@@ -309,16 +379,25 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                         "resource_fields": owner_fields,
                         "binding_parameters": binding_parameters,
                         "binding_status": "EXACT_BARE_IDENTIFIER_ARGUMENT",
+                        **sink_span,
                     }))
                 if parameter_trusted:
                     kinds.append(("direct_authenticated_identity_to_sql_owner_binding", {
                         "identity_expressions": parameter_trusted, "resource_fields": owner_fields,
-                        "binding_status": "SAME_LINE_PARAMETER_EXPRESSION",
+                        "binding_status": (
+                            "MULTI_LINE_CALL_PARAMETER_EXPRESSION" if multi_line_call
+                            else "SAME_LINE_PARAMETER_EXPRESSION"
+                        ),
+                        **sink_span,
                     }))
                 if parameter_request:
                     kinds.append(("direct_request_identity_to_sql_owner_binding", {
                         "request_expressions": parameter_request, "resource_fields": owner_fields,
-                        "binding_status": "SAME_LINE_PARAMETER_EXPRESSION",
+                        "binding_status": (
+                            "MULTI_LINE_CALL_PARAMETER_EXPRESSION" if multi_line_call
+                            else "SAME_LINE_PARAMETER_EXPRESSION"
+                        ),
+                        **sink_span,
                     }))
                 # Resolve aliases only in non-literal positional arguments after
                 # the SQL argument; names in SQL text or trailing expressions do not count.
@@ -335,6 +414,7 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                             "propagation": origin["propagation"] + [
                                 {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}
                             ],
+                            **sink_span,
                         }))
                     elif origin["kind"] == "request":
                         kinds.append(("direct_request_identity_to_sql_owner_binding", {
@@ -344,6 +424,7 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                             "propagation": origin["propagation"] + [
                                 {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}
                             ],
+                            **sink_span,
                         }))
 
             for kind, details in kinds:
@@ -351,7 +432,12 @@ def extract_identity_evidence(code_by_file: dict[str, str]) -> list[dict[str, An
                     "authenticated_identity_source", "request_controlled_identity_input"
                 }:
                     details["source_variable"] = assigned_variable
-                scope = "INTRAPROCEDURAL_LINEAR_ASSIGNMENT" if details.get("binding_status") == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT" else "SAME_LINE_PATTERN"
+                if details.get("binding_status") == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT":
+                    scope = "INTRAPROCEDURAL_LINEAR_ASSIGNMENT"
+                elif details.get("multi_line_call"):
+                    scope = "MULTI_LINE_CALL"
+                else:
+                    scope = "SAME_LINE_PATTERN"
                 row = {
                     "evidence_id": "", "kind": kind, "source": path, "line": line_no,
                     "details": details, "confidence": "STATIC_INFERENCE",

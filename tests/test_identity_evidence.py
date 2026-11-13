@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from usit.database_access import extract_database_accesses
 from usit.identity_evidence import extract_identity_evidence
 
 
@@ -219,6 +220,155 @@ class IdentityEvidenceTests(unittest.TestCase):
         })
         bindings = [row for row in rows if row["kind"].endswith("_to_sql_owner_binding")]
         self.assertEqual(bindings, [])
+
+    # P2: multi-line database calls joined on balanced parens.
+
+    def test_python_multiline_call_binds_aliased_identity(self):
+        source = (
+            "def load(request):\n"
+            "    uid = request.user.id\n"
+            "    cursor.execute(\n"
+            '        "SELECT id FROM photos WHERE owner_id = %s",\n'
+            "        (uid,),\n"
+            "    )\n"
+        )
+        rows = extract_identity_evidence({"repo/photos.py": source})
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 3)
+        self.assertEqual(binding["scope"], "INTRAPROCEDURAL_LINEAR_ASSIGNMENT")
+        self.assertTrue(binding["details"]["multi_line_call"])
+        self.assertEqual(binding["details"]["call_lines"], [3, 6])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [2, 3])
+        # The sink record lands on the DB access record's line, so S2.9 can attach it.
+        db = extract_database_accesses({"repo/photos.py": source})
+        self.assertEqual(len(db), 1)
+        self.assertEqual(db[0]["line"], 3)
+
+    def test_python_multiline_call_binds_direct_identity_expression(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def load(request):\n"
+                "    cursor.execute(\n"
+                '        "SELECT id FROM photos WHERE owner_id = %s",\n'
+                "        (request.user.id,),\n"
+                "    )\n"
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 2)
+        self.assertEqual(binding["scope"], "MULTI_LINE_CALL")
+        self.assertEqual(binding["details"]["binding_status"],
+                         "MULTI_LINE_CALL_PARAMETER_EXPRESSION")
+        self.assertTrue(binding["details"]["multi_line_call"])
+        self.assertEqual(binding["details"]["call_lines"], [2, 5])
+
+    def test_javascript_multiline_call_binds_aliased_identity(self):
+        rows = extract_identity_evidence({
+            "repo/photos.js": (
+                "async function load(req) {\n"
+                "  const uid = req.user.id;\n"
+                "  const rows = await pool.query(\n"
+                '    "SELECT id FROM photos WHERE owner_id = ?",\n'
+                "    [uid]\n"
+                "  );\n"
+                "}\n"
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 3)
+        self.assertTrue(binding["details"]["multi_line_call"])
+        self.assertEqual(binding["details"]["call_lines"], [3, 6])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [2, 3])
+
+    def test_single_line_call_is_not_marked_multiline(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def load(request):\n"
+                '    cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (request.user.id,))\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 2)
+        self.assertFalse(binding["details"]["multi_line_call"])
+        self.assertEqual(binding["scope"], "SAME_LINE_PATTERN")
+        self.assertEqual(binding["details"]["binding_status"], "SAME_LINE_PARAMETER_EXPRESSION")
+        self.assertNotIn("call_lines", binding["details"])
+
+    def test_call_spanning_more_than_ten_lines_is_not_joined(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def load(request):\n"
+                "    uid = request.user.id\n"
+                "    cursor.execute(\n"
+                '        "SELECT id FROM photos WHERE owner_id = %s",\n'
+                "        (uid,),\n"
+                "        # pad 1\n"
+                "        # pad 2\n"
+                "        # pad 3\n"
+                "        # pad 4\n"
+                "        # pad 5\n"
+                "        # pad 6\n"
+                "        # pad 7\n"
+                "    )\n"
+            )
+        })
+        bindings = [row for row in rows if row["kind"].endswith("_to_sql_owner_binding")
+                    or row["kind"] == "sql_owner_parameter_binding"]
+        self.assertEqual(bindings, [])
+
+    def test_paren_inside_string_literal_does_not_break_join(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def load(request):\n"
+                "    uid = request.user.id\n"
+                "    cursor.execute(\n"
+                '        "SELECT id FROM photos WHERE note = \'(\' "\n'
+                '        "AND owner_id = %s",\n'
+                "        (uid,),\n"
+                "    )\n"
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 3)
+        self.assertTrue(binding["details"]["multi_line_call"])
+        self.assertEqual(binding["details"]["call_lines"], [3, 7])
+
+    def test_multiline_call_without_owner_predicate_yields_no_binding(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def load(request):\n"
+                "    cursor.execute(\n"
+                '        "SELECT id FROM photos WHERE title = %s",\n'
+                "        (title,),\n"
+                "    )\n"
+            )
+        })
+        bindings = [row for row in rows if row["kind"].endswith("_to_sql_owner_binding")
+                    or row["kind"] == "sql_owner_parameter_binding"]
+        self.assertEqual(bindings, [])
+
+    def test_python_multiline_call_binds_request_identity(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def load(request):\n"
+                "    cursor.execute(\n"
+                '        "SELECT id FROM photos WHERE owner_id = %s",\n'
+                "        (request.body.user_id,),\n"
+                "    )\n"
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 2)
+        self.assertTrue(binding["details"]["multi_line_call"])
+        self.assertEqual(binding["details"]["binding_status"],
+                         "MULTI_LINE_CALL_PARAMETER_EXPRESSION")
+        self.assertEqual(binding["details"]["request_expressions"], ["request.body.user_id"])
 
 
 if __name__ == "__main__":
