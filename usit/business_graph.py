@@ -696,22 +696,38 @@ def project_business_graph(graph: Mapping[str, Any],
                 database_table_links += 1
 
     # S2.9: project line-anchored identity/resource data-flow evidence.
-    # A record is linked to a DB access only on an exact same-file, same-line
-    # match. No cross-line taint propagation or ownership inference is performed.
+    # A record is linked to a DB access on an exact same-file, same-line
+    # match. In addition (P1), a handler-level record whose function owner
+    # is resolved attaches to DB accesses owned by the same function
+    # (SAME_FUNCTION_SCOPE, candidate only). Sink-binding records stay
+    # line-exact: their propagation chain ends at a specific sink line, so
+    # attaching them to other DB calls in the same function would be a
+    # false association. No control-flow analysis is performed.
+    _OWNER_SCOPE_IDENTITY_KINDS = {
+        "authenticated_identity_source",
+        "request_controlled_identity_input",
+        "resource_owner_comparison",
+    }
     identity_records = semantics.get("identity_evidence", [])
     if not isinstance(identity_records, list):
         raise ValueError("semantics.identity_evidence must be a list")
     identity_linked = 0
     identity_unlinked = 0
+    identity_owner_scope_links = 0
     identity_nodes: list[dict[str, Any]] = []
     identity_by_database_id: dict[str, list[dict[str, Any]]] = {}
     database_nodes_by_location: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    database_nodes_by_owner: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in nodes:
         if item.get("business_kind") != "database_access":
             continue
         evidence = item.get("evidence") or {}
         if isinstance(evidence.get("path"), str) and isinstance(evidence.get("line"), int):
             database_nodes_by_location.setdefault((evidence["path"], evidence["line"]), []).append(item)
+        item_details = item.get("business_details") or {}
+        item_owner = item_details.get("owner_symbol_id")
+        if isinstance(evidence.get("path"), str) and isinstance(item_owner, str):
+            database_nodes_by_owner.setdefault((evidence["path"], item_owner), []).append(item)
     for raw in identity_records:
         if not isinstance(raw, Mapping):
             continue
@@ -759,6 +775,10 @@ def project_business_graph(graph: Mapping[str, Any],
             })
         identity_nodes.append(identity_node)
         matching_db = database_nodes_by_location.get((path, line), [])
+        matching_db_ids = {
+            db_node.get("id") for db_node in matching_db
+            if isinstance(db_node.get("id"), str)
+        }
         for db_node in matching_db:
             db_id = db_node.get("id")
             if isinstance(db_id, str):
@@ -768,6 +788,7 @@ def project_business_graph(graph: Mapping[str, Any],
                     "path": path, "line": line,
                     "details": dict(details),
                     "scope": raw.get("scope") or "UNKNOWN",
+                    "link_method": "SAME_LINE",
                     "confidence": "STATIC_INFERENCE",
                     "verification_status": "NOT_VERIFIED",
                 })
@@ -776,6 +797,31 @@ def project_business_graph(graph: Mapping[str, Any],
                     refs = db_details.setdefault("identity_evidence_ids", [])
                     if identity_id not in refs:
                         refs.append(identity_id)
+        # P1: owner-scope linking for handler-level records only. A record
+        # already linked same-line to a DB node is not linked twice.
+        if (isinstance(owner_symbol_id, str)
+                and raw.get("kind") in _OWNER_SCOPE_IDENTITY_KINDS):
+            for db_node in database_nodes_by_owner.get((path, owner_symbol_id), []):
+                db_id = db_node.get("id")
+                if not isinstance(db_id, str) or db_id in matching_db_ids:
+                    continue
+                matching_db_ids.add(db_id)
+                identity_by_database_id.setdefault(db_id, []).append({
+                    "identity_evidence_id": identity_id,
+                    "kind": raw.get("kind") or "UNKNOWN",
+                    "path": path, "line": line,
+                    "details": dict(details),
+                    "scope": raw.get("scope") or "UNKNOWN",
+                    "link_method": "SAME_FUNCTION_SCOPE",
+                    "confidence": "STATIC_INFERENCE",
+                    "verification_status": "NOT_VERIFIED",
+                })
+                db_details = db_node.get("business_details")
+                if isinstance(db_details, dict):
+                    refs = db_details.setdefault("identity_evidence_ids", [])
+                    if identity_id not in refs:
+                        refs.append(identity_id)
+                identity_owner_scope_links += 1
         identity_linked += 1
 
     # S2.7: project explicit authorization guard/check evidence.
@@ -1364,6 +1410,7 @@ def project_business_graph(graph: Mapping[str, Any],
         "database_access_table_links": database_table_links,
         "identity_evidence_records": identity_linked,
         "identity_evidence_unlinked": identity_unlinked,
+        "identity_evidence_owner_scope_links": identity_owner_scope_links,
         "authorization_check_records": authorization_linked,
         "authorization_check_unowned": authorization_unowned,
         "limitations": [
@@ -1375,7 +1422,7 @@ def project_business_graph(graph: Mapping[str, Any],
             "调用链仅沿唯一 RESOLVED 的图谱符号边进行有界静态展开；循环会标记，深度/数量上限会截断，不证明运行时执行。",
             "数据库访问只识别字面量表达式（隐式拼接、`+` 链、多行与模板字面量；动态插值以 `?` 占位，仅静态骨架参与解析）；变量/调用/`.format()`/`%`/ORM/跨行变量传播仍不解析；表/列解析仅为静态候选，不证明实际读写、事务提交或字段数据流。",
             "权限证据仅识别有限的 route middleware 名称、显式权限调用名和简单 role/owner 条件；函数权限调用只有在同文件同调用行的唯一 caller_symbol_id 存在时才归属函数。未检测到权限线索不证明缺少授权，检测到线索也不证明运行时执行或检查正确。",
-            "身份/资源数据流仅识别有限同一源码行模式；只有身份线索与数据库调用位于同文件同一行时才附着到数据库访问，再经已解析 endpoint 调用链关联。未做跨行变量/参数/返回值传播、别名解析、ORM 映射或控制流分析；同一行模式不证明运行时身份可信或资源授权正确。",
+            "身份/资源数据流仅识别有限同一源码行模式与同一 Python 函数归属；同行附着之外，handler 级身份线索（身份来源、请求控制身份输入、属主比较）在函数归属已解析时附着到同函数的数据库访问（SAME_FUNCTION_SCOPE，候选关联）；sink 绑定仍只认同行；JS/TS 暂无函数归属。未做跨函数返回值传播、ORM 映射或控制流分析；同行/同函数模式不证明运行时身份可信或资源授权正确。",
         ],
     }
     return result
