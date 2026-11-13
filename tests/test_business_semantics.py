@@ -336,5 +336,127 @@ class FieldGapLocatorTests(unittest.TestCase):
         self.assertEqual(result["field_gap_count"], 0)
 
 
+class PythonDecoratorRouteTests(unittest.TestCase):
+    def test_flask_route_with_single_method(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@bp.route('/photos', methods=['GET'])\n"
+            "def list_photos():\n"
+            "    return []\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 1)
+        ep = result["endpoints"][0]
+        self.assertEqual((ep["method"], ep["path"]), ("GET", "/photos"))
+        self.assertEqual(ep["handler_reference"], "list_photos")
+        self.assertEqual(ep["line"], 4)
+
+    def test_flask_route_with_multiple_methods_yields_one_endpoint_each(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@bp.route('/photos', methods=['GET', 'POST'])\n"
+            "def upload_photo():\n"
+            "    return {}\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 2)
+        by_method = {item["method"]: item for item in result["endpoints"]}
+        self.assertEqual(set(by_method), {"GET", "POST"})
+        self.assertEqual(by_method["GET"]["handler_reference"], "upload_photo")
+        self.assertEqual(by_method["POST"]["handler_reference"], "upload_photo")
+        self.assertEqual(by_method["POST"]["line"], 4)
+
+    def test_flask_route_without_methods_defaults_to_get(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@app.route('/photos')\n"
+            "def list_photos():\n"
+            "    return []\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 1)
+        self.assertEqual(result["endpoints"][0]["method"], "GET")
+        self.assertEqual(result["endpoints"][0]["handler_reference"], "list_photos")
+
+    def test_fastapi_verb_decorators_and_async_def(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from fastapi import APIRouter\n"
+            "router = APIRouter()\n"
+            "\n"
+            "@router.get('/photos')\n"
+            "async def list_photos():\n"
+            "    return []\n"
+            "\n"
+            "@router.post('/photos')\n"
+            "def upload_photo():\n"
+            "    return {}\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        by_method = {item["method"]: item for item in result["endpoints"]}
+        self.assertEqual(set(by_method), {"GET", "POST"})
+        self.assertEqual(by_method["GET"]["handler_reference"], "list_photos")
+        self.assertEqual(by_method["GET"]["line"], 4)
+        self.assertEqual(by_method["POST"]["handler_reference"], "upload_photo")
+        self.assertEqual(by_method["POST"]["line"], 8)
+
+    def test_guard_decorator_between_route_and_def(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@bp.route('/secret')\n"
+            "@login_required\n"
+            "def secret():\n"
+            "    return {}\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 1)
+        ep = result["endpoints"][0]
+        self.assertEqual(ep["handler_reference"], "secret")
+        self.assertEqual(ep["code_auth"], "auth")
+
+    def test_decorator_without_following_def_yields_endpoint_without_handler(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "@bp.route('/orphan')\n"
+            "x = 1\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 1)
+        ep = result["endpoints"][0]
+        self.assertEqual((ep["method"], ep["path"]), ("GET", "/orphan"))
+        self.assertEqual(ep["handler_reference"], "")
+
+    def test_fstring_path_yields_no_endpoint(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "@bp.route(f'/photos/{photo_id}')\n"
+            "def get_photo(photo_id):\n"
+            "    return {}\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["endpoints"], [])
+
+    def test_non_route_python_file_yields_no_endpoints(self):
+        p = SyntheticProject(self)
+        p.route("server/repos/photo_repo.py", (
+            "def helper():\n"
+            "    return 1\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["endpoints"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

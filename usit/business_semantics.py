@@ -51,6 +51,19 @@ MAX_FILES = safety.MAX_FILES
 _ROUTE_LINE = re.compile(
     r"router\.(get|post|put|delete|patch)\s*\(\s*['\"]([^'\"]+)['\"]"
 )
+# Python decorator-route matching (Flask / FastAPI style). The decorator call
+# must close on the same line; the handler is the `def` that follows it (see
+# _decorator_route_handler). Only string-literal paths are accepted, matching
+# _ROUTE_LINE's literal-only rule; f-strings and variables yield no endpoint.
+_DECORATOR_ROUTE = re.compile(
+    r"^\s*@\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\.(route|get|post|put|delete|patch)"
+    r"\s*\(\s*['\"]([^'\"]+)['\"]"
+)
+_DEF_LINE = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(")
+_METHODS_LIST = re.compile(r"methods\s*=\s*\[([^\]]*)\]")
+_STRING_LITERAL = re.compile(r"""['"]([^'"]+)['"]""")
+_LOGIN_REQUIRED = re.compile(r"\blogin_required\b")
+_ADMIN_REQUIRED_PY = re.compile(r"\badmin_required\b")
 _AUTH_REQUIRED = re.compile(r"\bauthRequired\b")
 _ADMIN_REQUIRED = re.compile(r"\badminRequired\b")
 _ROLE_ADMIN = re.compile(r"role\s*[!=]==?\s*['\"]admin['\"]")
@@ -99,6 +112,50 @@ def _route_handler_reference(line: str, start: int) -> str:
         return ""
     candidate = args[-1].strip()
     return candidate if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*", candidate) else ""
+
+
+def _route_methods(line: str, start: int) -> list[str] | None:
+    """Methods from a Flask `@...route(..., methods=[...])` decorator line.
+
+    Returns None when `methods=` is present but yields no string literal
+    (fail closed: do not guess Flask's default); a missing `methods=`
+    means Flask's documented default GET.
+    """
+    tail = line[start:]
+    m = _METHODS_LIST.search(tail)
+    if not m:
+        return ["GET"]
+    methods = [item.upper() for item in _STRING_LITERAL.findall(m.group(1))]
+    return methods or None
+
+
+def _decorator_route_handler(lines: list[str], start: int) -> tuple[str, str]:
+    """Find the handler `def` following a decorator route at 0-based `start`.
+
+    Returns (handler_name, auth). Blank lines, comment lines and other
+    decorator lines are skipped; a guard decorator on the way down sets auth
+    (`login_required` -> "auth", `admin_required` -> "admin"). Any other code
+    line, or EOF, stops the scan with no handler — a decorator must be
+    followed by its `def`, so anything else means this decorator does not
+    own a handler here. The auth signal is returned even without a handler:
+    the endpoint still exists and its guard is still evidence.
+    """
+    auth = ""
+    for j in range(start + 1, len(lines)):
+        stripped = lines[j].strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("@"):
+            if _ADMIN_REQUIRED_PY.search(stripped):
+                auth = "admin"
+            elif _LOGIN_REQUIRED.search(stripped):
+                auth = "auth"
+            continue
+        m = _DEF_LINE.match(lines[j])
+        if m:
+            return m.group(1), auth
+        return "", auth
+    return "", auth
 
 
 # Markdown table row: `| a | b | c |`.
@@ -315,6 +372,12 @@ class BusinessSemanticsAdapter:
             rel = p.relative_to(self.root)
             if _is_skipped(rel):
                 continue
+            if p.suffix == ".py":
+                # Python route files: the decorator patterns are distinctive
+                # enough that non-route files yield zero endpoints; the
+                # extractor decides, not the path filter.
+                out.append(p)
+                continue
             if p.suffix not in (".js", ".ts"):
                 continue
             posix = rel.as_posix().lower()
@@ -505,26 +568,56 @@ class BusinessSemanticsAdapter:
                 elif _AUTH_REQUIRED.search(line):
                     file_default = "auth"
         for i, line in enumerate(lines, start=1):
-            m = _ROUTE_LINE.search(line)
-            if not m:
+            # Python decorator routes (Flask / FastAPI) first: a decorator
+            # line contains `router.get('...'` as a substring, so the
+            # call-style pattern below would misread it as a call with no
+            # handler argument. A line starting with `@` is a decorator,
+            # never a call-style registration.
+            dm = _DECORATOR_ROUTE.search(line)
+            if dm:
+                verb, path = dm.group(1), dm.group(2)
+                if verb == "route":
+                    methods = _route_methods(line, dm.end())
+                    if methods is None:
+                        continue
+                else:
+                    methods = [verb.upper()]
+                handler_reference, guard_auth = _decorator_route_handler(lines, i - 1)
+                auth = ""
+                if _ADMIN_REQUIRED.search(line) or _ROLE_ADMIN.search(line):
+                    auth = "admin"
+                elif _AUTH_REQUIRED.search(line):
+                    auth = "auth"
+                if not auth:
+                    auth = guard_auth or file_default
+                for method in methods:
+                    out.append(Endpoint(
+                        method=method, path=path, code_auth=auth,
+                        source=f"{self._rel(route_path)}:{i}", line=i,
+                        confidence=CONF_VERIFIED if auth else CONF_INFERRED,
+                        handler_reference=handler_reference,
+                    ))
                 continue
-            method, path = m.group(1).upper(), m.group(2)
-            handler_reference = _route_handler_reference(line, m.end())
-            # Auth signal: the route's own line first (most specific), then the
-            # file-level router.use default.
-            auth = ""
-            if _ADMIN_REQUIRED.search(line) or _ROLE_ADMIN.search(line):
-                auth = "admin"
-            elif _AUTH_REQUIRED.search(line):
-                auth = "auth"
-            if not auth:
-                auth = file_default
-            out.append(Endpoint(
-                method=method, path=path, code_auth=auth,
-                source=f"{self._rel(route_path)}:{i}", line=i,
-                confidence=CONF_VERIFIED if auth else CONF_INFERRED,
-                handler_reference=handler_reference,
-            ))
+            m = _ROUTE_LINE.search(line)
+            if m:
+                method, path = m.group(1).upper(), m.group(2)
+                handler_reference = _route_handler_reference(line, m.end())
+                # Auth signal: the route's own line first (most specific), then the
+                # file-level router.use default.
+                auth = ""
+                if _ADMIN_REQUIRED.search(line) or _ROLE_ADMIN.search(line):
+                    auth = "admin"
+                elif _AUTH_REQUIRED.search(line):
+                    auth = "auth"
+                if not auth:
+                    auth = file_default
+                out.append(Endpoint(
+                    method=method, path=path, code_auth=auth,
+                    source=f"{self._rel(route_path)}:{i}", line=i,
+                    confidence=CONF_VERIFIED if auth else CONF_INFERRED,
+                    handler_reference=handler_reference,
+                ))
+                continue
         return out
 
     # ------------------------------------------------------------ orchestration
