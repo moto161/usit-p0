@@ -88,3 +88,45 @@ def is_reparse(info: os.stat_result) -> bool:
 def identity_of(info: os.stat_result) -> tuple[int, int]:
     """Return the ``(st_dev, st_ino)`` file identity used to detect substitution."""
     return (int(info.st_dev), int(info.st_ino))
+
+
+
+def read_bounded_no_follow(path: str | os.PathLike[str], limit: int) -> bytes:
+    """Read a regular file through a no-follow descriptor with a hard byte cap.
+
+    The descriptor is checked before and after reading. The limit is enforced
+    while streaming, not after an unbounded read_bytes() allocation.
+    """
+    import stat
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        raise ValueError("byte limit must be a non-negative integer")
+    descriptor = open_no_follow(Path(path))
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or is_reparse(before):
+            raise ValueError("input must be a regular non-reparse file")
+        if before.st_size > limit:
+            raise ValueError(f"input exceeds size limit ({limit} bytes)")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            block = os.read(descriptor, min(1024 * 1024, limit + 1 - total))
+            if not block:
+                break
+            total += len(block)
+            if total > limit:
+                raise ValueError(f"input exceeds size limit ({limit} bytes)")
+            chunks.append(block)
+        after = os.fstat(descriptor)
+        if (not stat.S_ISREG(after.st_mode) or is_reparse(after)
+                or identity_of(before) != identity_of(after)
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns):
+            raise ValueError("input changed while being read")
+        if total != after.st_size:
+            raise ValueError("input size changed or could not be read completely")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)

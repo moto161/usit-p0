@@ -30,7 +30,7 @@ const CONTRACT = "usit-parser-result-v1";
 const PARSER = "typescript-compiler-api";
 const MAX_FILES = 500;
 const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
-const EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"]);
+const EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue"]);
 const EXPECTED_TS_VERSION = "6.0.3";
 
 // The analyzer's own TypeScript install. Files under this directory are the
@@ -162,6 +162,61 @@ function loc(sourceFile, node) {
   return { file_path: sourceFile.fileName, line: pos.line + 1, column: pos.character + 1 };
 }
 
+// F2: resolve a URL argument to its static skeleton, or null when the URL
+// is not a literal expression. Template substitutions become "{?}"
+// placeholders (one per span, whatever the span expression is); "+" chains
+// of literals concatenate; anything else (a variable, a call, a Request /
+// URL object) yields null -- the skeleton is never guessed.
+function resolveUrlSkeleton(node) {
+  if (!node) return null;
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isTemplateExpression(node)) {
+    let out = node.head.text;
+    for (const span of node.templateSpans) out += "{?}" + span.literal.text;
+    return out;
+  }
+  if (ts.isParenthesizedExpression(node)) return resolveUrlSkeleton(node.expression);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = resolveUrlSkeleton(node.left);
+    const right = resolveUrlSkeleton(node.right);
+    if (left === null || right === null) return null;
+    return left + right;
+  }
+  return null;
+}
+
+// Cut a skeleton path at the first literal "?" or "#" that is not part of
+// a "{?}" placeholder.
+function stripUrlSuffix(skeletonPath) {
+  let out = "";
+  for (let i = 0; i < skeletonPath.length; i++) {
+    if (skeletonPath.startsWith("{?}", i)) { out += "{?}"; i += 2; continue; }
+    const ch = skeletonPath[i];
+    if (ch === "?" || ch === "#") break;
+    out += ch;
+  }
+  return out;
+}
+
+// Take the path part of a URL skeleton, or null when there is none: a
+// skeleton starting with "/" is a path; a leading "{?}/" is a ${BASE_URL}
+// prefix; a literal scheme://host prefix is stripped to its path.
+function extractSkeletonPath(skeleton) {
+  if (typeof skeleton !== "string" || skeleton.length === 0) return null;
+  let candidate = null;
+  if (skeleton.startsWith("/")) {
+    candidate = skeleton;
+  } else if (skeleton.startsWith("{?}/")) {
+    candidate = skeleton.slice(3);
+  } else {
+    const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]+(\/.*)?$/.exec(skeleton);
+    if (m) candidate = m[1] || "/";
+  }
+  if (candidate === null || !candidate.startsWith("/")) return null;
+  const stripped = stripUrlSuffix(candidate);
+  return stripped.startsWith("/") && stripped.length > 0 ? stripped : null;
+}
+
 function diagnostic(code, severity, message, line, column) {
   const result = { code: String(code), severity: severity || "UNKNOWN", message: String(message || code) };
   if (line != null) result.line = line;
@@ -234,6 +289,13 @@ function main(input) {
     for (const rel of entries) {
       const ext = path.extname(String(rel)).toLowerCase();
       if (!EXTENSIONS.has(ext)) continue;
+      // V1: legacy disk mode has no parent-supplied script text, so a Vue
+      // SFC cannot be reduced to its <script> block here; parsing the full
+      // SFC as TypeScript would manufacture garbage symbols. Skip it.
+      if (ext === ".vue") {
+        addFileDiag(String(rel), diagnostic("VUE_SCRIPT_EXTRACTION_REQUIRES_MEMORY_MODE", "UNKNOWN", "Legacy disk mode cannot extract a Vue <script> block; the file is not analyzed."));
+        continue;
+      }
       const full = safePath(projectRoot, rel);
       if (!full) {
         addFileDiag(String(rel), diagnostic("PATH_OUTSIDE_PROJECT", "ERROR", "Source path is missing, symbolic-link escaped, or outside the project root."));
@@ -253,6 +315,29 @@ function main(input) {
       accepted.push({ rel: String(rel).replace(/\\/g, "/"), full });
       sourcePaths.push(full);
     }
+  }
+
+  // V1: TypeScript drops a `.vue` root before ever asking the host for it
+  // (unsupported extension), so a Vue script can never join the program
+  // under its own path and checker resolution degrades to DYNAMIC.  Give
+  // each memory-mode `.vue` entry a virtual `.ts` twin root carrying the
+  // same line-padded script: the checker resolves the twin, while every
+  // result still reports the `.vue` rel (rows, symbol ids and evidence all
+  // use entry.rel, never the twin path).  Twins are program roots only and
+  // never produce their own analysis row.  A twin is skipped when a real
+  // file already occupies that path, or when the entry came from disk mode
+  // (its content is the full SFC, not the padded script).
+  const vueTwins = new Map();
+  const acceptedFulls = new Set(accepted.map((entry) => path.resolve(entry.full)));
+  for (const entry of accepted) {
+    if (path.extname(entry.rel).toLowerCase() !== ".vue") continue;
+    const twinFull = entry.full + ".ts";
+    if (acceptedFulls.has(path.resolve(twinFull))) continue;
+    const text = contentByFull.get(keyOf(entry.full));
+    if (text == null) continue;
+    contentByFull.set(keyOf(twinFull), text);
+    vueTwins.set(entry.rel, { full: twinFull });
+    acceptedFulls.add(path.resolve(twinFull));
   }
 
   // Config: prefer parent-verified content (memory mode); otherwise read the
@@ -399,13 +484,25 @@ function main(input) {
   for (const entry of accepted) {
     if (!includedRoots.includes(entry.full)) addFileDiag(entry.rel, diagnostic("CONFIG_EXCLUDED_SOURCE", "UNKNOWN", "The source was discovered but excluded by the project config; syntax-only fallback is used."));
   }
-  const roots = includedRoots.length ? includedRoots : sourcePaths;
+  const roots = [...(includedRoots.length ? includedRoots : sourcePaths),
+    ...Array.from(vueTwins.values(), (twin) => twin.full)];
   const program = ts.createProgram({ rootNames: roots, options, host });
   const checker = program.getTypeChecker();
   const discoveredByFull = new Map(accepted.map((entry) => [path.resolve(entry.full), entry.rel]));
+  for (const [rel, twin] of vueTwins) discoveredByFull.set(path.resolve(twin.full), rel);
   const rows = {};
   const records = [];
-  const sourceFiles = accepted.map((entry) => program.getSourceFile(entry.full) || ts.createSourceFile(entry.full, safeRead(entry.full), ts.ScriptTarget.Latest, true, scriptKind(entry.full)));
+  // V1: a Vue entry is analyzed through its twin program file; every other
+  // entry keeps the existing program-or-standalone fallback.
+  function sourceFileFor(entry) {
+    const twin = vueTwins.get(entry.rel);
+    if (twin) {
+      const fromProgram = program.getSourceFile(twin.full);
+      if (fromProgram) return fromProgram;
+    }
+    return program.getSourceFile(entry.full) || ts.createSourceFile(entry.full, safeRead(entry.full), ts.ScriptTarget.Latest, true, scriptKind(entry.full));
+  }
+  const sourceFiles = accepted.map((entry) => sourceFileFor(entry));
 
   function safeRead(full) {
     const k = keyOf(full);
@@ -624,6 +721,29 @@ function main(input) {
       }
       base.resolution_status = "RESOLVED"; base.resolved = true;
       base.target = { file: target.entry, name: target.name, line: target.line, id: "symbol:" + target.entry + "#" + target.name + ":" + target.line, qualified_name: target.entry.replace(/\//g, ".") + "." + target.name };
+      const callable = (ts.isVariableDeclaration(target.target) || ts.isPropertyDeclaration(target.target))
+        ? target.target.initializer : target.target;
+      const parameters = callable && callable.parameters ? callable.parameters : [];
+      const argumentsList = call.arguments || [];
+      const unsupportedArguments = argumentsList.some((argument) => ts.isSpreadElement(argument))
+        || argumentsList.length > parameters.length
+        || parameters.some((parameter) => !!parameter.dotDotDotToken || !ts.isIdentifier(parameter.name));
+      base.argument_binding_status = unsupportedArguments ? "UNSUPPORTED_ARGUMENT_SHAPE" : "EXACT_STATIC_MAPPING";
+      base.argument_bindings = unsupportedArguments ? [] : argumentsList.map((argument, index) => {
+        const parameter = parameters[index];
+        const argumentPosition = loc(sourceFile, argument);
+        const parameterPosition = loc(parameter.getSourceFile(), parameter.name);
+        return {
+          argument_index: index,
+          argument_kind: "POSITIONAL",
+          argument_expression: argument.getText(sourceFile).slice(0, 240),
+          argument_location: { path: entry.rel, line: argumentPosition.line, column: argumentPosition.column },
+          parameter_name: parameter.name.text,
+          parameter_index: index,
+          parameter_kind: "POSITIONAL",
+          parameter_declaration: { path: target.entry, line: parameterPosition.line, column: parameterPosition.column }
+        };
+      });
       const chain = [{ kind: "call", file: entry.rel, line: pos.line, column: pos.column }];
       if (importEvidence) chain.push({ kind: "import", file: entry.rel, line: importEvidence.line, module: importEvidence.module, imported_as: localName });
       chain.push(...reexportEvidence([target]));
@@ -654,8 +774,8 @@ function main(input) {
   }
 
   for (const entry of accepted) {
-    const sourceFile = program.getSourceFile(entry.full) || ts.createSourceFile(entry.full, safeRead(entry.full), ts.ScriptTarget.Latest, true, scriptKind(entry.full));
-    const row = { path: entry.rel, language: languageFor(entry.full), parser_name: PARSER, parser_version: ts.version, syntax_status: "VALID", symbols: [], imports: [], calls: [], diagnostics: [] };
+    const sourceFile = sourceFileFor(entry);
+    const row = { path: entry.rel, language: languageFor(entry.full), parser_name: PARSER, parser_version: ts.version, syntax_status: "VALID", symbols: [], imports: [], calls: [], api_client_calls: [], diagnostics: [] };
     const syntaxErrors = sourceFile.parseDiagnostics || [];
     for (const d of syntaxErrors) {
       const position = d.start == null ? null : sourceFile.getLineAndCharacterOfPosition(d.start);
@@ -695,7 +815,48 @@ function main(input) {
     }
     collectRequireImports(sourceFile);
     importsBySource.set(path.resolve(sourceFile.fileName), importEvidenceRows);
-    function visit(node, testContext) {
+    function isFunctionBoundary(node) {
+      return ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)
+        || ts.isArrowFunction(node) || ts.isFunctionExpression(node)
+        || ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node)
+        || ts.isSetAccessorDeclaration(node);
+    }
+
+    function declaredFunctionOwner(node) {
+      let name = null;
+      let locationNode = node;
+      if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name) {
+        name = node.name.getText(sourceFile);
+      } else if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+        const parent = node.parent;
+        if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+          name = parent.name.text;
+        } else if (ts.isPropertyDeclaration(parent)) {
+          name = parent.name.getText(sourceFile);
+        } else if (node.name && ts.isIdentifier(node.name)) {
+          name = node.name.text;
+        }
+      } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+          && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+        name = node.name.text;
+      } else if (ts.isPropertyDeclaration(node) && node.initializer
+          && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+        name = node.name.getText(sourceFile);
+      }
+      if (!name) return null;
+      const position = loc(sourceFile, locationNode);
+      return { name, line: position.line,
+        symbol_id: "symbol:" + entry.rel + "#" + name + ":" + position.line };
+    }
+
+    function visit(node, testContext, callerOwner) {
+      // Anonymous callbacks/lambdas are real scope boundaries. They have no
+      // stable symbol yet, so calls inside them must not inherit the outer
+      // named function's identity. Named declarations and assigned arrows
+      // retain their own exact owner symbol.
+      const currentOwner = isFunctionBoundary(node)
+        ? declaredFunctionOwner(node)
+        : (declaredFunctionOwner(node) || callerOwner || null);
       let childTestContext = testContext;
       if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && /^test\w*/i.test(node.name.getText(sourceFile))) {
         childTestContext = node.name.getText(sourceFile);
@@ -729,19 +890,174 @@ function main(input) {
           const importReference = ts.isPropertyAccessExpression(expression) ? expression.expression : expression;
           const importEvidence = localName ? findImportEvidence(sourceFile, localName, importReference) : null;
           const call = callStatus(node, sourceFile, entry, symbol, localName, importEvidence);
+          if (currentOwner) {
+            call.caller = { name: currentOwner.name, line: currentOwner.line };
+            call.caller_symbol_id = currentOwner.symbol_id;
+          }
           if (childTestContext) call.test_name = childTestContext;
           if (row.syntax_status === "INVALID" && call.resolution_status === "RESOLVED") {
             call.resolution_status = "UNKNOWN"; call.resolved = false; call.diagnostic = "SOURCE_HAS_SYNTAX_ERRORS"; delete call.target;
           }
           if (ts.isNewExpression(node) && call.resolution_status === "RESOLVED") call.relation_type = "instantiates";
           calls.push(call);
+          if (ts.isCallExpression(node)) {
+            const calleeText = node.expression.getText(sourceFile);
+            const isFetch = ts.isIdentifier(node.expression) && node.expression.text === "fetch";
+            const isAxios = /^(?:axios|http|api|client)\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText)
+              // A1: Angular HttpClient is conventionally injected as `http`
+              // (`this.http.get(...)`); service wrappers (`this.api.*`,
+              // `this.client.*`) are internal calls, not direct HTTP calls,
+              // so only the `this.http` member matches.
+              || /^this\.http\.(?:get|post|put|patch|delete|head|options)$/i.test(calleeText);
+            if (isFetch || isAxios) {
+              const args = node.arguments || [];
+              const urlArg = args[0];
+              const literalUrl = urlArg && (ts.isStringLiteralLike(urlArg) || ts.isNoSubstitutionTemplateLiteral(urlArg)) ? urlArg.text : null;
+              let httpMethod = isFetch ? "GET" : calleeText.split(".").pop().toUpperCase();
+              if (isFetch && args[1] && ts.isObjectLiteralExpression(args[1])) {
+                for (const property of args[1].properties) {
+                  if (ts.isPropertyAssignment(property) && property.name && property.name.getText(sourceFile).replace(/["']/g, "") === "method"
+                      && property.initializer && (ts.isStringLiteralLike(property.initializer) || ts.isNoSubstitutionTemplateLiteral(property.initializer))) {
+                    httpMethod = property.initializer.text.toUpperCase();
+                  }
+                }
+              }
+              const apiPosition = loc(sourceFile, node);
+              // F2: a single literal keeps the old rule exactly (a literal
+              // containing "?" / "#" / "$" stays dynamic); anything else
+              // resolves through the URL skeleton, whose "{?}" placeholders
+              // mark template interpolations.
+              let skeletonPath = null;
+              let apiResolution = "DYNAMIC_OR_UNSUPPORTED_URL";
+              if (literalUrl !== null) {
+                if (literalUrl.startsWith("/") && !/[?#{}$]/.test(literalUrl)) {
+                  skeletonPath = literalUrl;
+                  apiResolution = httpMethod ? "LITERAL_METHOD_PATH" : "DYNAMIC_OR_UNSUPPORTED_URL";
+                }
+              } else {
+                const skeleton = urlArg ? resolveUrlSkeleton(urlArg) : null;
+                skeletonPath = skeleton !== null ? extractSkeletonPath(skeleton) : null;
+                if (skeletonPath !== null && httpMethod) {
+                  apiResolution = skeletonPath.includes("{?}")
+                    ? "TEMPLATE_METHOD_PATH" : "LITERAL_METHOD_PATH";
+                }
+              }
+              row.api_client_calls.push({
+                callee: calleeText, method: httpMethod,
+                path: skeletonPath,
+                url_expression: urlArg ? urlArg.getText(sourceFile).slice(0, 240) : null,
+                line: apiPosition.line, column: apiPosition.column,
+                caller_symbol_id: currentOwner ? currentOwner.symbol_id : null,
+                caller_name: currentOwner ? currentOwner.name : null,
+                resolution_status: apiResolution,
+                confidence: "STATIC_INFERENCE", verification_status: "NOT_VERIFIED",
+              });
+            }
+          }
         }
       }
-      ts.forEachChild(node, (child) => visit(child, childTestContext));
+      ts.forEachChild(node, (child) => visit(child, childTestContext, currentOwner));
     }
-    for (const statement of sourceFile.statements) visit(statement, null);
+    for (const statement of sourceFile.statements) visit(statement, null, null);
     row.imports = imports;
     row.calls = calls;
+    row.route_handlers = [];
+    function collectRouteHandlers(node) {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+          && ["get", "post", "put", "patch", "delete", "options", "head", "all"].includes(node.expression.name.text.toLowerCase())
+          && node.arguments.length >= 2 && ts.isStringLiteralLike(node.arguments[0])) {
+        const handlerNode = node.arguments[node.arguments.length - 1];
+        const handlerReference = handlerNode.getText(sourceFile);
+        const position = loc(sourceFile, node);
+        const methodName = node.expression.name.text.toUpperCase();
+        const handlerSymbol = checker.getSymbolAtLocation(handlerNode);
+        const resolved = symbolAfterAliases(handlerSymbol);
+        const targets = declarationTargets(resolved);
+        const unique = new Map(targets.map((target) => [target.id, target]));
+        const importRoot = ts.isIdentifier(handlerNode) ? handlerNode
+          : (ts.isPropertyAccessExpression(handlerNode) && ts.isIdentifier(handlerNode.expression)
+            ? handlerNode.expression : null);
+        const importEvidence = importRoot
+          ? findImportEvidence(sourceFile, importRoot.text, importRoot) : null;
+        const recordRow = {
+          method: methodName, path: node.arguments[0].text,
+          line: position.line, column: position.column,
+          handler_reference: handlerReference,
+          resolution_status: "UNKNOWN", candidate_targets: [],
+          evidence_chain: [{ kind: "route_registration", file: entry.rel, line: position.line, column: position.column }]
+        };
+        if (unique.size === 1) {
+          const target = Array.from(unique.values())[0];
+          if (target.entry && !/\\.d\\.(?:ts|mts|cts)$/i.test(target.full)) {
+            recordRow.resolution_status = "RESOLVED";
+            recordRow.target = {
+              id: "symbol:" + target.entry + "#" + target.name + ":" + target.line,
+              path: target.entry, name: target.name, line: target.line
+            };
+            if (importEvidence) {
+              recordRow.evidence_chain.push({
+                kind: "handler_import", file: entry.rel, line: importEvidence.line,
+                module: importEvidence.module, imported_as: importRoot.text,
+              });
+            }
+            recordRow.evidence_chain.push(...reexportEvidence([target]));
+            recordRow.evidence_chain.push({
+              kind: "handler_definition", file: target.entry, line: target.line, name: target.name
+            });
+          } else {
+            recordRow.resolution_status = "EXTERNAL";
+          }
+        } else if (unique.size > 1) {
+          recordRow.resolution_status = "AMBIGUOUS";
+          recordRow.candidate_targets = Array.from(unique.keys()).sort();
+        }
+        row.route_handlers.push(recordRow);
+      }
+      ts.forEachChild(node, collectRouteHandlers);
+    }
+    collectRouteHandlers(sourceFile);
+
+    // S2.13-A: explicit JSX event-prop -> named handler evidence.
+    row.ui_event_bindings = [];
+    const uiEventProps = new Set(["onClick", "onSubmit", "onChange", "onPress", "onTap", "onLongPress"]);
+    function collectUiEventBindings(node) {
+      if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name) && uiEventProps.has(node.name.text)) {
+        const position = loc(sourceFile, node);
+        const initializer = node.initializer;
+        const expression = initializer && ts.isJsxExpression(initializer) ? initializer.expression : null;
+        const item = { event_name: node.name.text, line: position.line, column: position.column,
+          binding_expression: expression ? expression.getText(sourceFile).slice(0, 240) : null,
+          resolution_status: "UNKNOWN", candidate_targets: [], confidence: "STATIC_INFERENCE",
+          verification_status: "NOT_VERIFIED" };
+        if (expression && (ts.isIdentifier(expression) || ts.isPropertyAccessExpression(expression))) {
+          const symbolNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
+          const resolved = symbolAfterAliases(checker.getSymbolAtLocation(symbolNode));
+          const targets = declarationTargets(resolved);
+          const unique = new Map(targets.map((target) => [target.id, target]));
+          if (unique.size === 1) {
+            const target = Array.from(unique.values())[0];
+            if (target.entry && !/\\.d\\.(?:ts|mts|cts)$/i.test(target.full)) {
+              item.resolution_status = "RESOLVED";
+              item.target = { id: "symbol:" + target.entry + "#" + target.name + ":" + target.line,
+                path: target.entry, name: target.name, line: target.line };
+              item.evidence_chain = [{ kind: "jsx_event_attribute", file: entry.rel, line: position.line },
+                { kind: "handler_definition", file: target.entry, line: target.line, name: target.name }];
+            } else item.resolution_status = "EXTERNAL";
+          } else if (unique.size > 1) {
+            item.resolution_status = "AMBIGUOUS";
+            item.candidate_targets = Array.from(unique.keys()).sort();
+          }
+        } else if (expression && (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression))) {
+          item.resolution_status = "INLINE_CALLBACK_NOT_SYMBOL_LINKED";
+        } else if (initializer && ts.isStringLiteral(initializer)) {
+          item.resolution_status = "NON_EXPRESSION_ATTRIBUTE";
+        }
+        row.ui_event_bindings.push(item);
+      }
+      ts.forEachChild(node, collectUiEventBindings);
+    }
+    collectUiEventBindings(sourceFile);
+
     const importBindings = new Map();
     for (const item of imports) for (const binding of item.bindings || []) importBindings.set(binding.local, { module: item.module, line: item.line, imported: binding.imported, kind: binding.kind });
 
@@ -757,7 +1073,12 @@ function main(input) {
       if (name && kind) {
         const position = loc(sourceFile, node);
         const qn = parentNames.concat(name).join(".");
-        const item = { name, qualified_name: qn, kind, line: position.line, column: position.column, evidence: node.getText(sourceFile).slice(0, 240), parser_name: PARSER, parser_version: ts.version, symbol_id: "symbol:" + entry.rel + "#" + qn + ":" + position.line };
+        // P3: the closing line of the node's span, so callers can map a
+        // source line to its innermost enclosing function symbol. getEnd()
+        // excludes trailing trivia, so end_line is the line of the closing
+        // brace (or the declaration's last token).
+        const endPosition = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+        const item = { name, qualified_name: qn, kind, line: position.line, column: position.column, end_line: endPosition.line + 1, evidence: node.getText(sourceFile).slice(0, 240), parser_name: PARSER, parser_version: ts.version, symbol_id: "symbol:" + entry.rel + "#" + qn + ":" + position.line };
         row.symbols.push(item);
         record(entry, kind, qn, "defines", "UNKNOWN", 0.0, { definition: { path: entry.rel, line: position.line, column: position.column } }, position, []);
       }

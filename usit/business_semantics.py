@@ -32,6 +32,10 @@ from typing import Any
 
 from . import safety
 from .safeio import open_no_follow
+from .database_access import extract_database_accesses
+from .identity_evidence import extract_identity_evidence
+from .js_ts_parser import SOURCE_EXTENSIONS, analyze_js_ts_project, ts_function_owners
+from .permission_evidence import extract_authorization_evidence
 
 SCHEMA_VERSION = "usit-business-semantics-v1"
 
@@ -48,11 +52,112 @@ MAX_FILES = safety.MAX_FILES
 _ROUTE_LINE = re.compile(
     r"router\.(get|post|put|delete|patch)\s*\(\s*['\"]([^'\"]+)['\"]"
 )
+# Python decorator-route matching (Flask / FastAPI style). The decorator call
+# must close on the same line; the handler is the `def` that follows it (see
+# _decorator_route_handler). Only string-literal paths are accepted, matching
+# _ROUTE_LINE's literal-only rule; f-strings and variables yield no endpoint.
+_DECORATOR_ROUTE = re.compile(
+    r"^\s*@\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\.(route|get|post|put|delete|patch)"
+    r"\s*\(\s*['\"]([^'\"]+)['\"]"
+)
+_DEF_LINE = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(")
+_METHODS_LIST = re.compile(r"methods\s*=\s*\[([^\]]*)\]")
+_STRING_LITERAL = re.compile(r"""['"]([^'"]+)['"]""")
+_LOGIN_REQUIRED = re.compile(r"\blogin_required\b")
+_ADMIN_REQUIRED_PY = re.compile(r"\badmin_required\b")
 _AUTH_REQUIRED = re.compile(r"\bauthRequired\b")
 _ADMIN_REQUIRED = re.compile(r"\badminRequired\b")
 _ROLE_ADMIN = re.compile(r"role\s*[!=]==?\s*['\"]admin['\"]")
 _SECRET_CHECK = re.compile(r"\bis_secret\s*[!=]==?\s*1\b")
 _ONLY_SELF_CHECK = re.compile(r"\bis_only_self\s*[!=]==?\s*1\b")
+
+def _route_handler_reference(line: str, start: int) -> str:
+    """Extract a simple named final callback from a single-line route call."""
+    tail = line[start:].lstrip()
+    if not tail.startswith(","):
+        return ""
+    tail = tail[1:]
+    args: list[str] = []
+    token: list[str] = []
+    depth = 0
+    quote = ""
+    escaped = False
+    for char in tail:
+        if quote:
+            token.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            token.append(char)
+        elif char in "([{":
+            depth += 1
+            token.append(char)
+        elif char in ")]}":
+            if char == ")" and depth == 0:
+                args.append("".join(token).strip())
+                break
+            depth = max(0, depth - 1)
+            token.append(char)
+        elif char == "," and depth == 0:
+            args.append("".join(token).strip())
+            token = []
+        else:
+            token.append(char)
+    if not args:
+        return ""
+    candidate = args[-1].strip()
+    return candidate if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*", candidate) else ""
+
+
+def _route_methods(line: str, start: int) -> list[str] | None:
+    """Methods from a Flask `@...route(..., methods=[...])` decorator line.
+
+    Returns None when `methods=` is present but yields no string literal
+    (fail closed: do not guess Flask's default); a missing `methods=`
+    means Flask's documented default GET.
+    """
+    tail = line[start:]
+    m = _METHODS_LIST.search(tail)
+    if not m:
+        return ["GET"]
+    methods = [item.upper() for item in _STRING_LITERAL.findall(m.group(1))]
+    return methods or None
+
+
+def _decorator_route_handler(lines: list[str], start: int) -> tuple[str, str]:
+    """Find the handler `def` following a decorator route at 0-based `start`.
+
+    Returns (handler_name, auth). Blank lines, comment lines and other
+    decorator lines are skipped; a guard decorator on the way down sets auth
+    (`login_required` -> "auth", `admin_required` -> "admin"). Any other code
+    line, or EOF, stops the scan with no handler — a decorator must be
+    followed by its `def`, so anything else means this decorator does not
+    own a handler here. The auth signal is returned even without a handler:
+    the endpoint still exists and its guard is still evidence.
+    """
+    auth = ""
+    for j in range(start + 1, len(lines)):
+        stripped = lines[j].strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("@"):
+            if _ADMIN_REQUIRED_PY.search(stripped):
+                auth = "admin"
+            elif _LOGIN_REQUIRED.search(stripped):
+                auth = "auth"
+            continue
+        m = _DEF_LINE.match(lines[j])
+        if m:
+            return m.group(1), auth
+        return "", auth
+    return "", auth
+
 
 # Markdown table row: `| a | b | c |`.
 _MD_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
@@ -153,6 +258,7 @@ class Endpoint:
     source: str = ""
     line: int = 0
     confidence: str = CONF_UNKNOWN
+    handler_reference: str = ""
 
 
 @dataclass
@@ -267,6 +373,12 @@ class BusinessSemanticsAdapter:
             rel = p.relative_to(self.root)
             if _is_skipped(rel):
                 continue
+            if p.suffix == ".py":
+                # Python route files: the decorator patterns are distinctive
+                # enough that non-route files yield zero endpoints; the
+                # extractor decides, not the path filter.
+                out.append(p)
+                continue
             if p.suffix not in (".js", ".ts"):
                 continue
             posix = rel.as_posix().lower()
@@ -286,6 +398,38 @@ class BusinessSemanticsAdapter:
             if p.suffix in (".js", ".ts", ".kt", ".java", ".py", ".sql", ".rb", ".go", ".cs", ".php"):
                 out.append(p)
         return out
+
+    def _js_ts_function_owners(self, code_blob_by_file: dict[str, str]) -> dict[str, dict[int, str]]:
+        """P3: line -> function-symbol map for JS/TS files, via the TS parser.
+
+        Memory mode over the already-read sources (the same shape the scanner
+        uses). Vue files are excluded on purpose (P3 is TS/JS only; a Vue
+        follow-up reuses the scanner's line-padded script wiring). Any parser
+        failure — unavailable parser, adapter error, no JS/TS files — degrades
+        to an empty map, so identity records stay UNKNOWN exactly as before.
+        """
+        js_ts_source = {
+            rel: text for rel, text in code_blob_by_file.items()
+            if Path(rel).suffix.lower() in SOURCE_EXTENSIONS
+            and Path(rel).suffix.lower() != ".vue"
+        }
+        if not js_ts_source:
+            return {}
+        try:
+            result = analyze_js_ts_project(
+                self.root, [self.root / rel for rel in js_ts_source],
+                js_ts_source=js_ts_source)
+        except Exception:
+            return {}
+        if not isinstance(result, dict) or not result.get("available", True):
+            return {}
+        fatal_codes = {"ADAPTER_TIMEOUT", "ADAPTER_START_FAILED", "ADAPTER_FAILED",
+                       "ADAPTER_INVALID_JSON"}
+        diagnostics = result.get("project_diagnostics", [])
+        if isinstance(diagnostics, list) and any(
+                isinstance(d, dict) and d.get("code") in fatal_codes for d in diagnostics):
+            return {}
+        return ts_function_owners(result)
 
     # ------------------------------------------------- markdown table parsing
     def _parse_md_tables(self, text: str) -> list[dict[str, Any]]:
@@ -439,7 +583,9 @@ class BusinessSemanticsAdapter:
     def _extract_doc_endpoints(self, doc_path: Path, text: str) -> list[dict[str, str]]:
         out: list[dict[str, str]] = []
         for m in re.finditer(r"\b(GET|POST|PUT|DELETE|PATCH)\s+(/api/[\w/:{}_.-]+)", text):
-            out.append({"method": m.group(1).upper(), "path": m.group(2), "source": self._rel(doc_path)})
+            out.append({"method": m.group(1).upper(), "path": m.group(2),
+                        "source": self._rel(doc_path),
+                        "line": text.count("\n", 0, m.start()) + 1})
         return out
 
     def _extract_code_endpoints(self, route_path: Path, text: str) -> list[Endpoint]:
@@ -455,24 +601,56 @@ class BusinessSemanticsAdapter:
                 elif _AUTH_REQUIRED.search(line):
                     file_default = "auth"
         for i, line in enumerate(lines, start=1):
-            m = _ROUTE_LINE.search(line)
-            if not m:
+            # Python decorator routes (Flask / FastAPI) first: a decorator
+            # line contains `router.get('...'` as a substring, so the
+            # call-style pattern below would misread it as a call with no
+            # handler argument. A line starting with `@` is a decorator,
+            # never a call-style registration.
+            dm = _DECORATOR_ROUTE.search(line)
+            if dm:
+                verb, path = dm.group(1), dm.group(2)
+                if verb == "route":
+                    methods = _route_methods(line, dm.end())
+                    if methods is None:
+                        continue
+                else:
+                    methods = [verb.upper()]
+                handler_reference, guard_auth = _decorator_route_handler(lines, i - 1)
+                auth = ""
+                if _ADMIN_REQUIRED.search(line) or _ROLE_ADMIN.search(line):
+                    auth = "admin"
+                elif _AUTH_REQUIRED.search(line):
+                    auth = "auth"
+                if not auth:
+                    auth = guard_auth or file_default
+                for method in methods:
+                    out.append(Endpoint(
+                        method=method, path=path, code_auth=auth,
+                        source=f"{self._rel(route_path)}:{i}", line=i,
+                        confidence=CONF_VERIFIED if auth else CONF_INFERRED,
+                        handler_reference=handler_reference,
+                    ))
                 continue
-            method, path = m.group(1).upper(), m.group(2)
-            # Auth signal: the route's own line first (most specific), then the
-            # file-level router.use default.
-            auth = ""
-            if _ADMIN_REQUIRED.search(line) or _ROLE_ADMIN.search(line):
-                auth = "admin"
-            elif _AUTH_REQUIRED.search(line):
-                auth = "auth"
-            if not auth:
-                auth = file_default
-            out.append(Endpoint(
-                method=method, path=path, code_auth=auth,
-                source=f"{self._rel(route_path)}:{i}", line=i,
-                confidence=CONF_VERIFIED if auth else CONF_INFERRED,
-            ))
+            m = _ROUTE_LINE.search(line)
+            if m:
+                method, path = m.group(1).upper(), m.group(2)
+                handler_reference = _route_handler_reference(line, m.end())
+                # Auth signal: the route's own line first (most specific), then the
+                # file-level router.use default.
+                auth = ""
+                if _ADMIN_REQUIRED.search(line) or _ROLE_ADMIN.search(line):
+                    auth = "admin"
+                elif _AUTH_REQUIRED.search(line):
+                    auth = "auth"
+                if not auth:
+                    auth = file_default
+                out.append(Endpoint(
+                    method=method, path=path, code_auth=auth,
+                    source=f"{self._rel(route_path)}:{i}", line=i,
+                    confidence=CONF_VERIFIED if auth else CONF_INFERRED,
+                    handler_reference=handler_reference,
+                ))
+                continue
         return out
 
     # ------------------------------------------------------------ orchestration
@@ -579,6 +757,66 @@ class BusinessSemanticsAdapter:
                 continue
             endpoints.extend(self._extract_code_endpoints(rf, data["text"]))
 
+        # S2.11: exact documented API contract ↔ code route reconciliation.
+        # No path normalization or name-based guessing: only exact method/path pairs match.
+        endpoint_contract_alignment: list[dict[str, Any]] = []
+        matched_code_keys: set[tuple[str, str, str, int]] = set()
+        for documented in doc_endpoints:
+            matches = [
+                ep for ep in endpoints
+                if ep.method == documented["method"] and ep.path == documented["path"]
+            ]
+            if len(matches) == 1:
+                status = "EXACT_MATCH"
+            elif len(matches) > 1:
+                status = "MULTIPLE_CODE_MATCHES"
+            else:
+                status = "DOCUMENTED_NOT_FOUND_IN_CODE"
+            code_evidence = [
+                {"method": ep.method, "path": ep.path, "source": ep.source,
+                 "line": ep.line, "confidence": "STATIC_INFERENCE"}
+                for ep in matches
+            ]
+            for ep in matches:
+                matched_code_keys.add((ep.method, ep.path, ep.source, ep.line))
+            endpoint_contract_alignment.append({
+                "status": status,
+                "method": documented["method"], "path": documented["path"],
+                "document_evidence": {"source": documented["source"], "line": documented.get("line")},
+                "code_evidence": code_evidence,
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "limitations": [
+                    "仅按 HTTP method 与 path 精确匹配；未做 base path、router mount、版本前缀或动态路由展开。",
+                    "文档缺失不证明接口不应存在；代码未匹配也不证明功能未实现。",
+                ],
+            })
+        for ep in endpoints:
+            key = (ep.method, ep.path, ep.source, ep.line)
+            if key in matched_code_keys:
+                continue
+            endpoint_contract_alignment.append({
+                "status": "CODE_ENDPOINT_NOT_DOCUMENTED",
+                "method": ep.method, "path": ep.path,
+                "document_evidence": None,
+                "code_evidence": [{
+                    "method": ep.method, "path": ep.path,
+                    "source": ep.source, "line": ep.line,
+                    "confidence": "STATIC_INFERENCE",
+                }],
+                "confidence": "STATIC_INFERENCE",
+                "verification_status": "NOT_VERIFIED",
+                "limitations": [
+                    "需求/API 文档可能不完整或存放在未识别文件中；未文档化不等于未授权或错误。",
+                    "仅按 HTTP method 与 path 精确匹配；未展开 router mount、动态路由或 API gateway。",
+                ],
+            })
+        endpoint_contract_alignment.sort(key=lambda item: (
+            item["method"], item["path"], item["status"],
+            str((item.get("document_evidence") or {}).get("source") or ""),
+            int((item.get("document_evidence") or {}).get("line") or 0),
+        ))
+
         # (1) Endpoints the code exposes with NO auth at all — but only flag the
         #     ones that are not public-by-design (login/register/health/...).
         for ep in endpoints:
@@ -599,6 +837,12 @@ class BusinessSemanticsAdapter:
             if data["read_ok"]:
                 code_blob_by_file[self._rel(cf)] = data["text"]
         all_code = "\n".join(code_blob_by_file.values())
+        database_accesses = extract_database_accesses(code_blob_by_file)
+        authorization_checks = extract_authorization_evidence(code_blob_by_file)
+        # P3: TS/JS identity records resolve their function owner through the
+        # TS parser's function line ranges; Python keeps its AST owners.
+        identity_evidence = extract_identity_evidence(
+            code_blob_by_file, self._js_ts_function_owners(code_blob_by_file))
 
         # (3) PRD features marked ✅ DONE whose backing permission field is never
         #     referenced in code.  This is the strongest "documented-but-fake"
@@ -672,9 +916,13 @@ class BusinessSemanticsAdapter:
             ],
             "doc_endpoint_count": len(doc_endpoints),
             "endpoint_count": len(endpoints),
+            "endpoint_contract_alignment_count": len(endpoint_contract_alignment),
+            "endpoint_contract_alignment": endpoint_contract_alignment,
             "endpoints": [
                 {"method": ep.method, "path": ep.path, "code_auth": ep.code_auth,
-                 "source": ep.source, "confidence": ep.confidence}
+                 "authorization_status": "DETECTED" if ep.code_auth else "NOT_DETECTED_STATIC_SCAN",
+                 "source": ep.source, "line": ep.line, "confidence": ep.confidence,
+                 "handler_reference": ep.handler_reference}
                 for ep in endpoints
             ],
             "discrepancy_count": len(discrepancies),
@@ -682,6 +930,12 @@ class BusinessSemanticsAdapter:
                 {"kind": d.kind, "message": d.message, "evidence": d.evidence, "confidence": d.confidence}
                 for d in discrepancies
             ],
+            "authorization_check_count": len(authorization_checks),
+            "authorization_checks": authorization_checks,
+            "database_access_count": len(database_accesses),
+            "database_accesses": database_accesses,
+            "identity_evidence_count": len(identity_evidence),
+            "identity_evidence": identity_evidence,
             "field_gap_count": len(field_gaps),
             "field_gaps": [
                 {"field": g.field_name, "entity": g.entity, "anchors": g.anchors,

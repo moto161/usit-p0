@@ -2,42 +2,42 @@
   "schema_version": "usit-frozen-maintenance-baseline-v1",
   "historical_manifest": "outputs/p0710zxrxf/PRE_SHA256.json",
   "historical_manifest_git_blob_sha1": "6fd84b9e3c69bdbc0fc4a56c355261904e640e60",
-  "policy": "The original PRE_SHA256.json is immutable and every watched file retains its historical PRE SHA-256. All watched files are pinned by canonical Git blob IDs so checkout line-ending conversion cannot create false drift. Files unchanged since PRE retain their historical content; files maintained on main carry an explicit reason and successor blob ID. The test suite verifies each historical SHA against PRE before comparing the canonical current blob.",
+  "policy": "The original PRE_SHA256.json is immutable and every watched file retains its historical PRE SHA-256. All watched files are pinned by canonical Git blob IDs so checkout line-ending conversion cannot create false drift. Files unchanged since PRE retain their historical content; maintained files carry an explicit reason and successor blob ID. The test suite verifies each historical SHA against PRE before comparing the canonical current blob.",
   "files": {
     "usit/graph.py": {
-      "git_blob_sha1": "86a6fb54ca5800c73a89f12a9a3228f5b6a370db",
+      "git_blob_sha1": "f7423a3e8dd3bfe4aaf169d2ea147ec38418f04f",
       "historical_sha256": "eeda9ae8e22a60b0dcd9e15b6bd261cef296afb312749c53bcac8feeb9b23fb4",
-      "reason": "Byte-identical to the PRE snapshot on main; pinned by canonical Git blob so checkout line-ending conversion cannot create false drift."
+      "reason": "Maintained graph-v1 validation to enforce structured argument-to-parameter evidence and preserve business-relationship metadata without promoting static evidence to runtime verification; successor blob is pinned while historical PRE SHA-256 remains unchanged."
     },
     "usit/scanner.py": {
-      "git_blob_sha1": "10bd079b6533bc7e2ab1a654d7bb6bbb1ddbe128",
+      "git_blob_sha1": "64589ba5ebad5e19e57125628b39f8857f21caaf",
       "historical_sha256": "c70a1a4baf3a6a17cb7ec0ed4748db7194d70e3008ab32f0ac05e3e55f797912",
-      "reason": "Differs from the PRE snapshot as uploaded to main (initial full source upload); this backport adds POSIX ctime_ns to the discovery-to-open identity check. Current main blob pinned with the PRE digest retained."
-    },
-    "usit/safeio.py": {
-      "git_blob_sha1": "d1a45c017b768911de960a8684fbd224d1be5a77",
-      "historical_sha256": "d8d8a42e6cb72dcfe2dedb66f80af80acb793a6a777d69d9e9d5411e1233ad7c",
-      "reason": "Byte-identical to the PRE snapshot on main; pinned by canonical Git blob so checkout line-ending conversion cannot create false drift."
+      "reason": "Maintained scanner pipeline for route-handler, UI-event and API-client relationships, stronger discovery-to-open identity checks, explicit evidence propagation, and bounded no-follow previous-manifest loading; historical PRE SHA-256 remains unchanged. H2 (2026-11-13) selects the route-handler binding edge method by row language (Python rows emit python-route-handler-binding, others emit typescript-route-handler-binding); successor blob updated accordingly. V1 (2026-11-13) adds Vue SFC support: js_ts_source passes the line-padded <script> block, js_ts_paths admits Vue rows, template bindings resolve against merged script symbols, the post-merge call downgrade exempts Vue, and vue-template-event-handler-binding edges are emitted; successor blob updated accordingly. A1 (2026-11-13) adds Angular template support: component templateUrl resolution, angular_event_bindings computed against merged component method symbols, and angular-template-event-handler-binding edges emitted; successor blob updated accordingly. A2 (2026-11-13) adds inline template: support: component template: string literals are resolved against the same component row (line/column-padded for file-relative evidence), and their bindings join the same angular_event_bindings; successor blob updated accordingly."
     },
     "tests/test_graph_validation.py": {
-      "git_blob_sha1": "19d992c72b2edaad6221d0d3b74c9dc056dded4d",
+      "git_blob_sha1": "a7cc5b0feb38971e6d0301e11909bcdd7e474917",
       "historical_sha256": "72fcae081526ce0d67e0f3fbf1ba59ee1b2d887a10267149190e2b8c2d60b7f0",
-      "reason": "Byte-identical to the PRE snapshot on main; pinned by canonical Git blob so checkout line-ending conversion cannot create false drift."
+      "reason": "Maintained graph-v1 validation regression fixture; its historical PRE digest is retained while the exact successor Git blob is pinned. Additional argument-binding behavior remains covered in tests/test_graph_argument_bindings.py."
+    },
+    "tests/test_p0710z_snapshot_trust.py": {
+      "git_blob_sha1": "24e8f2755e02ab40a5df10f443689674ceef35a4",
+      "historical_sha256": "7f8ad74737ad4e8d6928cf84a153d298534e1259a081ac70df094888b03b0e8f",
+      "reason": "Updated the frozen-fixture assertion to verify both the retained historical digest and the explicit successor Git baseline, rather than falsely claiming the old bytes remain in the current tree."
+    },
+    "tests/test_p0710zrf_descriptor_binding.py": {
+      "git_blob_sha1": "ed60c1950abfa395672ebfb01f6b8b6459f7ceec",
+      "historical_sha256": "ef452a224d5c0b0efbdfc22017fa2e7410eb2d73329b05e851597eceebe00322",
+      "reason": "Corrected the LF fixture fallback for the same-size rewrite test and migrated graph-fixture integrity checks to the reviewed successor baseline; historical PRE hashes remain recorded."
+    },
+    "usit/safeio.py": {
+      "git_blob_sha1": "1a0eb0c1c28b99a8ea58634eb201ff96169d64d8",
+      "historical_sha256": "d8d8a42e6cb72dcfe2dedb66f80af80acb793a6a777d69d9e9d5411e1233ad7c",
+      "reason": "Maintained safety I/O implementation after the historical PRE snapshot: descriptor-bound no-follow opens and bounded streaming reads are now enforced; the original PRE SHA-256 remains preserved separately."
     },
     "tests/test_p073_budget_race.py": {
       "git_blob_sha1": "5f897498548d6ec7942a6a4e751b34f6eb8a167d",
       "historical_sha256": "470851778ee2224593ab146109b86b613f52fcd60149ddc23092da33dd3fbeb6",
       "reason": "Unmodified historical budget-race fixture; retain the original PRE digest and pin its canonical Git blob independent of working-tree line endings."
-    },
-    "tests/test_p0710z_snapshot_trust.py": {
-      "git_blob_sha1": "24e8f2755e02ab40a5df10f443689674ceef35a4",
-      "historical_sha256": "7f8ad74737ad4e8d6928cf84a153d298534e1259a081ac70df094888b03b0e8f",
-      "reason": "Maintained on main by this backport: frozen assertion migrated from live SHA-256 to the reviewed successor Git-blob baseline; historical PRE digest retained."
-    },
-    "tests/test_p0710zrf_descriptor_binding.py": {
-      "git_blob_sha1": "ed60c1950abfa395672ebfb01f6b8b6459f7ceec",
-      "historical_sha256": "ef452a224d5c0b0efbdfc22017fa2e7410eb2d73329b05e851597eceebe00322",
-      "reason": "Maintained on main by this backport: corrected the LF fixture fallback for the same-size rewrite test and migrated the frozen check to the reviewed successor baseline; historical PRE digest retained."
     }
   }
 }

@@ -1,0 +1,1105 @@
+"""Conservative cross-validation of runtime test and coverage evidence."""
+from __future__ import annotations
+import hashlib
+import json
+import math
+from collections import Counter
+from typing import Any
+
+GRAPH_SCHEMA = "usit-graph-v1"
+TEST_SCHEMA = "usit-test-execution-results-v1"
+COVERAGE_SCHEMA = "usit-code-coverage-results-v1"
+
+
+def _index(rows: Any, key: str, label: str) -> dict[str, dict[str, Any]]:
+    if not isinstance(rows, list):
+        raise ValueError(f"{label} must be a list")
+    result = {}
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"{label}[{i}] must be an object")
+        identity = row.get(key)
+        if not isinstance(identity, str) or not identity:
+            raise ValueError(f"{label}[{i}] missing {key}")
+        if identity in result:
+            raise ValueError(f"duplicate {key} in {label}: {identity}")
+        result[identity] = row
+    return result
+
+
+def _validated_hashes(value: Any, required: tuple[str, ...], label: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} source_hashes must be an object")
+    result = {}
+    for field in required:
+        digest = value.get(field)
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError(f"{label} source_hashes.{field} must be a lowercase SHA-256 hex digest")
+        result[field] = digest
+    return result
+
+
+def _hash_map(value: Any, label: str) -> dict[str, str] | None:
+    """Validate an optional {source path: SHA-256} map; absent stays absent."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object mapping source paths to SHA-256 digests")
+    result = {}
+    for path, digest in value.items():
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError(f"{label} keys must be non-empty source paths")
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError(f"{label}[{path}] must be a lowercase SHA-256 hex digest")
+        result[path] = digest
+    return result
+
+
+def _check_runtime_consistency(
+    view: dict[str, Any], events: list[dict[str, Any]]
+) -> tuple[str, dict[str, Any]]:
+    """Compare attributed runtime events against one function's static view.
+
+    Only explicit event fields are compared; time adjacency, shared
+    correlation IDs, or mere event existence never count as consistency.
+    A field the event does not carry is NOT_PROVIDED, not a mismatch. A
+    static item the graph never identified is NOT_CHECKED, not a mismatch.
+    UI_ACTION `component` is a component name, not a file path: it only
+    matches an entrypoint's `source_file` by exact equality. A
+    non-matching component name is NOT_CHECKED, never a conflict -- names
+    have no reliable equality relation to static entrypoint paths (a real
+    capture records e.g. "PhotoDetail" while the static entrypoint is
+    "web/Photos.tsx"), so judging it would manufacture false conflicts.
+    Returns (status, detail); mismatches carry event_id/field/expected/actual.
+    """
+    static_method = view.get("method")
+    static_endpoint = view.get("endpoint")
+    static_tables: set[str] = set()
+    static_operations: set[str] = set()
+    for access in view.get("database_accesses", []) or []:
+        if not isinstance(access, dict):
+            continue
+        for table in access.get("tables", []) or []:
+            if isinstance(table, str) and table:
+                static_tables.add(table)
+        operation = access.get("operation")
+        if isinstance(operation, str) and operation and operation.upper() != "UNKNOWN":
+            static_operations.add(operation.upper())
+    entrypoint_files = {
+        entry.get("source_file")
+        for entry in view.get("frontend_entrypoints", []) or []
+        if isinstance(entry, dict) and isinstance(entry.get("source_file"), str)
+    }
+    mismatches: list[dict[str, Any]] = []
+    compared = 0
+    matched = 0
+    first_not_checked: str | None = None
+    for event in events:
+        event_id = event.get("event_id")
+        event_type = event.get("event_type")
+        outcome: str | None = None
+        event_mismatch = False
+        if event_type in {"HTTP_REQUEST", "HTTP_RESPONSE"}:
+            method = event.get("http_method")
+            template = event.get("route_template")
+            if method is None and template is None:
+                outcome = "NOT_PROVIDED"
+            elif not isinstance(static_method, str) or not isinstance(static_endpoint, str):
+                outcome = "NOT_CHECKED_NO_STATIC_ENDPOINT"
+            else:
+                if method is not None and method.upper() != static_method.upper():
+                    mismatches.append({"event_id": event_id, "field": "http_method",
+                                       "expected": static_method, "actual": method})
+                    event_mismatch = True
+                if template is not None and template != static_endpoint:
+                    mismatches.append({"event_id": event_id, "field": "route_template",
+                                       "expected": static_endpoint, "actual": template})
+                    event_mismatch = True
+                outcome = "MISMATCH" if event_mismatch else "MATCHED"
+        elif event_type == "DATABASE_CHANGE":
+            table = event.get("table_or_collection")
+            operation = event.get("db_operation")
+            if table is None and operation is None:
+                outcome = "NOT_PROVIDED"
+            else:
+                if table is not None:
+                    if not static_tables:
+                        outcome = "NOT_CHECKED_NO_STATIC_TABLE"
+                    elif table not in static_tables:
+                        mismatches.append({"event_id": event_id, "field": "table_or_collection",
+                                           "expected": sorted(static_tables), "actual": table})
+                        event_mismatch = True
+                if operation is not None:
+                    if not static_operations:
+                        if outcome is None:
+                            outcome = "NOT_CHECKED_NO_STATIC_OPERATION"
+                    elif operation.upper() not in static_operations:
+                        mismatches.append({"event_id": event_id, "field": "db_operation",
+                                           "expected": sorted(static_operations), "actual": operation})
+                        event_mismatch = True
+                if outcome is None:
+                    outcome = "MISMATCH" if event_mismatch else "MATCHED"
+                elif event_mismatch:
+                    outcome = "MISMATCH"
+        elif event_type == "UI_ACTION":
+            component = event.get("component")
+            if component is None:
+                outcome = "NOT_PROVIDED"
+            elif not entrypoint_files:
+                outcome = "NOT_CHECKED_NO_STATIC_ENTRYPOINT"
+            elif component in entrypoint_files:
+                outcome = "MATCHED"
+            else:
+                outcome = "NOT_CHECKED_UI_COMPONENT"
+        else:
+            outcome = "NOT_PROVIDED"
+        if outcome in {"MATCHED", "MISMATCH"}:
+            compared += 1
+            if outcome == "MATCHED":
+                matched += 1
+        elif outcome is not None and outcome.startswith("NOT_CHECKED") and first_not_checked is None:
+            first_not_checked = outcome
+    if mismatches:
+        status = "MISMATCH"
+    elif matched:
+        status = "MATCHED"
+    elif first_not_checked is not None:
+        status = first_not_checked
+    elif events:
+        status = "NOT_PROVIDED"
+    else:
+        status = "NOT_OBSERVED"
+    return status, {
+        "compared_event_count": compared,
+        "matched_event_count": matched,
+        "mismatches": mismatches,
+    }
+
+
+def verify_business_function_evidence(
+    business_graph: dict[str, Any],
+    test_results: dict[str, Any] | None = None,
+    coverage_results: dict[str, Any] | None = None,
+    business_graph_sha256: str | None = None,
+    runtime_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(business_graph, dict) or business_graph.get("schema_version") != GRAPH_SCHEMA:
+        raise ValueError("business graph must use usit-graph-v1")
+    understanding = business_graph.get("business_understanding")
+    if not isinstance(understanding, dict):
+        raise ValueError("business graph is missing business_understanding")
+    views = _index(understanding.get("business_function_views"), "business_function_id",
+                  "business_function_views")
+    if not views:
+        raise ValueError("business graph contains no business function views")
+    graph_hash = business_graph_sha256 or hashlib.sha256(
+        json.dumps(business_graph, ensure_ascii=False, sort_keys=True,
+                   separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if (not isinstance(graph_hash, str) or len(graph_hash) != 64 or
+            any(c not in "0123456789abcdef" for c in graph_hash)):
+        raise ValueError("business_graph_sha256 must be a lowercase SHA-256 hex digest")
+
+    conflicts = []
+    test_by_id, coverage_by_id = {}, {}
+    if test_results is not None:
+        if not isinstance(test_results, dict) or test_results.get("schema_version") != TEST_SCHEMA:
+            raise ValueError(f"test results must use {TEST_SCHEMA}")
+        hashes = _validated_hashes(
+            test_results.get("source_hashes"),
+            ("test_report_sha256", "mapping_json_sha256", "business_graph_sha256"),
+            "test results",
+        )
+        if hashes["business_graph_sha256"] != graph_hash:
+            conflicts.append({"kind":"GRAPH_HASH_MISMATCH","source":"test_results",
+                              "expected":graph_hash,"actual":hashes["business_graph_sha256"]})
+        test_by_id = _index(test_results.get("business_function_results"),
+                            "business_function_id","business_function_results")
+    if coverage_results is not None:
+        if not isinstance(coverage_results, dict) or coverage_results.get("schema_version") != COVERAGE_SCHEMA:
+            raise ValueError(f"coverage results must use {COVERAGE_SCHEMA}")
+        hashes = _validated_hashes(
+            coverage_results.get("source_hashes"),
+            ("coverage_report_sha256", "mapping_json_sha256", "business_graph_sha256"),
+            "coverage results",
+        )
+        if hashes["business_graph_sha256"] != graph_hash:
+            conflicts.append({"kind":"GRAPH_HASH_MISMATCH","source":"coverage_results",
+                              "expected":graph_hash,"actual":hashes["business_graph_sha256"]})
+        coverage_by_id = _index(coverage_results.get("business_function_coverage"),
+                                "business_function_id","business_function_coverage")
+
+    known = set(views)
+    # Execution binding: the test results carry their execution_id inside
+    # the validated provenance record; the coverage results carry it at the
+    # top level when the importer was given a provenance record. Either side
+    # may legitimately have none (old unbound reports); only a present-but-
+    # different pair, or one bound side against an unbound other, is a
+    # conflict -- and only for functions that combine both sides.
+    test_execution_id = None
+    test_provenance = test_results.get("execution_provenance") if test_results is not None else None
+    if isinstance(test_provenance, dict):
+        candidate = test_provenance.get("execution_id")
+        if isinstance(candidate, str) and candidate:
+            test_execution_id = candidate
+    coverage_execution_id = None
+    if coverage_results is not None:
+        candidate = coverage_results.get("execution_id")
+        if isinstance(candidate, str) and candidate:
+            coverage_execution_id = candidate
+    for source, records in (("test_results",test_by_id),("coverage_results",coverage_by_id)):
+        for function_id in sorted(set(records)-known):
+            conflicts.append({"kind":"UNKNOWN_BUSINESS_FUNCTION","source":source,
+                              "business_function_id":function_id})
+
+    # Runtime events for the G2 consistency check: only events carrying an
+    # explicit business_function_id that exists in this graph are
+    # attributed. Events without attribution, or naming an unknown
+    # function, are not compared here -- the runtime evidence validator
+    # is the place that flags unknown function IDs. The caller is
+    # expected to pass events from a document already validated by
+    # validate_runtime_evidence; the verifier re-checks only the fields
+    # it compares, fail-closed.
+    runtime_events_by_function: dict[str, list[dict[str, Any]]] = {}
+    if runtime_events is not None:
+        if not isinstance(runtime_events, list):
+            raise ValueError("runtime_events must be a list")
+        for index, event in enumerate(runtime_events):
+            if not isinstance(event, dict):
+                raise ValueError(f"runtime_events[{index}] must be an object")
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str) or not event_id.strip():
+                raise ValueError(f"runtime_events[{index}].event_id must be a non-empty string")
+            function_id = event.get("business_function_id")
+            if function_id is not None and (not isinstance(function_id, str) or not function_id.strip()):
+                raise ValueError(f"runtime_events[{index}].business_function_id must be a non-empty string or absent")
+            event_type = event.get("event_type")
+            if event_type is not None and not isinstance(event_type, str):
+                raise ValueError(f"runtime_events[{index}].event_type must be a string or absent")
+            for field in ("http_method", "route_template", "db_operation", "table_or_collection", "component"):
+                value = event.get(field)
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"runtime_events[{index}].{field} must be a string or absent")
+            if function_id and function_id in known:
+                runtime_events_by_function.setdefault(function_id, []).append(event)
+
+    # G1: the test run's source-snapshot file hashes and the coverage
+    # run's source-file hashes are validated here; the per-function
+    # comparison itself happens in the loop below, over the files each
+    # function's own coverage row references. A shared execution_id
+    # does not prove the same source version: the snapshot and the
+    # coverage may come from different checkouts of one run. Only
+    # overlapping files are judged; no overlap, or a missing hash set
+    # on either side, is reported, never claimed as agreement.
+    test_manifest_hashes = _hash_map(
+        test_provenance.get("source_manifest_file_hashes") if isinstance(test_provenance, dict) else None,
+        "test results execution_provenance.source_manifest_file_hashes")
+    coverage_source_hashes = _hash_map(
+        coverage_results.get("source_hashes", {}).get("source_files")
+        if isinstance(coverage_results, dict) and isinstance(coverage_results.get("source_hashes"), dict) else None,
+        "coverage results source_hashes.source_files")
+
+    matrix=[]
+    for function_id, view in sorted(views.items()):
+        test=test_by_id.get(function_id); cov=coverage_by_id.get(function_id)
+        ts=test.get("execution_status","NOT_MEASURED") if test else "NOT_MEASURED"
+        reported_test_status = ts
+        cs=cov.get("code_coverage_status","NOT_MEASURED") if cov else "NOT_MEASURED"
+        reported_coverage_status = cs
+        # Execution binding is checked per function that combines both sides:
+        # a mismatch (or one side bound while the other is unbound) means
+        # the test and coverage evidence may come from different runs, so the
+        # combined conclusion for this function is invalid. When neither side
+        # is bound there is nothing to compare -- the old unbound behavior,
+        # reported as NOT_PROVIDED rather than rejected.
+        if test is not None and cov is not None:
+            if test_execution_id is not None and coverage_execution_id is not None:
+                if test_execution_id == coverage_execution_id:
+                    execution_binding_status = "MATCHED"
+                else:
+                    execution_binding_status = "MISMATCH"
+                    conflicts.append({
+                        "kind": "TEST_COVERAGE_EXECUTION_MISMATCH",
+                        "business_function_id": function_id,
+                        "test_execution_id": test_execution_id,
+                        "coverage_execution_id": coverage_execution_id,
+                    })
+            elif test_execution_id is not None:
+                execution_binding_status = "COVERAGE_UNBOUND"
+                conflicts.append({
+                    "kind": "COVERAGE_EXECUTION_UNBOUND",
+                    "business_function_id": function_id,
+                    "test_execution_id": test_execution_id,
+                })
+            elif coverage_execution_id is not None:
+                execution_binding_status = "TEST_UNBOUND"
+                conflicts.append({
+                    "kind": "TEST_EXECUTION_UNBOUND",
+                    "business_function_id": function_id,
+                    "coverage_execution_id": coverage_execution_id,
+                })
+            else:
+                execution_binding_status = "NOT_PROVIDED"
+        else:
+            execution_binding_status = "NOT_APPLICABLE"
+        # G1 source-version binding: only functions combining test and
+        # coverage evidence are judged. The comparison is per function,
+        # over the source files that function's own coverage row
+        # references (mapping_ranges + source_binding_evidence): a
+        # divergence on an unrelated function's file must not downgrade
+        # this function's combined conclusion -- that would manufacture
+        # a false conflict. The design's "相关功能" is exactly this set.
+        if test is not None and cov is not None:
+            if test_manifest_hashes is None or coverage_source_hashes is None:
+                source_version_binding_status = "NOT_PROVIDED"
+            else:
+                referenced_files = {
+                    item.get("source_file")
+                    for item in (cov.get("mapping_ranges") or [])
+                    if isinstance(item, dict) and isinstance(item.get("source_file"), str)
+                } | {
+                    item.get("source_file")
+                    for item in (cov.get("source_binding_evidence") or [])
+                    if isinstance(item, dict) and isinstance(item.get("source_file"), str)
+                }
+                overlapping = sorted(
+                    path for path in referenced_files
+                    if path in test_manifest_hashes and path in coverage_source_hashes)
+                function_divergent = [
+                    path for path in overlapping
+                    if test_manifest_hashes[path] != coverage_source_hashes[path]]
+                if function_divergent:
+                    source_version_binding_status = "DIVERGENT"
+                    conflicts.append({
+                        "kind": "TEST_COVERAGE_SOURCE_VERSION_DIVERGENCE",
+                        "business_function_id": function_id,
+                        "divergent_source_files": [
+                            {"source_file": path,
+                             "test_sha256": test_manifest_hashes[path],
+                             "coverage_sha256": coverage_source_hashes[path]}
+                            for path in function_divergent
+                        ],
+                    })
+                elif overlapping:
+                    source_version_binding_status = "MATCHED"
+                else:
+                    source_version_binding_status = "NO_OVERLAPPING_SOURCE_FILES"
+        else:
+            source_version_binding_status = "NOT_APPLICABLE"
+        # G2 runtime-to-static consistency: only attributed events are
+        # compared, against this function's own static view.
+        if runtime_events is None:
+            runtime_consistency_status = "NOT_APPLICABLE"
+            runtime_consistency_detail = None
+        else:
+            function_events = runtime_events_by_function.get(function_id, [])
+            runtime_consistency_status, runtime_consistency_detail = _check_runtime_consistency(
+                view, function_events)
+            for mismatch in runtime_consistency_detail["mismatches"]:
+                conflicts.append({
+                    "kind": "RUNTIME_STATIC_MISMATCH",
+                    "business_function_id": function_id,
+                    "event_id": mismatch["event_id"],
+                    "field": mismatch["field"],
+                    "expected": mismatch["expected"],
+                    "actual": mismatch["actual"],
+                })
+        coverage_source_verified = False
+        if cov is not None:
+            percent = cov.get("line_coverage_percent")
+            percent_valid = percent is None or (
+                isinstance(percent, (int, float)) and not isinstance(percent, bool)
+                and not (isinstance(percent, float) and not math.isfinite(percent))
+                and 0 <= percent <= 100
+            )
+            if not percent_valid:
+                conflicts.append({
+                    "kind": "INVALID_COVERAGE_PERCENT",
+                    "business_function_id": function_id,
+                    "value": repr(percent) if isinstance(percent, float) and not math.isfinite(percent) else percent,
+                })
+            counts = {}
+            counts_valid = True
+            for count_field in ("executable_line_count", "covered_line_count", "uncovered_line_count"):
+                count_value = cov.get(count_field)
+                if count_value is not None and (
+                    not isinstance(count_value, int) or isinstance(count_value, bool) or count_value < 0
+                ):
+                    conflicts.append({
+                        "kind": "INVALID_COVERAGE_COUNT",
+                        "business_function_id": function_id,
+                        "field": count_field,
+                    })
+                    counts_valid = False
+                else:
+                    counts[count_field] = count_value
+            executable = counts.get("executable_line_count")
+            covered = counts.get("covered_line_count")
+            uncovered = counts.get("uncovered_line_count")
+            if counts_valid and all(value is not None for value in (executable, covered, uncovered)):
+                if covered > executable or uncovered > executable or covered + uncovered != executable:
+                    conflicts.append({
+                        "kind": "INCONSISTENT_COVERAGE_COUNTS",
+                        "business_function_id": function_id,
+                        "executable_line_count": executable,
+                        "covered_line_count": covered,
+                        "uncovered_line_count": uncovered,
+                    })
+                if percent_valid and percent is not None and executable > 0:
+                    expected_percent = round(100 * covered / executable, 2)
+                    if not math.isclose(float(percent), expected_percent, rel_tol=0, abs_tol=0.01):
+                        conflicts.append({
+                            "kind": "COVERAGE_PERCENT_COUNT_MISMATCH",
+                            "business_function_id": function_id,
+                            "reported_percent": percent,
+                            "derived_percent": expected_percent,
+                        })
+                if percent_valid and percent is not None and not cov.get("coverage_source_files_missing"):
+                    expected_status = "COVERED" if covered == executable else ("PARTIAL" if covered > 0 else "NOT_COVERED")
+                    if cs != expected_status:
+                        conflicts.append({
+                            "kind": "COVERAGE_STATUS_COUNT_MISMATCH",
+                            "business_function_id": function_id,
+                            "reported_status": cs,
+                            "derived_status": expected_status,
+                        })
+            elif percent_valid and percent is not None and any(
+                value is not None for value in counts.values()
+            ):
+                conflicts.append({
+                    "kind": "INCOMPLETE_COVERAGE_MEASUREMENTS",
+                    "business_function_id": function_id,
+                })
+            missing_files = cov.get("coverage_source_files_missing", [])
+            if not isinstance(missing_files, list) or any(
+                not isinstance(path, str) or not path.strip() for path in missing_files
+            ):
+                conflicts.append({
+                    "kind": "INVALID_COVERAGE_MISSING_SOURCE_FILES",
+                    "business_function_id": function_id,
+                })
+            elif missing_files and cs != "UNKNOWN":
+                conflicts.append({
+                    "kind": "COVERAGE_STATUS_WITH_MISSING_SOURCE_FILES",
+                    "business_function_id": function_id,
+                    "reported_status": cs,
+                })
+            source_evidence = cov.get("source_binding_evidence")
+            source_binding_valid = isinstance(source_evidence, list) and bool(source_evidence)
+            if source_binding_valid:
+                for source_item in source_evidence:
+                    if not isinstance(source_item, dict):
+                        source_binding_valid = False
+                        break
+                    status = source_item.get("source_binding_status")
+                    expected_hash = source_item.get("expected_source_file_sha256")
+                    actual_hash = source_item.get("actual_source_file_sha256")
+                    if (not isinstance(source_item.get("source_file"), str)
+                            or not source_item["source_file"].strip()
+                            or status not in {"SOURCE_BYTES_MATCHED", "SOURCE_BINDING_NOT_CHECKED",
+                                              "SOURCE_FILE_MISSING", "SOURCE_HASH_MISMATCH",
+                                              "SOURCE_ENCODING_UNSUPPORTED", "SOURCE_LINE_RANGE_OUT_OF_BOUNDS"}):
+                        source_binding_valid = False
+                        break
+                    for digest in (expected_hash, actual_hash):
+                        if digest is not None and (
+                            not isinstance(digest, str) or len(digest) != 64
+                            or any(ch not in "0123456789abcdef" for ch in digest)
+                        ):
+                            source_binding_valid = False
+                            break
+                    if not source_binding_valid:
+                        break
+                    if status == "SOURCE_BYTES_MATCHED" and (
+                        not expected_hash or expected_hash != actual_hash
+                        or not isinstance(source_item.get("source_line_count"), int)
+                        or isinstance(source_item.get("source_line_count"), bool)
+                        or source_item["source_line_count"] < 1
+                        or not isinstance(source_item.get("line_start"), int)
+                        or isinstance(source_item.get("line_start"), bool)
+                        or not isinstance(source_item.get("line_end"), int)
+                        or isinstance(source_item.get("line_end"), bool)
+                        or source_item["line_start"] < 1
+                        or source_item["line_end"] < source_item["line_start"]
+                        or source_item["line_end"] > source_item["source_line_count"]
+                    ):
+                        source_binding_valid = False
+                        break
+            if not source_binding_valid:
+                if cs != "UNKNOWN" or percent is not None:
+                    conflicts.append({
+                        "kind": "INVALID_OR_MISSING_COVERAGE_SOURCE_BINDING",
+                        "business_function_id": function_id,
+                    })
+                cs = "UNKNOWN"
+                percent = None
+            elif (not missing_files and all(
+                item["source_binding_status"] == "SOURCE_BYTES_MATCHED" for item in source_evidence
+            )):
+                coverage_source_verified = True
+            else:
+                if cs != "UNKNOWN" or percent is not None:
+                    conflicts.append({
+                        "kind": "COVERAGE_WITH_UNVERIFIED_SOURCE_BINDING",
+                        "business_function_id": function_id,
+                    })
+                cs = "UNKNOWN"
+                percent = None
+            ranges = cov.get("mapping_ranges", [])
+            if not isinstance(ranges, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("source_file"), str)
+                or not item["source_file"].strip()
+                or not isinstance(item.get("line_start"), int)
+                or isinstance(item.get("line_start"), bool)
+                or not isinstance(item.get("line_end"), int)
+                or isinstance(item.get("line_end"), bool)
+                or item["line_start"] < 1 or item["line_end"] < item["line_start"]
+                for item in ranges
+            ):
+                conflicts.append({
+                    "kind": "INVALID_COVERAGE_MAPPING_EVIDENCE",
+                    "business_function_id": function_id,
+                })
+            elif source_binding_valid:
+                mapped_ranges = sorted(
+                    (item["source_file"], item["line_start"], item["line_end"])
+                    for item in ranges
+                )
+                bound_ranges = sorted(
+                    (item["source_file"], item["line_start"], item["line_end"])
+                    for item in source_evidence
+                    if all(isinstance(item.get(field), int) and not isinstance(item.get(field), bool)
+                           for field in ("line_start", "line_end"))
+                )
+                if mapped_ranges != bound_ranges:
+                    conflicts.append({
+                        "kind": "COVERAGE_SOURCE_BINDING_RANGE_MISMATCH",
+                        "business_function_id": function_id,
+                    })
+                    cs = "UNKNOWN"
+                    percent = None
+                    coverage_source_verified = False
+        if ts not in {"PASSED","FAILED","UNKNOWN","NOT_EXECUTED","NOT_MEASURED"}:
+            conflicts.append({"kind":"INVALID_TEST_STATUS","business_function_id":function_id,"status":ts})
+        if cs not in {"COVERED","PARTIAL","NOT_COVERED","UNKNOWN","NOT_MEASURED"}:
+            conflicts.append({"kind":"INVALID_COVERAGE_STATUS","business_function_id":function_id,"status":cs})
+
+        test_case_evidence = []
+        test_source_binding_evidence = []
+        missing_test_case_ids = []
+        completeness_status = "NOT_PROVIDED"
+        if test is not None:
+            raw_missing = test.get("mapped_cases_missing_from_report")
+            if raw_missing is not None:
+                if not isinstance(raw_missing, list) or any(
+                    not isinstance(item, str) or not item.strip() for item in raw_missing
+                ):
+                    conflicts.append({
+                        "kind": "INVALID_TEST_COMPLETENESS_METADATA",
+                        "business_function_id": function_id,
+                        "field": "mapped_cases_missing_from_report",
+                    })
+                else:
+                    missing_test_case_ids = sorted(set(raw_missing))
+            raw_cases = test.get("mapped_test_cases")
+            if raw_cases is not None:
+                if not isinstance(raw_cases, list):
+                    conflicts.append({
+                        "kind": "INVALID_TEST_CASE_EVIDENCE",
+                        "business_function_id": function_id,
+                    })
+                else:
+                    for index, item in enumerate(raw_cases):
+                        if (not isinstance(item, dict)
+                                or not isinstance(item.get("test_case_id"), str)
+                                or not item["test_case_id"].strip()
+                                or item.get("status") not in {"PASSED", "FAILED", "SKIPPED"}):
+                            conflicts.append({
+                                "kind": "INVALID_TEST_CASE_EVIDENCE",
+                                "business_function_id": function_id,
+                                "index": index,
+                            })
+                            continue
+                        # C1: the candidate this executed case attributes
+                        # to, carried from the mapping through the
+                        # importer. Absent for hand-written mappings;
+                        # present-but-malformed is a conflict.
+                        candidate_test_id = item.get("candidate_test_id")
+                        if candidate_test_id is not None and (
+                            not isinstance(candidate_test_id, str) or not candidate_test_id.strip()
+                        ):
+                            conflicts.append({
+                                "kind": "INVALID_TEST_CASE_EVIDENCE",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            continue
+                        raw_binding = item.get("test_source_binding_evidence")
+                        binding_status = item.get("test_source_binding_status", "TEST_SOURCE_BINDING_NOT_PROVIDED")
+                        allowed_binding_statuses = {
+                            "TEST_SOURCE_BINDING_NOT_PROVIDED", "TEST_SOURCE_BINDING_NOT_CHECKED",
+                            "TEST_SOURCE_BINDING_INVALID", "TEST_SOURCE_FILE_MISSING",
+                            "TEST_SOURCE_HASH_MISMATCH", "TEST_SOURCE_ENCODING_UNSUPPORTED",
+                            "TEST_SOURCE_LINE_OUT_OF_BOUNDS", "TEST_SOURCE_BYTES_MATCHED",
+                        }
+                        if binding_status not in allowed_binding_statuses:
+                            conflicts.append({
+                                "kind": "INVALID_TEST_SOURCE_BINDING_STATUS",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            binding_status = "TEST_SOURCE_BINDING_INVALID"
+                        if raw_binding is not None and (
+                            not isinstance(raw_binding, dict)
+                            or raw_binding.get("status") != binding_status
+                        ):
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_BINDING_EVIDENCE_STATUS_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            binding_status = "TEST_SOURCE_BINDING_INVALID"
+                        if binding_status == "TEST_SOURCE_BYTES_MATCHED":
+                            expected_digest = raw_binding.get("expected_sha256") if isinstance(raw_binding, dict) else None
+                            actual_digest = raw_binding.get("actual_sha256") if isinstance(raw_binding, dict) else None
+                            source_line = raw_binding.get("test_source_line") if isinstance(raw_binding, dict) else None
+                            source_line_count = raw_binding.get("source_line_count") if isinstance(raw_binding, dict) else None
+                            source_file = raw_binding.get("test_source_file") if isinstance(raw_binding, dict) else None
+                            declared_file = raw_binding.get("declared_test_source_file") if isinstance(raw_binding, dict) else None
+                            declared_line = raw_binding.get("declared_test_source_line") if isinstance(raw_binding, dict) else None
+                            declared_digest = raw_binding.get("declared_test_source_file_sha256") if isinstance(raw_binding, dict) else None
+                            valid_digest = lambda value: (
+                                isinstance(value, str) and len(value) == 64
+                                and all(char in "0123456789abcdef" for char in value)
+                            )
+                            normalized_declared_file = (
+                                declared_file.replace(chr(92), "/") if isinstance(declared_file, str) else None
+                            )
+                            if (not valid_digest(expected_digest) or not valid_digest(actual_digest)
+                                    or expected_digest != actual_digest
+                                    or not valid_digest(declared_digest) or declared_digest != expected_digest
+                                    or not isinstance(source_file, str) or not source_file
+                                    or normalized_declared_file != source_file
+                                    or not isinstance(source_line, int) or isinstance(source_line, bool) or source_line < 1
+                                    or not isinstance(declared_line, int) or isinstance(declared_line, bool)
+                                    or declared_line != source_line
+                                    or not isinstance(source_line_count, int) or isinstance(source_line_count, bool)
+                                    or source_line_count < source_line):
+                                conflicts.append({
+                                    "kind": "INVALID_MATCHED_TEST_SOURCE_BINDING_EVIDENCE",
+                                    "business_function_id": function_id,
+                                    "test_case_id": item["test_case_id"],
+                                })
+                                binding_status = "TEST_SOURCE_BINDING_INVALID"
+                        raw_symbol = item.get("test_source_symbol_evidence")
+                        symbol_status = item.get("test_source_symbol_status", "TEST_SOURCE_SYMBOL_NOT_PROVIDED")
+                        allowed_symbol_statuses = {
+                            "TEST_SOURCE_SYMBOL_NOT_PROVIDED", "TEST_SOURCE_SYMBOL_INVALID",
+                            "TEST_SOURCE_SYMBOL_NOT_SUPPORTED", "TEST_SOURCE_SYMBOL_NOT_CHECKED",
+                            "TEST_SOURCE_SYMBOL_MISMATCH", "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED",
+                        }
+                        if symbol_status not in allowed_symbol_statuses:
+                            conflicts.append({
+                                "kind": "INVALID_TEST_SOURCE_SYMBOL_STATUS",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            symbol_status = "TEST_SOURCE_SYMBOL_INVALID"
+                        if raw_symbol is not None and (
+                            not isinstance(raw_symbol, dict)
+                            or raw_symbol.get("status") != symbol_status
+                        ):
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_SYMBOL_EVIDENCE_STATUS_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            symbol_status = "TEST_SOURCE_SYMBOL_INVALID"
+                        if symbol_status == "TEST_SOURCE_SYMBOL_DECLARATION_MATCHED":
+                            symbol_name = raw_symbol.get("qualified_symbol") if isinstance(raw_symbol, dict) else None
+                            declared_symbol = raw_symbol.get("declared_test_source_symbol") if isinstance(raw_symbol, dict) else None
+                            symbol_start = raw_symbol.get("symbol_start_line") if isinstance(raw_symbol, dict) else None
+                            symbol_end = raw_symbol.get("symbol_end_line") if isinstance(raw_symbol, dict) else None
+                            symbol_line = raw_symbol.get("test_source_line") if isinstance(raw_symbol, dict) else None
+                            bound_line = raw_binding.get("test_source_line") if isinstance(raw_binding, dict) else None
+                            if (not isinstance(symbol_name, str) or not symbol_name
+                                    or symbol_name != declared_symbol
+                                    or binding_status != "TEST_SOURCE_BYTES_MATCHED"
+                                    or not isinstance(symbol_start, int) or isinstance(symbol_start, bool)
+                                    or not isinstance(symbol_end, int) or isinstance(symbol_end, bool)
+                                    or not isinstance(symbol_line, int) or isinstance(symbol_line, bool)
+                                    or symbol_start < 1 or symbol_end < symbol_start
+                                    or symbol_line != bound_line
+                                    or not symbol_start <= symbol_line <= symbol_end):
+                                conflicts.append({
+                                    "kind": "INVALID_MATCHED_TEST_SOURCE_SYMBOL_EVIDENCE",
+                                    "business_function_id": function_id,
+                                    "test_case_id": item["test_case_id"],
+                                })
+                                symbol_status = "TEST_SOURCE_SYMBOL_INVALID"
+                        raw_snapshot = item.get("test_source_snapshot_binding_evidence")
+                        snapshot_status = item.get(
+                            "test_source_snapshot_binding_status", "TEST_SOURCE_SNAPSHOT_NOT_CHECKED"
+                        )
+                        allowed_snapshot_statuses = {
+                            "TEST_SOURCE_SNAPSHOT_NOT_CHECKED",
+                            "TEST_SOURCE_SNAPSHOT_LOCATOR_NOT_PROVIDED",
+                            "TEST_SOURCE_SNAPSHOT_LOCATOR_INVALID",
+                            "TEST_SOURCE_NOT_IN_EXECUTION_SNAPSHOT",
+                            "TEST_SOURCE_SNAPSHOT_HASH_MISMATCH",
+                            "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED",
+                        }
+                        if snapshot_status not in allowed_snapshot_statuses:
+                            conflicts.append({
+                                "kind": "INVALID_TEST_SOURCE_SNAPSHOT_BINDING_STATUS",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            snapshot_status = "TEST_SOURCE_SNAPSHOT_LOCATOR_INVALID"
+                        if raw_snapshot is not None and (
+                            not isinstance(raw_snapshot, dict)
+                            or raw_snapshot.get("status") != snapshot_status
+                        ):
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_SNAPSHOT_BINDING_EVIDENCE_STATUS_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            snapshot_status = "TEST_SOURCE_SNAPSHOT_LOCATOR_INVALID"
+                        if snapshot_status == "TEST_SOURCE_SNAPSHOT_HASH_MISMATCH":
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_SNAPSHOT_BINDING_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+
+                        raw_report_locator = item.get("test_source_report_locator_evidence")
+                        report_locator_status = item.get(
+                            "test_source_report_locator_status", "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED"
+                        )
+                        allowed_report_locator_statuses = {
+                            "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED",
+                            "RUNNER_SOURCE_LOCATOR_DUPLICATE_PROPERTY",
+                            "RUNNER_SOURCE_LOCATOR_INVALID_PROPERTY",
+                            "RUNNER_SOURCE_LOCATOR_INCOMPLETE",
+                            "RUNNER_SOURCE_LOCATOR_INVALID_PATH",
+                            "RUNNER_SOURCE_LOCATOR_INVALID_LINE",
+                            "RUNNER_SOURCE_LOCATOR_INVALID_VALUE",
+                            "RUNNER_SOURCE_LOCATOR_DECLARED_UNAUTHENTICATED",
+                            "REPORT_SOURCE_LOCATOR_MAPPING_INCOMPLETE",
+                            "REPORT_SOURCE_LOCATOR_MISMATCH",
+                            "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED",
+                        }
+                        if report_locator_status not in allowed_report_locator_statuses:
+                            conflicts.append({
+                                "kind": "INVALID_TEST_SOURCE_REPORT_LOCATOR_STATUS",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            report_locator_status = "RUNNER_SOURCE_LOCATOR_INVALID_PROPERTY"
+                        if raw_report_locator is not None and (
+                            not isinstance(raw_report_locator, dict)
+                            or raw_report_locator.get("status") != report_locator_status
+                        ):
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_REPORT_LOCATOR_EVIDENCE_STATUS_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                            report_locator_status = "RUNNER_SOURCE_LOCATOR_INVALID_PROPERTY"
+                        if report_locator_status == "REPORT_SOURCE_LOCATOR_MISMATCH":
+                            conflicts.append({
+                                "kind": "TEST_SOURCE_REPORT_LOCATOR_MISMATCH",
+                                "business_function_id": function_id,
+                                "test_case_id": item["test_case_id"],
+                            })
+                        test_source_binding_evidence.append({
+                            "test_case_id": item["test_case_id"],
+                            "status": binding_status,
+                            "evidence": raw_binding if isinstance(raw_binding, dict) else None,
+                        })
+                        test_case_evidence.append({
+                            "test_case_id": item["test_case_id"],
+                            "candidate_test_id": candidate_test_id,
+                            "status": item["status"],
+                            "classname": item.get("classname"),
+                            "name": item.get("name"),
+                            "test_source_binding_status": binding_status,
+                            "test_source_symbol_status": symbol_status,
+                            "test_source_symbol_evidence": raw_symbol if isinstance(raw_symbol, dict) else None,
+                            "test_source_snapshot_binding_status": snapshot_status,
+                            "test_source_snapshot_binding_evidence": raw_snapshot if isinstance(raw_snapshot, dict) else None,
+                            "test_source_report_locator_status": report_locator_status,
+                            "test_source_report_locator_evidence": raw_report_locator if isinstance(raw_report_locator, dict) else None,
+                        })
+            expected_count = test.get("expected_mapped_test_case_count")
+            reported_count = test.get("reported_mapped_test_case_count")
+            counts_valid = True
+            for field_name, count in (
+                ("expected_mapped_test_case_count", expected_count),
+                ("reported_mapped_test_case_count", reported_count),
+            ):
+                if count is not None and (
+                    not isinstance(count, int) or isinstance(count, bool) or count < 0
+                ):
+                    conflicts.append({
+                        "kind": "INVALID_TEST_COMPLETENESS_METADATA",
+                        "business_function_id": function_id,
+                        "field": field_name,
+                    })
+                    counts_valid = False
+            claimed_completeness = test.get("mapped_case_completeness")
+            if claimed_completeness not in {None, "COMPLETE", "INCOMPLETE", "NO_EXPECTED_MAPPED_CASES"}:
+                conflicts.append({
+                    "kind": "INVALID_TEST_COMPLETENESS_METADATA",
+                    "business_function_id": function_id,
+                    "field": "mapped_case_completeness",
+                    "status": claimed_completeness,
+                })
+            inferred_incomplete = bool(missing_test_case_ids) or claimed_completeness == "INCOMPLETE"
+            if counts_valid and expected_count is not None and reported_count is not None:
+                if reported_count > expected_count:
+                    conflicts.append({
+                        "kind": "INVALID_TEST_COMPLETENESS_METADATA",
+                        "business_function_id": function_id,
+                        "field": "reported_mapped_test_case_count",
+                    })
+                elif expected_count > reported_count:
+                    inferred_incomplete = True
+            if claimed_completeness == "COMPLETE" and inferred_incomplete:
+                conflicts.append({
+                    "kind": "CONFLICTING_TEST_COMPLETENESS_METADATA",
+                    "business_function_id": function_id,
+                })
+            if ts == "PASSED" and inferred_incomplete:
+                conflicts.append({
+                    "kind": "TEST_PASS_WITH_INCOMPLETE_MAPPED_CASES",
+                    "business_function_id": function_id,
+                    "missing_test_case_ids": missing_test_case_ids,
+                })
+                ts = "UNKNOWN"
+
+            # When the importer supplies testcase-level evidence, independently
+            # derive the function status and cross-check its summary fields.
+            # A hand-edited PASSED summary must never override observed failures
+            # or incomplete testcase coverage.
+            if isinstance(raw_cases, list):
+                case_ids = [item["test_case_id"] for item in test_case_evidence]
+                case_counts = Counter(item["status"] for item in test_case_evidence)
+                if len(case_ids) != len(set(case_ids)):
+                    conflicts.append({
+                        "kind": "DUPLICATE_MAPPED_TEST_CASE_ID",
+                        "business_function_id": function_id,
+                    })
+                observed_summaries = {
+                    "mapped_test_case_count": len(test_case_evidence),
+                    "passed": case_counts["PASSED"],
+                    "failed": case_counts["FAILED"],
+                    "skipped": case_counts["SKIPPED"],
+                }
+                for field_name, observed_value in observed_summaries.items():
+                    supplied_value = test.get(field_name)
+                    if supplied_value is not None and supplied_value != observed_value:
+                        conflicts.append({
+                            "kind": "TEST_CASE_SUMMARY_MISMATCH",
+                            "business_function_id": function_id,
+                            "field": field_name,
+                            "supplied": supplied_value,
+                            "observed": observed_value,
+                        })
+                if expected_count is None or reported_count is None:
+                    derived_status = "UNKNOWN"
+                elif case_counts["FAILED"]:
+                    derived_status = "FAILED"
+                elif expected_count == 0 and reported_count == 0 and not test_case_evidence:
+                    derived_status = "NOT_EXECUTED"
+                elif (expected_count > reported_count or inferred_incomplete
+                      or case_counts["SKIPPED"] or reported_count != len(test_case_evidence)
+                      or reported_count != expected_count):
+                    derived_status = "UNKNOWN"
+                elif case_counts["PASSED"] == len(test_case_evidence):
+                    derived_status = "PASSED"
+                else:
+                    derived_status = "UNKNOWN"
+                if ts != derived_status:
+                    conflicts.append({
+                        "kind": "TEST_EXECUTION_STATUS_MISMATCH",
+                        "business_function_id": function_id,
+                        "reported": ts,
+                        "derived": derived_status,
+                    })
+                    ts = "FAILED" if derived_status == "FAILED" else "UNKNOWN"
+
+            if inferred_incomplete:
+                completeness_status = "INCOMPLETE"
+            elif claimed_completeness in {"COMPLETE", "NO_EXPECTED_MAPPED_CASES"}:
+                completeness_status = claimed_completeness
+            elif raw_missing is not None:
+                completeness_status = "COMPLETE"
+        binding_states = [item["status"] for item in test_source_binding_evidence]
+        if not binding_states:
+            test_source_binding_status = "NOT_PROVIDED"
+        elif all(status == "TEST_SOURCE_BYTES_MATCHED" for status in binding_states):
+            test_source_binding_status = "ALL_SOURCE_BYTES_MATCHED_AT_IMPORT"
+        elif any(status == "TEST_SOURCE_BYTES_MATCHED" for status in binding_states):
+            test_source_binding_status = "PARTIALLY_SOURCE_BYTES_MATCHED_AT_IMPORT"
+        else:
+            test_source_binding_status = "SOURCE_BINDING_NOT_VERIFIED"
+        # A PASSED claim without any verified test-source binding is just a
+        # report assertion: no mapped testcase was ever tied to exact source
+        # bytes, so the function cannot be reported as passed. Downgrade to
+        # UNKNOWN rather than letting an unbound PASSED reach a conclusion.
+        if ts == "PASSED" and test_case_evidence and not any(
+            status == "TEST_SOURCE_BYTES_MATCHED" for status in binding_states
+        ):
+            conflicts.append({
+                "kind": "TEST_PASS_WITHOUT_SOURCE_BINDING",
+                "business_function_id": function_id,
+            })
+            ts = "UNKNOWN"
+        snapshot_states = [item.get("test_source_snapshot_binding_status") for item in test_case_evidence]
+        if not snapshot_states:
+            test_source_snapshot_binding_status = "NOT_PROVIDED"
+        elif "TEST_SOURCE_SNAPSHOT_HASH_MISMATCH" in snapshot_states:
+            test_source_snapshot_binding_status = "EVIDENCE_CONFLICT"
+        elif all(status == "TEST_SOURCE_SNAPSHOT_ENTRY_MATCHED" for status in snapshot_states):
+            test_source_snapshot_binding_status = "ALL_SNAPSHOT_ENTRIES_MATCHED_UNAUTHENTICATED"
+        elif all(status == "TEST_SOURCE_SNAPSHOT_LOCATOR_NOT_PROVIDED" for status in snapshot_states):
+            test_source_snapshot_binding_status = "NOT_PROVIDED"
+        else:
+            test_source_snapshot_binding_status = "SOURCE_SNAPSHOT_NOT_VERIFIED"
+        report_locator_states = [item.get("test_source_report_locator_status") for item in test_case_evidence]
+        if not report_locator_states:
+            test_source_report_locator_status = "NOT_PROVIDED"
+        elif "REPORT_SOURCE_LOCATOR_MISMATCH" in report_locator_states:
+            test_source_report_locator_status = "EVIDENCE_CONFLICT"
+        elif all(status == "REPORT_SOURCE_LOCATOR_MATCHED_UNAUTHENTICATED" for status in report_locator_states):
+            test_source_report_locator_status = "ALL_REPORT_LOCATORS_MATCHED_UNAUTHENTICATED"
+        elif all(status == "RUNNER_SOURCE_LOCATOR_NOT_PROVIDED" for status in report_locator_states):
+            test_source_report_locator_status = "NOT_PROVIDED"
+        else:
+            test_source_report_locator_status = "REPORT_LOCATOR_NOT_VERIFIED"
+        if ts=="FAILED": conclusion="TEST_FAILURE_OBSERVED"
+        elif ts=="PASSED" and cs=="COVERED": conclusion="TEST_PASS_AND_CODE_LINES_COVERED_UNAUTHENTICATED"
+        elif ts=="PASSED" and cs in {"PARTIAL","NOT_COVERED"}: conclusion="TEST_PASS_WITH_COVERAGE_GAP_UNAUTHENTICATED"
+        elif ts=="PASSED": conclusion="TEST_PASS_COVERAGE_NOT_MEASURED_UNAUTHENTICATED"
+        elif ts=="UNKNOWN": conclusion="TEST_EVIDENCE_INCONCLUSIVE"
+        else: conclusion="NO_RUNTIME_TEST_EVIDENCE"
+        matrix.append({
+            "business_function_id":function_id,"endpoint_id":view.get("endpoint_id"),
+            "basis":view.get("basis","UNKNOWN"),
+            "static_verification_status":view.get("verification_status","UNKNOWN"),
+            "test_execution_status":ts,
+            "reported_test_execution_status":reported_test_status,
+            "test_source_binding_status": test_source_binding_status,
+            "test_source_binding_evidence": test_source_binding_evidence,
+            "test_source_snapshot_binding_status": test_source_snapshot_binding_status,
+            "test_source_report_locator_status": test_source_report_locator_status,
+            "test_case_count":test.get("mapped_test_case_count",0) if test else 0,
+            "failed_test_count":test.get("failed",0) if test else 0,
+            "skipped_test_count":test.get("skipped",0) if test else 0,
+            "test_execution_detail": {
+                "source_hashes": dict(test.get("source_hashes", {})) if test else {},
+                "execution_status_reason": test.get("execution_status_reason"),
+                "expected_mapped_test_case_count": test.get("expected_mapped_test_case_count"),
+                "reported_mapped_test_case_count": test.get("reported_mapped_test_case_count"),
+                "mapped_case_completeness": completeness_status,
+                "mapped_cases_missing_from_report": missing_test_case_ids,
+                "mapped_test_cases": test_case_evidence,
+                "test_source_binding_evidence": test_source_binding_evidence,
+                "test_source_binding_status": test_source_binding_status,
+                "test_source_snapshot_binding_status": test_source_snapshot_binding_status,
+                "test_source_report_locator_status": test_source_report_locator_status,
+            } if test else None,
+            "code_coverage_status":cs,
+            "line_coverage_percent": (percent if cov and percent_valid else None),
+            "code_coverage_detail": {
+                "source_hashes": dict(coverage_results.get("source_hashes", {})) if cov else {},
+                "coverage_basis": cov.get("coverage_basis"),
+                "verification_status": (cov.get("verification_status", cs) if coverage_source_verified else "SOURCE_BINDING_NOT_VERIFIED"),
+                "executable_line_count": cov.get("executable_line_count"),
+                "covered_line_count": cov.get("covered_line_count"),
+                "uncovered_line_count": cov.get("uncovered_line_count"),
+                "mapping_ranges": cov.get("mapping_ranges", []),
+                "coverage_source_files_missing": cov.get("coverage_source_files_missing", []),
+            } if cov else None,
+            "verification_conclusion":conclusion,"business_correctness":"NOT_PROVEN",
+            "evidence_conflict":False,
+            # The conclusion word itself carries the marker for pass claims,
+            # and every row also carries an explicit authenticity field: no
+            # conclusion in this report is authenticated until OS-level UID
+            # isolation exists. A VALID provenance HMAC authenticates the
+            # document's producer, not the runner, so it does not change this.
+            "verification_authenticity":"UNAUTHENTICATED",
+            "test_execution_id":test_execution_id,
+            "coverage_execution_id":coverage_execution_id,
+            "execution_binding_status":execution_binding_status,
+            "source_version_binding_status":source_version_binding_status,
+            "runtime_consistency_status":runtime_consistency_status,
+            "runtime_consistency_detail":runtime_consistency_detail,
+            # G5: keep what the reports claim separate from what the
+            # parent process itself observed. The verifier can only see
+            # the pytest exit code from the execution provenance; the
+            # snapshot diff and staging inventory live in the controlled
+            # runner's gate report, not in these inputs -- so an empty
+            # observed_by_parent is written empty, never filled with
+            # claim fields.
+            "claim_vs_observed":{
+                "claimed":{
+                    "test_execution_status":reported_test_status,
+                    "code_coverage_status":reported_coverage_status,
+                    # The row's own sanitized percent, not the raw
+                    # reported value: a non-finite percent (NaN/inf) is
+                    # already preserved as repr() in the
+                    # INVALID_COVERAGE_PERCENT conflict, and copying the
+                    # raw value here would make the emitted matrix
+                    # invalid JSON (json.dumps(allow_nan=False) fails).
+                    "line_coverage_percent": (percent if cov and percent_valid else None),
+                    "execution_binding":execution_binding_status,
+                },
+                "observed_by_parent":{
+                    key: value for key, value in (
+                        ("pytest_exit_code",
+                         test_provenance.get("pytest_exit_code") if isinstance(test_provenance, dict) else None),
+                        ("pytest_exit_status",
+                         test_provenance.get("pytest_exit_status") if isinstance(test_provenance, dict) else None),
+                    ) if value is not None
+                },
+            },
+        })
+    global_hash_conflict=any(x["kind"]=="GRAPH_HASH_MISMATCH" for x in conflicts)
+    conflict_ids={x.get("business_function_id") for x in conflicts if x.get("business_function_id")}
+    for row in matrix:
+        if global_hash_conflict or row["business_function_id"] in conflict_ids:
+            row["evidence_conflict"]=True
+            row["verification_conclusion"]="EVIDENCE_CONFLICT"
+    counts=Counter(x["verification_conclusion"] for x in matrix)
+    return {
+        "schema_version":"usit-business-evidence-verification-v1",
+        "model":"BusinessFunctionEvidenceVerifier",
+        "business_graph_sha256":graph_hash,
+        "business_function_count":len(matrix),
+        "verification_conclusion_counts":dict(sorted(counts.items())),
+        "verification_authenticity":"UNAUTHENTICATED",
+        "evidence_conflict_count":len(conflicts),
+        "evidence_conflicts":conflicts,
+        "business_function_evidence":matrix,
+        "global_limitations":[
+            "PASS 表示导入报告记录测试通过，不证明测试充分、需求完整或业务行为正确。",
+            "本报告所有结论均为 UNAUTHENTICATED：通过类结论词本身带 _UNAUTHENTICATED 后缀，每行与顶层另有 verification_authenticity 字段；HMAC 签名只认证证据文档的产生方，不认证测试执行本身。",
+            "代码行覆盖率不证明断言有效、分支覆盖完整、权限正确或端到端用户流程可用。",
+            "静态业务功能视图仍是 STATIC_INFERENCE；本报告不会把它升级为 VERIFIED_FACT。",
+            "测试结果与覆盖率必须引用同一份业务图；图哈希不一致时标记证据冲突。",
+            "测试与覆盖率必须来自同一次执行（execution_id 一致）；不一致、或一方已绑定而另一方未绑定时，相关功能的组合结论降级为证据冲突；双方均未绑定时标记 NOT_PROVIDED，不直接拒掉旧数据。",
+            "已映射 testcase 的报告完整性会被单独保留；缺失预期 testcase 的 PASSED 工件会被标记为证据冲突。",
+            "测试与覆盖率报告、映射文件和业务图的 SHA-256 来源哈希会保留；覆盖率行范围与缺失源文件会随功能证据输出。",
+            "覆盖率百分比、行计数和映射范围会执行结构校验；无效值产生证据冲突，不得作为可信覆盖结论。",
+            "未提供的测试或覆盖率证据标记 NOT_MEASURED，不推断为失败或零覆盖。",
+            "测试快照 manifest 与覆盖率 source_files 的源码哈希会交叉比对；重叠文件哈希不一致时相关功能降级为证据冲突；无重叠文件或一方未提供哈希时明确标记，不冒充一致。",
+            "运行时事件的显式字段（HTTP method/path、数据库操作/表）会与静态视图比对；不一致时相关功能降级为证据冲突；事件缺字段或静态未识别出对应项时不判，只记 NOT_PROVIDED 或 NOT_CHECKED。",
+            "每行分开列出报告声称（claimed）与父进程观测（observed_by_parent）；父进程观测目前只有测试 provenance 中的退出码，观测为空时写空对象，不用声称字段填满。",
+        ],
+    }

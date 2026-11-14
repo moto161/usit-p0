@@ -91,6 +91,43 @@ class EntityExtractionTests(unittest.TestCase):
         self.assertEqual(result["entity_count"], 0)
 
 
+class DatabaseAccessSemanticsTests(unittest.TestCase):
+    def test_analyze_emits_function_line_database_access_candidates(self):
+        p = SyntheticProject(self)
+        p.route("server/repos/photo_repo.py", (
+            "def load_photos(cursor):\n"
+            '    cursor.execute("SELECT id, owner_id FROM photos WHERE id = 1")\n'
+            "    cursor.execute(sql)\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["database_access_count"], 2)
+        literal, dynamic = result["database_accesses"]
+        self.assertEqual((literal["source"], literal["line"]), ("server/repos/photo_repo.py", 2))
+        self.assertEqual(literal["operation"], "SELECT")
+        self.assertEqual(literal["tables"], ["photos"])
+        self.assertEqual(literal["columns"], ["id", "owner_id"])
+        self.assertEqual(dynamic["parse_status"], "UNKNOWN")
+        self.assertEqual(dynamic["tables"], [])
+
+
+class AuthorizationSemanticsTests(unittest.TestCase):
+    def test_analyze_emits_authorization_check_candidates(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.js", (
+            "const { authRequired, adminRequired } = require('../middleware/auth');\n"
+            "router.use(authRequired);\n"
+            "router.get('/photos', adminRequired, listPhotos);\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertGreaterEqual(result["authorization_check_count"], 2)
+        self.assertTrue(any(
+            row["kind"] == "route_middleware" and "authRequired" in row["guard_names"]
+            for row in result["authorization_checks"]
+        ))
+        endpoint = next(row for row in result["endpoints"] if row["path"] == "/photos")
+        self.assertEqual(endpoint["authorization_status"], "DETECTED")
+
+
 class EndpointAuthTests(unittest.TestCase):
     def test_module_level_router_use_applies_admin_auth(self):
         p = SyntheticProject(self)
@@ -114,6 +151,19 @@ class EndpointAuthTests(unittest.TestCase):
         ep = next(e for e in result["endpoints"] if e["path"] == "/")
         self.assertEqual(ep["code_auth"], "auth")
 
+    def test_extracts_named_and_member_route_handlers_but_not_inline_callbacks(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.js", (
+            "router.post('/photos', authRequired, uploadPhoto);\n"
+            "router.put('/photos/:id', photosController.updatePhoto);\n"
+            "router.patch('/photos/:id', async (req, res) => {});\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        by_method = {item["method"]: item for item in result["endpoints"]}
+        self.assertEqual(by_method["POST"]["handler_reference"], "uploadPhoto")
+        self.assertEqual(by_method["PUT"]["handler_reference"], "photosController.updatePhoto")
+        self.assertEqual(by_method["PATCH"]["handler_reference"], "")
+
     def test_public_login_is_not_flagged(self):
         p = SyntheticProject(self)
         p.route("server/routes/auth.js", (
@@ -122,6 +172,35 @@ class EndpointAuthTests(unittest.TestCase):
         result = BusinessSemanticsAdapter(p.root).analyze()
         # login is public-by-design, so no missing_auth discrepancy.
         self.assertFalse(any(d["kind"] == "missing_auth" for d in result["discrepancies"]))
+
+
+class EndpointContractAlignmentTests(unittest.TestCase):
+    def test_exact_documented_route_match_and_unmatched_contracts_are_explicit(self):
+        p = SyntheticProject(self)
+        p.api_doc(
+            "# API contracts\n"
+            "GET /api/photos\n"
+            "POST /api/photos\n"
+            "GET /api/missing\n"
+        )
+        p.route("server/routes/photos.js", (
+            "router.get('/api/photos', authRequired, listPhotos);\n"
+            "router.delete('/api/internal', authRequired, deleteInternal);\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        rows = result["endpoint_contract_alignment"]
+        exact = next(row for row in rows
+                     if row["method"] == "GET" and row["path"] == "/api/photos")
+        missing = next(row for row in rows
+                       if row["method"] == "POST" and row["path"] == "/api/photos")
+        undocumented = next(row for row in rows
+                            if row["method"] == "DELETE" and row["path"] == "/api/internal")
+        self.assertEqual(exact["status"], "EXACT_MATCH")
+        self.assertEqual(exact["document_evidence"]["line"], 2)
+        self.assertEqual(exact["code_evidence"][0]["line"], 1)
+        self.assertEqual(missing["status"], "DOCUMENTED_NOT_FOUND_IN_CODE")
+        self.assertEqual(undocumented["status"], "CODE_ENDPOINT_NOT_DOCUMENTED")
+        self.assertTrue(all(row["verification_status"] == "NOT_VERIFIED" for row in rows))
 
 
 class PermissionFieldDetectionTests(unittest.TestCase):
@@ -255,6 +334,161 @@ class FieldGapLocatorTests(unittest.TestCase):
         ))
         result = BusinessSemanticsAdapter(p.root).analyze()
         self.assertEqual(result["field_gap_count"], 0)
+
+
+class PythonDecoratorRouteTests(unittest.TestCase):
+    def test_flask_route_with_single_method(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@bp.route('/photos', methods=['GET'])\n"
+            "def list_photos():\n"
+            "    return []\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 1)
+        ep = result["endpoints"][0]
+        self.assertEqual((ep["method"], ep["path"]), ("GET", "/photos"))
+        self.assertEqual(ep["handler_reference"], "list_photos")
+        self.assertEqual(ep["line"], 4)
+
+    def test_flask_route_with_multiple_methods_yields_one_endpoint_each(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@bp.route('/photos', methods=['GET', 'POST'])\n"
+            "def upload_photo():\n"
+            "    return {}\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 2)
+        by_method = {item["method"]: item for item in result["endpoints"]}
+        self.assertEqual(set(by_method), {"GET", "POST"})
+        self.assertEqual(by_method["GET"]["handler_reference"], "upload_photo")
+        self.assertEqual(by_method["POST"]["handler_reference"], "upload_photo")
+        self.assertEqual(by_method["POST"]["line"], 4)
+
+    def test_flask_route_without_methods_defaults_to_get(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@app.route('/photos')\n"
+            "def list_photos():\n"
+            "    return []\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 1)
+        self.assertEqual(result["endpoints"][0]["method"], "GET")
+        self.assertEqual(result["endpoints"][0]["handler_reference"], "list_photos")
+
+    def test_fastapi_verb_decorators_and_async_def(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from fastapi import APIRouter\n"
+            "router = APIRouter()\n"
+            "\n"
+            "@router.get('/photos')\n"
+            "async def list_photos():\n"
+            "    return []\n"
+            "\n"
+            "@router.post('/photos')\n"
+            "def upload_photo():\n"
+            "    return {}\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        by_method = {item["method"]: item for item in result["endpoints"]}
+        self.assertEqual(set(by_method), {"GET", "POST"})
+        self.assertEqual(by_method["GET"]["handler_reference"], "list_photos")
+        self.assertEqual(by_method["GET"]["line"], 4)
+        self.assertEqual(by_method["POST"]["handler_reference"], "upload_photo")
+        self.assertEqual(by_method["POST"]["line"], 8)
+
+    def test_guard_decorator_between_route_and_def(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "from flask import Blueprint\n"
+            "bp = Blueprint('photos', __name__)\n"
+            "\n"
+            "@bp.route('/secret')\n"
+            "@login_required\n"
+            "def secret():\n"
+            "    return {}\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 1)
+        ep = result["endpoints"][0]
+        self.assertEqual(ep["handler_reference"], "secret")
+        self.assertEqual(ep["code_auth"], "auth")
+
+    def test_decorator_without_following_def_yields_endpoint_without_handler(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "@bp.route('/orphan')\n"
+            "x = 1\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(len(result["endpoints"]), 1)
+        ep = result["endpoints"][0]
+        self.assertEqual((ep["method"], ep["path"]), ("GET", "/orphan"))
+        self.assertEqual(ep["handler_reference"], "")
+
+    def test_fstring_path_yields_no_endpoint(self):
+        p = SyntheticProject(self)
+        p.route("server/routes/photos.py", (
+            "@bp.route(f'/photos/{photo_id}')\n"
+            "def get_photo(photo_id):\n"
+            "    return {}\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["endpoints"], [])
+
+    def test_non_route_python_file_yields_no_endpoints(self):
+        p = SyntheticProject(self)
+        p.route("server/repos/photo_repo.py", (
+            "def helper():\n"
+            "    return 1\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        self.assertEqual(result["endpoints"], [])
+
+
+class IdentityFunctionScopeSemanticsTests(unittest.TestCase):
+    def test_typescript_comparison_record_resolves_function_owner_end_to_end(self):
+        # P3: analyze() runs the TS parser over the already-read sources and
+        # hands the function line ranges to identity extraction, so the
+        # comparison on line 5 resolves to the enclosing loadPhotos.
+        p = SyntheticProject(self)
+        p.route("web/photos.ts", (
+            "import { db } from './db';\n"
+            "\n"
+            "export async function loadPhotos(req: any) {\n"
+            "  const photo = await db.getPhoto(req.params.id);\n"
+            "  if (photo.owner_id === req.user.id) {\n"
+            "    const rows = await db.query(\"SELECT id FROM photos WHERE owner_id = ?\", [req.user.id]);\n"
+            "    return rows;\n"
+            "  }\n"
+            "  return [];\n"
+            "}\n"
+        ))
+        p.route("web/db.ts", (
+            "export const db = {\n"
+            "  async getPhoto(id: string) { return { owner_id: 1 }; },\n"
+            "  async query(sql: string, params: any[]) { return []; },\n"
+            "};\n"
+        ))
+        result = BusinessSemanticsAdapter(p.root).analyze()
+        comparison = next(row for row in result["identity_evidence"]
+                          if row["kind"] == "resource_owner_comparison")
+        self.assertEqual(comparison["line"], 5)
+        self.assertEqual(comparison["owner_symbol_id"],
+                         "symbol:web/photos.ts#loadPhotos:3")
+        self.assertEqual(comparison["owner_resolution_status"], "RESOLVED")
 
 
 if __name__ == "__main__":
