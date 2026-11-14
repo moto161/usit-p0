@@ -25,6 +25,12 @@ project's own model classes: a model whose class body directly assigns
 arguments are all such bare model names yields one SELECT record with
 ``parse_status`` ``ORM_MODEL``. A model without a resolvable table, an
 ambiguous class name, or a non-model argument leaves the call UNKNOWN.
+Django-style ``Model.objects.filter/get/exclude/all/create`` calls are
+typed the same way from the project's own model classes: a model whose
+nested ``Meta`` class directly assigns ``db_table = '<table>'`` maps to
+that table. Chained ``.update(...)`` / ``.delete()`` calls whose chain
+bottoms out at such a ``Model.objects.<read method>`` call yield one
+UPDATE / DELETE record instead of the base SELECT record.
 """
 from __future__ import annotations
 
@@ -513,14 +519,93 @@ def orm_model_tables(code_by_file: dict[str, str]) -> dict[str, str]:
             if len(tables) == 1}
 
 
-def _extract_python(source: str, orm_tables: dict[str, str] | None = None) -> list[tuple[int, str, str | None, str, bool, list[str] | None]]:
-    """Extract (line, callee, sql, parser, has_dynamic, orm_models) from one Python file.
+def django_model_tables(code_by_file: dict[str, str]) -> dict[str, str]:
+    """Map Django model class names to tables from ``Meta.db_table``.
+
+    Pure AST scan of the project's own ``.py`` files: a class whose body
+    directly contains a nested ``Meta`` class that assigns
+    ``db_table = '<table>'`` (plain ``Assign`` or annotated ``AnnAssign``
+    with a string constant) maps its class name to that table. A table
+    name must be a plain identifier; anything else is ignored. A class
+    name mapping to more than one distinct table is ambiguous and dropped
+    entirely. No inheritance is followed and no default table name
+    (``<app>_<model>``) is guessed.
+    """
+    candidates: dict[str, set[str]] = {}
+    for path, source in sorted(code_by_file.items()):
+        if not path.lower().endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for stmt in node.body:
+                if not isinstance(stmt, ast.ClassDef) or stmt.name != "Meta":
+                    continue
+                for meta_stmt in stmt.body:
+                    target: ast.expr | None = None
+                    value: ast.expr | None = None
+                    if isinstance(meta_stmt, ast.Assign):
+                        if len(meta_stmt.targets) != 1 or not isinstance(meta_stmt.targets[0], ast.Name):
+                            continue
+                        target, value = meta_stmt.targets[0], meta_stmt.value
+                    elif isinstance(meta_stmt, ast.AnnAssign):
+                        if not isinstance(meta_stmt.target, ast.Name) or meta_stmt.value is None:
+                            continue
+                        target, value = meta_stmt.target, meta_stmt.value
+                    else:
+                        continue
+                    if target.id != "db_table":
+                        continue
+                    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                        continue
+                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", value.value):
+                        continue
+                    candidates.setdefault(node.name, set()).add(value.value)
+    return {name: next(iter(tables)) for name, tables in candidates.items()
+            if len(tables) == 1}
+
+
+_DJANGO_READ_METHODS = {"filter", "exclude", "get", "all"}
+_DJANGO_WRITE_METHODS = {"create"}
+_DJANGO_TERMINAL_METHODS = {"update": "UPDATE", "delete": "DELETE"}
+_DJANGO_OPERATION = {"filter": "SELECT", "exclude": "SELECT", "get": "SELECT",
+                     "all": "SELECT", "create": "INSERT",
+                     "update": "UPDATE", "delete": "DELETE"}
+
+
+def _django_objects_base(node: ast.Call) -> tuple[str, str] | None:
+    """Return (model, method) for a ``Model.objects.<method>(...)`` call.
+
+    ``Model`` must be a bare name and ``objects`` a literal attribute.
+    Anything else (a custom manager, a chained receiver, a non-name
+    model) returns None.
+    """
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    receiver = func.value
+    if not isinstance(receiver, ast.Attribute) or receiver.attr != "objects":
+        return None
+    if not isinstance(receiver.value, ast.Name):
+        return None
+    return receiver.value.id, func.attr
+
+
+def _extract_python(source: str, orm_tables: dict[str, str] | None = None, django_tables: dict[str, str] | None = None) -> list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]]:
+    """Extract (line, callee, sql, parser, has_dynamic, orm_models, orm_kind) from one Python file.
 
     ``orm_models`` is the list of model class names when the call is a
     ``.query(Model, ...)`` whose arguments are all bare names resolved by
-    ``orm_tables``; otherwise None.
+    ``orm_tables`` (``orm_kind`` ``"sqlalchemy"``), or a Django
+    ``Model.objects.<method>`` call whose model is resolved by
+    ``django_tables`` (``orm_kind`` ``"django"``); otherwise None.
     """
-    found: list[tuple[int, str, str | None, str, bool, list[str] | None]] = []
+    found: list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]] = []
+    consumed: set[int] = set()
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -529,14 +614,19 @@ def _extract_python(source: str, orm_tables: dict[str, str] | None = None) -> li
         class Visitor(ast.NodeVisitor):
             def visit_Call(self, node: ast.Call) -> None:
                 func = node.func
+                if id(node) in consumed:
+                    self.generic_visit(node)
+                    return
                 if isinstance(func, ast.Attribute) and func.attr in _DB_METHODS:
                     receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
                     orm_models: list[str] | None = None
+                    orm_kind: str | None = None
                     if (func.attr == "query" and orm_tables and node.args
                             and all(isinstance(arg, ast.Name) for arg in node.args)):
                         names = [arg.id for arg in node.args]
                         if all(name in orm_tables for name in names):
                             orm_models = names
+                            orm_kind = "sqlalchemy"
                     resolved = _resolve_python_sql(node.args[0]) if node.args else None
                     if resolved is None:
                         sql, dynamic = None, False
@@ -544,7 +634,36 @@ def _extract_python(source: str, orm_tables: dict[str, str] | None = None) -> li
                         sql, dynamic = resolved
                     parser = ("python-ast-literal-expression-dynamic" if dynamic
                               else "python-ast-literal-expression")
-                    found.append((node.lineno, receiver + "." + func.attr, sql, parser, dynamic, orm_models))
+                    found.append((node.lineno, receiver + "." + func.attr, sql, parser, dynamic, orm_models, orm_kind))
+                elif isinstance(func, ast.Attribute) and func.attr in _DJANGO_TERMINAL_METHODS and isinstance(func.value, ast.Call):
+                    # Chained .update()/.delete(): walk down to the base
+                    # Model.objects.<read method> call and report the
+                    # terminal operation once, consuming the base call.
+                    base = func.value
+                    while isinstance(base.func, ast.Attribute) and isinstance(base.func.value, ast.Call):
+                        base = base.func.value
+                    base_info = _django_objects_base(base)
+                    if base_info is not None and base_info[1] in _DJANGO_READ_METHODS:
+                        consumed.add(id(base))
+                        model = base_info[0]
+                        receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
+                        if django_tables and model in django_tables:
+                            found.append((node.lineno, receiver + "." + func.attr, None,
+                                          "python-ast-literal-expression", False, [model], "django"))
+                        else:
+                            found.append((node.lineno, receiver + "." + func.attr, None,
+                                          "python-ast-literal-expression", False, None, None))
+                elif isinstance(func, ast.Attribute):
+                    base_info = _django_objects_base(node)
+                    if base_info is not None and base_info[1] in _DJANGO_READ_METHODS | _DJANGO_WRITE_METHODS:
+                        model = base_info[0]
+                        receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
+                        if django_tables and model in django_tables:
+                            found.append((node.lineno, receiver + "." + func.attr, None,
+                                          "python-ast-literal-expression", False, [model], "django"))
+                        else:
+                            found.append((node.lineno, receiver + "." + func.attr, None,
+                                          "python-ast-literal-expression", False, None, None))
                 self.generic_visit(node)
         Visitor().visit(tree)
         return found
@@ -564,7 +683,7 @@ def _extract_python(source: str, orm_tables: dict[str, str] | None = None) -> li
                 if isinstance(func, ast.Attribute) and func.attr in _DB_METHODS:
                     receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
                     sql = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str) else None
-                    found.append((line_no, receiver + "." + func.attr, sql, "python-ast-single-line", False, None))
+                    found.append((line_no, receiver + "." + func.attr, sql, "python-ast-single-line", False, None, None))
                 self.generic_visit(node)
         LineVisitor().visit(line_tree)
     return found
@@ -737,25 +856,25 @@ def _parse_js_string_expr(text: str, pos: int) -> tuple[str, bool, int] | None:
         return "".join(parts), dynamic, pos
 
 
-def _extract_js(source: str) -> list[tuple[int, str, str | None, str, bool, list[str] | None]]:
-    """Extract (line, callee, sql, parser, has_dynamic, orm_models) from one JS/TS file.
+def _extract_js(source: str) -> list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]]:
+    """Extract (line, callee, sql, parser, has_dynamic, orm_models, orm_kind) from one JS/TS file.
 
-    JS/TS has no ORM model mapping in this increment, so ``orm_models`` is
-    always None here.
+    JS/TS has no ORM model mapping in this increment, so ``orm_models``
+    and ``orm_kind`` are always None here.
     """
-    found: list[tuple[int, str, str | None, str, bool, list[str] | None]] = []
+    found: list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]] = []
     for match in _JS_CALL.finditer(source):
         receiver, method = match.group(1), match.group(2)
         line_no = source.count("\n", 0, match.start()) + 1
         parsed = _parse_js_string_expr(source, match.end())
         if parsed is None:
             found.append((line_no, receiver + "." + method, None,
-                          "js-ts-literal-expression", False, None))
+                          "js-ts-literal-expression", False, None, None))
         else:
             sql, dynamic, _end = parsed
             parser = ("js-ts-literal-expression-dynamic" if dynamic
                       else "js-ts-literal-expression")
-            found.append((line_no, receiver + "." + method, sql, parser, dynamic, None))
+            found.append((line_no, receiver + "." + method, sql, parser, dynamic, None, None))
     return found
 
 
@@ -769,22 +888,30 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
     text, so the fail-closed shape is unchanged. A SQLAlchemy
     ``.query(Model, ...)`` call whose arguments are all bare model names
     resolved by the project's own ``__tablename__`` map yields one SELECT
-    record with ``parse_status`` ``ORM_MODEL`` instead.
+    record with ``parse_status`` ``ORM_MODEL`` instead. A Django
+    ``Model.objects.filter/get/exclude/all`` call resolved by the project's
+    own ``Meta.db_table`` map yields one SELECT record the same way,
+    ``.create`` yields INSERT, and a chained ``.update`` / ``.delete``
+    yields UPDATE / DELETE; an unresolvable model leaves the call UNKNOWN.
     """
     records: list[dict[str, Any]] = []
     orm_tables = orm_model_tables(code_by_file)
+    django_tables = django_model_tables(code_by_file)
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
-            found = _extract_python(source, orm_tables)
+            found = _extract_python(source, orm_tables, django_tables)
         else:
             found = _extract_js(source)
-        for line_no, callee, sql, parser, dynamic, orm_models in found:
+        for line_no, callee, sql, parser, dynamic, orm_models, orm_kind in found:
             if orm_models is not None:
+                tables_map = django_tables if orm_kind == "django" else orm_tables
+                method = callee.rsplit(".", 1)[-1]
+                operation = _DJANGO_OPERATION.get(method, "SELECT") if orm_kind == "django" else "SELECT"
                 records.append({
                     "source": path, "line": line_no, "callee": callee,
-                    "access_method": callee.rsplit(".", 1)[-1],
-                    "operation": "SELECT",
-                    "tables": sorted({orm_tables[name] for name in orm_models}),
+                    "access_method": method,
+                    "operation": operation,
+                    "tables": sorted({tables_map[name] for name in orm_models}),
                     "columns": [], "parse_status": "ORM_MODEL",
                     "orm_model": sorted(orm_models),
                     "parser": parser, "has_dynamic_parts": dynamic,

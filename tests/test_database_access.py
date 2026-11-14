@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from usit.database_access import extract_database_accesses
+from usit.database_access import django_model_tables, extract_database_accesses
 
 
 class DatabaseAccessExtractionTests(unittest.TestCase):
@@ -856,6 +856,136 @@ class OrmModelTableTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
         self.assertEqual(rows[0]["tables"], [])
+
+
+class DjangoModelTableTests(unittest.TestCase):
+    def test_meta_db_table_maps_model_to_table(self):
+        tables = django_model_tables({
+            "server/models.py": "class Photo:\n    class Meta:\n        db_table = 'photos'\n",
+        })
+        self.assertEqual(tables, {"Photo": "photos"})
+
+    def test_meta_db_table_annotated_assignment_maps(self):
+        tables = django_model_tables({
+            "server/models.py": "class Photo:\n    class Meta:\n        db_table: str = 'photos'\n",
+        })
+        self.assertEqual(tables, {"Photo": "photos"})
+
+    def test_meta_db_table_with_space_does_not_map(self):
+        tables = django_model_tables({
+            "server/models.py": "class Photo:\n    class Meta:\n        db_table = 'my schema'\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_same_model_name_mapping_to_two_tables_is_dropped(self):
+        tables = django_model_tables({
+            "server/models.py": "class Photo:\n    class Meta:\n        db_table = 'photos'\n",
+            "server/other.py": "class Photo:\n    class Meta:\n        db_table = 'images'\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_model_without_meta_or_db_table_does_not_map(self):
+        tables = django_model_tables({
+            "server/models.py": (
+                "class Photo:\n    pass\n"
+                "class Album:\n    class Meta:\n        verbose_name = 'album'\n"
+            ),
+        })
+        self.assertEqual(tables, {})
+
+
+class DjangoObjectsTests(unittest.TestCase):
+    _MODELS = (
+        "class Photo:\n    class Meta:\n        db_table = 'photos'\n"
+        "class Album:\n    pass\n"
+    )
+
+    def _rows(self, view_source):
+        return extract_database_accesses({
+            "server/models.py": self._MODELS,
+            "server/views.py": view_source,
+        })
+
+    def test_filter_resolves_select(self):
+        rows = self._rows("def load():\n    return Photo.objects.filter(owner_id=1)\n")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["source"], "server/views.py")
+        self.assertEqual(row["line"], 2)
+        self.assertEqual(row["callee"], "Photo.objects.filter")
+        self.assertEqual(row["operation"], "SELECT")
+        self.assertEqual(row["tables"], ["photos"])
+        self.assertEqual(row["columns"], [])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
+        self.assertEqual(row["confidence"], "STATIC_INFERENCE")
+        self.assertEqual(row["verification_status"], "NOT_VERIFIED")
+
+    def test_get_resolves_select(self):
+        rows = self._rows("def load():\n    return Photo.objects.get(id=1)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_exclude_resolves_select(self):
+        rows = self._rows("def load():\n    return Photo.objects.exclude(owner_id=1)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_all_resolves_select(self):
+        rows = self._rows("def load():\n    return Photo.objects.all()\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_create_resolves_insert(self):
+        rows = self._rows("def load():\n    return Photo.objects.create(owner_id=1)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+        self.assertEqual(rows[0]["orm_model"], ["Photo"])
+
+    def test_unmapped_model_filter_is_unknown(self):
+        rows = self._rows("def load():\n    return Album.objects.filter(id=1)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["callee"], "Album.objects.filter")
+        self.assertNotIn("orm_model", rows[0])
+
+    def test_chained_update_yields_one_update_record(self):
+        rows = self._rows("def load():\n    return Photo.objects.filter(owner_id=1).update(name=\"x\")\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UPDATE")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+        self.assertEqual(rows[0]["orm_model"], ["Photo"])
+
+    def test_chained_delete_yields_one_delete_record(self):
+        rows = self._rows("def load():\n    return Photo.objects.filter(owner_id=1).delete()\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "DELETE")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_multi_segment_chain_update_yields_one_update_record(self):
+        rows = self._rows("def load():\n    return Photo.objects.filter(a=1).exclude(b=2).update(name=\"x\")\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UPDATE")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_chained_first_keeps_base_select_record(self):
+        rows = self._rows("def load():\n    return Photo.objects.filter(a=1).first()\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_get_or_create_is_not_recognized(self):
+        rows = self._rows("def load():\n    return Photo.objects.get_or_create(owner_id=1)\n")
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":
