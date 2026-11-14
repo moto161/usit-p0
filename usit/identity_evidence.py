@@ -6,8 +6,9 @@ most 10 physical lines) for the sink check; the record lands on the
 call's first line. Local-variable propagation is straight-line within one
 scope, plus one single hop through a top-level helper whose every return
 is the same identity expression (``INTERPROCEDURAL_SINGLE_HOP_RETURN``);
-the helper may live in the same file or be brought in by a ``from`` import
-(``python_resolver`` module math). This is not a general taint engine and
+the helper may live in the same file, be brought in by a ``from`` import,
+or be reached through a module binding (``import X`` / ``from P import M``)
+as an attribute call. This is not a general taint engine and
 never proves runtime identity or authorization.
 """
 from __future__ import annotations
@@ -422,6 +423,101 @@ def _python_imported_identity_helpers(
     return imported
 
 
+def _python_module_level_shadowed_names(tree: ast.Module) -> set[str]:
+    """Module-level names that shadow an import: top-level defs/classes
+    and simple module-level assignment targets."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def _python_module_bindings(path: str, source: str,
+                            module_index: dict[str, str]) -> dict[str, str]:
+    """Map local names to dotted modules for one file's top-level imports.
+
+    ``import a.b.c`` binds the top-level name ``a`` to module ``a``;
+    ``import a.b.c as x`` binds ``x`` to ``a.b.c``; ``from P import M``
+    binds ``M`` (or its alias) to ``P.M`` only when ``P.M`` is a scanned
+    module (otherwise ``M`` is a function import, which is P5 territory).
+    Relative imports resolve against the caller's package; ``from . import
+    M`` binds ``M`` to the current package plus ``.M``. Star imports bind
+    nothing. A local name shadowed by a module-level definition or
+    assignment is dropped.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    caller_package = _package_for_module(_module_for_path(path), path)
+    shadowed = _python_module_level_shadowed_names(tree)
+    bindings: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    local, module = alias.asname, alias.name
+                else:
+                    local = module = alias.name.split(".")[0]
+                if local not in shadowed:
+                    bindings.setdefault(local, module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is None:
+                base = _relative_module(caller_package, node.level, None)
+            elif node.level and node.level > 0:
+                base = _relative_module(caller_package, node.level, node.module)
+            else:
+                base = node.module
+            if base is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                candidate = f"{base}.{alias.name}" if base else alias.name
+                if candidate not in module_index:
+                    continue
+                local = alias.asname or alias.name
+                if local not in shadowed:
+                    bindings.setdefault(local, candidate)
+    return bindings
+
+
+def _resolve_module_attribute_helper(
+    chain: str, bindings: dict[str, str], module_index: dict[str, str],
+    helper_maps: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Resolve ``a.b.c(...)`` to an identity-return helper, or None.
+
+    ``a`` must be a module binding; the candidate module is the bound
+    module plus the middle chain segments, and the last segment is the
+    helper name. The candidate module must be in the scan and the target
+    file must directly define a qualifying helper under that name.
+    """
+    parts = chain.split(".")
+    if len(parts) < 2:
+        return None
+    base = bindings.get(parts[0])
+    if base is None:
+        return None
+    module = base + ("." + ".".join(parts[1:-1]) if len(parts) > 2 else "")
+    target_path = module_index.get(module)
+    if target_path is None:
+        return None
+    helper = helper_maps.get(target_path, {}).get(parts[-1])
+    if helper is None:
+        return None
+    return {**helper, "path": target_path, "function": f"{module}.{parts[-1]}"}
+
+
 def extract_identity_evidence(code_by_file: dict[str, str],
                               function_owners_by_file: dict[str, dict[int, str]] | None = None) -> list[dict[str, Any]]:
     """Extract identity evidence plus bounded, same-scope local-variable propagation.
@@ -442,9 +538,15 @@ def extract_identity_evidence(code_by_file: dict[str, str],
     )
     identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
     bare_call = re.compile(r"([A-Za-z_$][\w$]*)\s*\(.*\)$")
+    attr_call = re.compile(r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*\(.*\)$")
     module_index = _python_module_index(code_by_file)
     same_file_helpers = {
         file_path: _python_identity_return_helpers(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
+    module_bindings = {
+        file_path: _python_module_bindings(file_path, file_source, module_index)
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
@@ -456,13 +558,16 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             return_helpers = dict(imported_helpers)
             for name, helper in same_file_helpers.get(path, {}).items():
                 return_helpers[name] = {**helper, "path": path, "function": name}
+            bindings = module_bindings.get(path, {})
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
             return_helpers = {}
+            bindings = {}
         else:
             function_owners = {}
             return_helpers = {}
+            bindings = {}
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -648,13 +753,21 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      "propagation": aliases[rhs]["propagation"] + [
                                          {"path": path, "line": line_no, "variable": name}
                                      ]}
-                elif return_helpers:
-                    # P4: one hop through a same-file helper that returns a
-                    # single identity expression, e.g. uid = get_uid(req).
-                    # Only a bare call counts: no method call, no await, no
-                    # attribute access after the call.
+                elif return_helpers or bindings:
+                    # P4/P5: one hop through a same-file or from-imported
+                    # helper, e.g. uid = get_uid(req). Only a bare call
+                    # counts: no method call, no await, no attribute access
+                    # after the call.
                     call_match = bare_call.fullmatch(rhs)
                     helper = return_helpers.get(call_match.group(1)) if call_match else None
+                    if helper is None:
+                        # P6: one hop through a module binding, e.g.
+                        # uid = server.utils.get_uid(req).
+                        attr_match = attr_call.fullmatch(rhs)
+                        if attr_match:
+                            helper = _resolve_module_attribute_helper(
+                                attr_match.group(1), bindings, module_index,
+                                same_file_helpers)
                     if helper is not None:
                         aliases[name] = {
                             "kind": helper["kind"], "expression": helper["expression"],
