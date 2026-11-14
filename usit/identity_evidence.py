@@ -3,8 +3,11 @@
 Only same-line, syntactically explicit patterns are emitted, except that
 a database call spanning several lines is joined on balanced parens (at
 most 10 physical lines) for the sink check; the record lands on the
-call's first line. This is not a general taint engine and never proves
-runtime identity or authorization.
+call's first line. Local-variable propagation is straight-line within one
+scope, plus one single hop through a same-file top-level helper whose
+every return is the same identity expression
+(``INTERPROCEDURAL_SINGLE_HOP_RETURN``). This is not a general taint
+engine and never proves runtime identity or authorization.
 """
 from __future__ import annotations
 
@@ -271,6 +274,73 @@ def _python_function_owners(path: str, source: str) -> dict[int, str]:
     return owners
 
 
+def _python_identity_return_helpers(path: str, source: str) -> dict[str, dict[str, Any]]:
+    """Map top-level Python helper names to their single identity return.
+
+    A helper qualifies only when every ``return`` in its body (not counting
+    returns inside nested functions or classes) carries a value whose
+    ``ast.unparse`` text fully matches one identity pattern, and all those
+    values are the same kind and the same expression text. A helper with no
+    return, a bare ``return``, a non-identity return, mixed kinds, or
+    differing expressions does not qualify. A name defined twice with
+    different return profiles is ambiguous and dropped. Non-Python files
+    and syntax-invalid Python deliberately produce no helpers.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        returns: list[ast.Return] = []
+        stack = list(node.body)
+        while stack:
+            item = stack.pop()
+            if isinstance(item, ast.Return):
+                returns.append(item)
+            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            else:
+                stack.extend(ast.iter_child_nodes(item))
+        if not returns:
+            continue
+        profile: dict[str, Any] | None = None
+        for ret in returns:
+            if ret.value is None:
+                profile = None
+                break
+            text = ast.unparse(ret.value)
+            if _TRUSTED.fullmatch(text):
+                kind = "trusted"
+            elif _REQUEST.fullmatch(text):
+                kind = "request"
+            else:
+                profile = None
+                break
+            if profile is None:
+                profile = {"kind": kind, "expression": text,
+                           "return_lines": [ret.lineno], "function_line": node.lineno}
+            elif profile["kind"] != kind or profile["expression"] != text:
+                profile = None
+                break
+            else:
+                profile["return_lines"].append(ret.lineno)
+        if profile is not None:
+            candidates.setdefault(node.name, []).append(profile)
+    helpers: dict[str, dict[str, Any]] = {}
+    for name, profiles in candidates.items():
+        first = profiles[0]
+        if all(p["kind"] == first["kind"] and p["expression"] == first["expression"]
+               for p in profiles):
+            helpers[name] = {**first, "return_lines": sorted(
+                {line for p in profiles for line in p["return_lines"]})}
+    return helpers
+
+
 def extract_identity_evidence(code_by_file: dict[str, str],
                               function_owners_by_file: dict[str, dict[int, str]] | None = None) -> list[dict[str, Any]]:
     """Extract identity evidence plus bounded, same-scope local-variable propagation.
@@ -290,14 +360,18 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         r"^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(.*?)\s*;?\s*$"
     )
     identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
+    bare_call = re.compile(r"([A-Za-z_$][\w$]*)\s*\(.*\)$")
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
             function_owners = _python_function_owners(path, source)
+            return_helpers = _python_identity_return_helpers(path, source)
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
+            return_helpers = {}
         else:
             function_owners = {}
+            return_helpers = {}
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -419,11 +493,14 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                     origin = aliases.get(name)
                     if not origin:
                         continue
+                    binding_status = ("INTERPROCEDURAL_SINGLE_HOP_RETURN"
+                                      if origin.get("via_return")
+                                      else "INTRAPROCEDURAL_LINEAR_ASSIGNMENT")
                     if origin["kind"] == "trusted":
                         kinds.append(("direct_authenticated_identity_to_sql_owner_binding", {
                             "identity_expressions": [origin["expression"]],
                             "resource_fields": owner_fields,
-                            "binding_status": "INTRAPROCEDURAL_LINEAR_ASSIGNMENT",
+                            "binding_status": binding_status,
                             "propagation": origin["propagation"] + [
                                 {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}
                             ],
@@ -433,7 +510,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                         kinds.append(("direct_request_identity_to_sql_owner_binding", {
                             "request_expressions": [origin["expression"]],
                             "resource_fields": owner_fields,
-                            "binding_status": "INTRAPROCEDURAL_LINEAR_ASSIGNMENT",
+                            "binding_status": binding_status,
                             "propagation": origin["propagation"] + [
                                 {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}
                             ],
@@ -447,6 +524,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                     details["source_variable"] = assigned_variable
                 if details.get("binding_status") == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT":
                     scope = "INTRAPROCEDURAL_LINEAR_ASSIGNMENT"
+                elif details.get("binding_status") == "INTERPROCEDURAL_SINGLE_HOP_RETURN":
+                    scope = "INTERPROCEDURAL_SINGLE_HOP_RETURN"
                 elif details.get("multi_line_call"):
                     scope = "MULTI_LINE_CALL"
                 else:
@@ -478,6 +557,26 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      "propagation": aliases[rhs]["propagation"] + [
                                          {"path": path, "line": line_no, "variable": name}
                                      ]}
+                elif return_helpers:
+                    # P4: one hop through a same-file helper that returns a
+                    # single identity expression, e.g. uid = get_uid(req).
+                    # Only a bare call counts: no method call, no await, no
+                    # attribute access after the call.
+                    call_match = bare_call.fullmatch(rhs)
+                    helper = return_helpers.get(call_match.group(1)) if call_match else None
+                    if helper is not None:
+                        aliases[name] = {
+                            "kind": helper["kind"], "expression": helper["expression"],
+                            "line": line_no, "via_return": True,
+                            "propagation": [
+                                {"path": path, "line": return_line,
+                                 "function": call_match.group(1),
+                                 "returns": helper["expression"]}
+                                for return_line in helper["return_lines"]
+                            ] + [{"path": path, "line": line_no, "variable": name}],
+                        }
+                    else:
+                        aliases.pop(name, None)
                 else:
                     aliases.pop(name, None)
 
