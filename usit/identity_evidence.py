@@ -4,10 +4,11 @@ Only same-line, syntactically explicit patterns are emitted, except that
 a database call spanning several lines is joined on balanced parens (at
 most 10 physical lines) for the sink check; the record lands on the
 call's first line. Local-variable propagation is straight-line within one
-scope, plus one single hop through a same-file top-level helper whose
-every return is the same identity expression
-(``INTERPROCEDURAL_SINGLE_HOP_RETURN``). This is not a general taint
-engine and never proves runtime identity or authorization.
+scope, plus one single hop through a top-level helper whose every return
+is the same identity expression (``INTERPROCEDURAL_SINGLE_HOP_RETURN``);
+the helper may live in the same file or be brought in by a ``from`` import
+(``python_resolver`` module math). This is not a general taint engine and
+never proves runtime identity or authorization.
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ import json
 import re
 from collections.abc import Mapping
 from typing import Any
+
+from .python_resolver import _module_for_path, _package_for_module, _relative_module
 
 _TRUSTED = re.compile(
     r"\b(?:req|request)\.(?:user|auth\.user)\.(?:id|userId)\b"
@@ -341,6 +344,84 @@ def _python_identity_return_helpers(path: str, source: str) -> dict[str, dict[st
     return helpers
 
 
+def _python_module_index(code_by_file: dict[str, str]) -> dict[str, str]:
+    """Map dotted module names to project files, dropping ambiguous ones.
+
+    Module names follow ``python_resolver._module_for_path`` (``a/b.py`` ->
+    ``a.b``, ``a/b/__init__.py`` -> ``a.b``). A module name claimed by
+    more than one file is dropped entirely.
+    """
+    candidates: dict[str, set[str]] = {}
+    for path in sorted(code_by_file):
+        if not path.lower().endswith(".py"):
+            continue
+        candidates.setdefault(_module_for_path(path), set()).add(path)
+    return {module: next(iter(paths)) for module, paths in candidates.items()
+            if len(paths) == 1}
+
+
+def _python_top_level_function_names(source: str) -> set[str]:
+    """Top-level function names defined in one Python source (AST, fail-closed)."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    return {node.name for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _python_imported_identity_helpers(
+    path: str, source: str, module_index: dict[str, str],
+    helper_maps: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """Resolve ``from``-imported identity-return helpers for one file.
+
+    Only top-level ``from <module> import <name> [as <alias>]`` whose
+    target file directly defines a qualifying helper under the original
+    name. Star imports, submodule imports (``from . import x``), modules
+    outside the scan, missing or unqualified target names, and names
+    shadowed by a local top-level function are all skipped. Re-exports
+    (the target file itself importing the name) are not followed.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    caller_package = _package_for_module(_module_for_path(path), path)
+    local_names = _python_top_level_function_names(source)
+    imported: dict[str, dict[str, Any]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        if node.level and node.level > 0:
+            absolute = _relative_module(caller_package, node.level, node.module)
+        else:
+            absolute = node.module
+        if absolute is None:
+            continue
+        target_path = module_index.get(absolute)
+        if target_path is None:
+            continue
+        target_helpers = helper_maps.get(target_path, {})
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            local_name = alias.asname or alias.name
+            if local_name in local_names or local_name in imported:
+                continue
+            helper = target_helpers.get(alias.name)
+            if helper is None:
+                continue
+            imported[local_name] = {
+                **helper,
+                "path": target_path,
+                "function": f"{absolute}.{alias.name}",
+            }
+    return imported
+
+
 def extract_identity_evidence(code_by_file: dict[str, str],
                               function_owners_by_file: dict[str, dict[int, str]] | None = None) -> list[dict[str, Any]]:
     """Extract identity evidence plus bounded, same-scope local-variable propagation.
@@ -361,10 +442,20 @@ def extract_identity_evidence(code_by_file: dict[str, str],
     )
     identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
     bare_call = re.compile(r"([A-Za-z_$][\w$]*)\s*\(.*\)$")
+    module_index = _python_module_index(code_by_file)
+    same_file_helpers = {
+        file_path: _python_identity_return_helpers(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
             function_owners = _python_function_owners(path, source)
-            return_helpers = _python_identity_return_helpers(path, source)
+            imported_helpers = _python_imported_identity_helpers(
+                path, source, module_index, same_file_helpers)
+            return_helpers = dict(imported_helpers)
+            for name, helper in same_file_helpers.get(path, {}).items():
+                return_helpers[name] = {**helper, "path": path, "function": name}
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
@@ -569,8 +660,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                             "kind": helper["kind"], "expression": helper["expression"],
                             "line": line_no, "via_return": True,
                             "propagation": [
-                                {"path": path, "line": return_line,
-                                 "function": call_match.group(1),
+                                {"path": helper["path"], "line": return_line,
+                                 "function": helper["function"],
                                  "returns": helper["expression"]}
                                 for return_line in helper["return_lines"]
                             ] + [{"path": path, "line": line_no, "variable": name}],
