@@ -893,6 +893,119 @@ class DjangoModelTableTests(unittest.TestCase):
         })
         self.assertEqual(tables, {})
 
+    def test_default_table_from_app_directory(self):
+        tables = django_model_tables({
+            "photos/models.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {"Photo": "photos_photo"})
+
+    def test_default_table_from_nested_app_directory(self):
+        tables = django_model_tables({
+            "server/photos/models.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {"Photo": "photos_photo"})
+
+    def test_default_table_from_models_package(self):
+        tables = django_model_tables({
+            "photos/models/photo.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {"Photo": "photos_photo"})
+
+    def test_meta_app_label_overrides_directory(self):
+        tables = django_model_tables({
+            "photos/models.py": (
+                "from django.db import models\n\n\n"
+                "class Photo(models.Model):\n"
+                "    class Meta:\n"
+                "        app_label = 'gallery'\n"
+            ),
+        })
+        self.assertEqual(tables, {"Photo": "gallery_photo"})
+
+    def test_apps_py_config_label_overrides_directory(self):
+        tables = django_model_tables({
+            "photos/apps.py": (
+                "from django.apps import AppConfig\n\n\n"
+                "class PhotosConfig(AppConfig):\n"
+                "    name = 'photos'\n"
+                "    label = 'custom'\n"
+            ),
+            "photos/models.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {"Photo": "custom_photo"})
+
+    def test_non_model_base_gets_no_default_table(self):
+        tables = django_model_tables({
+            "photos/models.py": "class Photo(Base):\n    pass\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_model_in_another_file_of_the_app_gets_default_table(self):
+        tables = django_model_tables({
+            "photos/models.py": "from django.db import models\n",
+            "photos/views.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {"Photo": "photos_photo"})
+
+    def test_model_outside_any_app_gets_no_default_table(self):
+        tables = django_model_tables({
+            "other/views.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_abstract_and_proxy_models_get_no_default_table(self):
+        tables = django_model_tables({
+            "photos/models.py": (
+                "from django.db import models\n\n\n"
+                "class Base(models.Model):\n"
+                "    class Meta:\n"
+                "        abstract = True\n\n\n"
+                "class PhotoView(models.Model):\n"
+                "    class Meta:\n"
+                "        proxy = True\n"
+            ),
+        })
+        self.assertEqual(tables, {})
+
+    def test_explicit_db_table_wins_over_default(self):
+        tables = django_model_tables({
+            "photos/models.py": (
+                "from django.db import models\n\n\n"
+                "class Photo(models.Model):\n"
+                "    class Meta:\n"
+                "        db_table = 'images'\n"
+            ),
+        })
+        self.assertEqual(tables, {"Photo": "images"})
+
+    def test_same_model_name_with_different_default_tables_is_dropped(self):
+        tables = django_model_tables({
+            "photos/models.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+            "gallery/models.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_multi_word_model_name_is_lowercased_whole(self):
+        tables = django_model_tables({
+            "photos/models.py": "from django.db import models\n\n\nclass PhotoAlbum(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {"PhotoAlbum": "photos_photoalbum"})
+
+    def test_two_distinct_config_labels_skip_default(self):
+        tables = django_model_tables({
+            "photos/apps.py": (
+                "from django.apps import AppConfig\n\n\n"
+                "class AConfig(AppConfig):\n"
+                "    name = 'photos'\n"
+                "    label = 'one'\n\n\n"
+                "class BConfig(AppConfig):\n"
+                "    name = 'photos'\n"
+                "    label = 'two'\n"
+            ),
+            "photos/models.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+        })
+        self.assertEqual(tables, {})
+
 
 class DjangoObjectsTests(unittest.TestCase):
     _MODELS = (
@@ -986,6 +1099,26 @@ class DjangoObjectsTests(unittest.TestCase):
     def test_get_or_create_is_not_recognized(self):
         rows = self._rows("def load():\n    return Photo.objects.get_or_create(owner_id=1)\n")
         self.assertEqual(rows, [])
+
+    def test_filter_on_default_mapped_model_resolves_select(self):
+        rows = extract_database_accesses({
+            "photos/models.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+            "photos/views.py": "def load():\n    return Photo.objects.filter(owner_id=1)\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos_photo"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+        self.assertEqual(rows[0]["orm_model"], ["Photo"])
+
+    def test_chained_update_on_default_mapped_model(self):
+        rows = extract_database_accesses({
+            "photos/models.py": "from django.db import models\n\n\nclass Photo(models.Model):\n    pass\n",
+            "photos/views.py": "def load():\n    return Photo.objects.filter(owner_id=1).update(name=\"x\")\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UPDATE")
+        self.assertEqual(rows[0]["tables"], ["photos_photo"])
 
 
 if __name__ == "__main__":

@@ -28,7 +28,11 @@ ambiguous class name, or a non-model argument leaves the call UNKNOWN.
 Django-style ``Model.objects.filter/get/exclude/all/create`` calls are
 typed the same way from the project's own model classes: a model whose
 nested ``Meta`` class directly assigns ``db_table = '<table>'`` maps to
-that table. Chained ``.update(...)`` / ``.delete()`` calls whose chain
+that table. Otherwise a Django model (a ``models.Model`` subclass inside
+a Django app, neither abstract nor a proxy) gets Django's default table
+``<app_label>_<classname lowercased>``, with the app label from
+``Meta.app_label``, the app's ``apps.py`` ``AppConfig`` label, or the
+app directory name, in that order. Chained ``.update(...)`` / ``.delete()`` calls whose chain
 bottoms out at such a ``Model.objects.<read method>`` call yield one
 UPDATE / DELETE record instead of the base SELECT record.
 """
@@ -519,52 +523,200 @@ def orm_model_tables(code_by_file: dict[str, str]) -> dict[str, str]:
             if len(tables) == 1}
 
 
-def django_model_tables(code_by_file: dict[str, str]) -> dict[str, str]:
-    """Map Django model class names to tables from ``Meta.db_table``.
+def _django_meta_values(class_node: ast.ClassDef) -> dict[str, Any]:
+    """String/bool constants assigned in a directly nested ``Meta`` class."""
+    values: dict[str, Any] = {}
+    for stmt in class_node.body:
+        if not isinstance(stmt, ast.ClassDef) or stmt.name != "Meta":
+            continue
+        for meta_stmt in stmt.body:
+            target: ast.expr | None = None
+            value: ast.expr | None = None
+            if isinstance(meta_stmt, ast.Assign):
+                if len(meta_stmt.targets) != 1 or not isinstance(meta_stmt.targets[0], ast.Name):
+                    continue
+                target, value = meta_stmt.targets[0], meta_stmt.value
+            elif isinstance(meta_stmt, ast.AnnAssign):
+                if not isinstance(meta_stmt.target, ast.Name) or meta_stmt.value is None:
+                    continue
+                target, value = meta_stmt.target, meta_stmt.value
+            else:
+                continue
+            if isinstance(value, ast.Constant):
+                values[target.id] = value.value
+    return values
 
-    Pure AST scan of the project's own ``.py`` files: a class whose body
+
+def _django_app_dirs(code_by_file: dict[str, str]) -> set[str]:
+    """Directories that look like Django app roots.
+
+    A directory counts when it holds a ``models.py`` file or a ``models/``
+    subpackage: the app's models live there (or below it).
+    """
+    dirs: set[str] = set()
+    for path in sorted(code_by_file):
+        if not path.lower().endswith(".py"):
+            continue
+        parts = path.replace("\\", "/").split("/")
+        if parts[-1] == "models.py" and len(parts) >= 2:
+            dirs.add("/".join(parts[:-1]))
+        elif "models" in parts[:-1]:
+            idx = parts.index("models")
+            if idx > 0:
+                dirs.add("/".join(parts[:idx]))
+    return dirs
+
+
+def _django_app_dir_for_file(path: str, app_dirs: set[str]) -> str | None:
+    """Nearest ancestor directory of ``path`` that is a Django app root."""
+    parts = path.replace("\\", "/").split("/")[:-1]
+    for i in range(len(parts), 0, -1):
+        candidate = "/".join(parts[:i])
+        if candidate in app_dirs:
+            return candidate
+    return None
+
+
+def _django_config_label(apps_source: str, app_dir_name: str) -> tuple[str | None, bool]:
+    """Return (label, ambiguous) from an ``apps.py`` source.
+
+    Collects explicit string ``label`` assignments from ``AppConfig``
+    subclasses (bare ``AppConfig`` or ``*.AppConfig`` base). A class with
+    an explicit ``name`` whose last dotted component differs from the app
+    directory name is ignored (it configures another app). Exactly one
+    distinct label wins; none means "no custom label"; more than one
+    means ambiguous.
+    """
+    try:
+        tree = ast.parse(apps_source)
+    except (SyntaxError, ValueError):
+        return None, False
+    labels: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if not any((isinstance(b, ast.Name) and b.id == "AppConfig") or
+                   (isinstance(b, ast.Attribute) and b.attr == "AppConfig")
+                   for b in node.bases):
+            continue
+        label: str | None = None
+        name: str | None = None
+        for stmt in node.body:
+            target: ast.expr | None = None
+            value: ast.expr | None = None
+            if isinstance(stmt, ast.Assign):
+                if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
+                    continue
+                target, value = stmt.targets[0], stmt.value
+            elif isinstance(stmt, ast.AnnAssign):
+                if not isinstance(stmt.target, ast.Name) or stmt.value is None:
+                    continue
+                target, value = stmt.target, stmt.value
+            else:
+                continue
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                continue
+            if target.id == "label":
+                label = value.value
+            elif target.id == "name":
+                name = value.value
+        if label is None:
+            continue
+        if name is not None and name.split(".")[-1] != app_dir_name:
+            continue
+        labels.add(label)
+    if len(labels) == 1:
+        return next(iter(labels)), False
+    if len(labels) == 0:
+        return None, False
+    return None, True
+
+
+def django_model_tables(code_by_file: dict[str, str]) -> dict[str, str]:
+    """Map Django model class names to tables from ``Meta.db_table`` or the default rule.
+
+    Pure AST scan of the project's own ``.py`` files. A class whose body
     directly contains a nested ``Meta`` class that assigns
     ``db_table = '<table>'`` (plain ``Assign`` or annotated ``AnnAssign``
-    with a string constant) maps its class name to that table. A table
-    name must be a plain identifier; anything else is ignored. A class
-    name mapping to more than one distinct table is ambiguous and dropped
-    entirely. No inheritance is followed and no default table name
-    (``<app>_<model>``) is guessed.
+    with a string constant) maps its class name to that table; the
+    explicit table always wins for that class. Otherwise, a Django model
+    -- a class whose bases include ``Model`` (bare name or ``*.Model``
+    attribute), or that subclasses another Django model found in the same
+    scan -- with no explicit table gets Django's default table
+    ``<app_label>_<classname lowercased>`` (the class name is lowercased
+    whole, so ``PhotoAlbum`` becomes ``photoalbum``), provided the file
+    sits inside a Django app (its nearest ancestor directory holding a
+    ``models.py`` or a ``models/`` subpackage) and the model is neither
+    abstract nor a proxy (``Meta.abstract`` / ``Meta.proxy``). The app
+    label comes from ``Meta.app_label`` first, then an explicit ``label``
+    on the app's ``apps.py`` ``AppConfig``, then the app directory name.
+    A table name must be a plain identifier; anything else is ignored. A
+    class name mapping to more than one distinct table is ambiguous and
+    dropped entirely. No target code is imported or executed.
     """
-    candidates: dict[str, set[str]] = {}
+    parsed: dict[str, ast.Module] = {}
     for path, source in sorted(code_by_file.items()):
         if not path.lower().endswith(".py"):
             continue
         try:
-            tree = ast.parse(source)
+            parsed[path] = ast.parse(source)
         except (SyntaxError, ValueError):
             continue
+    app_dirs = _django_app_dirs(code_by_file)
+    classes: list[tuple[str, str, ast.ClassDef]] = []
+    for path, tree in sorted(parsed.items()):
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
+            if isinstance(node, ast.ClassDef):
+                classes.append((node.name, path, node))
+    django_names: set[str] = set()
+    for name, _path, node in classes:
+        if any((isinstance(b, ast.Name) and b.id == "Model") or
+               (isinstance(b, ast.Attribute) and b.attr == "Model")
+               for b in node.bases):
+            django_names.add(name)
+    # Inheritance: iterate to a fixpoint so a subclass defined before its
+    # parent (or in another file) is still recognized.
+    changed = True
+    while changed:
+        changed = False
+        for name, _path, node in classes:
+            if name in django_names:
                 continue
-            for stmt in node.body:
-                if not isinstance(stmt, ast.ClassDef) or stmt.name != "Meta":
-                    continue
-                for meta_stmt in stmt.body:
-                    target: ast.expr | None = None
-                    value: ast.expr | None = None
-                    if isinstance(meta_stmt, ast.Assign):
-                        if len(meta_stmt.targets) != 1 or not isinstance(meta_stmt.targets[0], ast.Name):
-                            continue
-                        target, value = meta_stmt.targets[0], meta_stmt.value
-                    elif isinstance(meta_stmt, ast.AnnAssign):
-                        if not isinstance(meta_stmt.target, ast.Name) or meta_stmt.value is None:
-                            continue
-                        target, value = meta_stmt.target, meta_stmt.value
-                    else:
-                        continue
-                    if target.id != "db_table":
-                        continue
-                    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
-                        continue
-                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", value.value):
-                        continue
-                    candidates.setdefault(node.name, set()).add(value.value)
+            if any(isinstance(b, ast.Name) and b.id in django_names for b in node.bases):
+                django_names.add(name)
+                changed = True
+    config_labels: dict[str, tuple[str | None, bool]] = {}
+    candidates: dict[str, set[str]] = {}
+    for name, path, node in classes:
+        meta = _django_meta_values(node)
+        db_table = meta.get("db_table")
+        if isinstance(db_table, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", db_table):
+            candidates.setdefault(name, set()).add(db_table)
+            continue
+        if name not in django_names:
+            continue
+        if meta.get("abstract") is True or meta.get("proxy") is True:
+            continue
+        app_dir = _django_app_dir_for_file(path, app_dirs)
+        if app_dir is None:
+            continue
+        app_label = meta.get("app_label")
+        if not isinstance(app_label, str):
+            app_label = None
+        if app_label is None:
+            if app_dir not in config_labels:
+                apps_source = code_by_file.get(f"{app_dir}/apps.py")
+                config_labels[app_dir] = (
+                    _django_config_label(apps_source, app_dir.rsplit("/", 1)[-1])
+                    if apps_source is not None else (None, False))
+            custom_label, ambiguous = config_labels[app_dir]
+            if ambiguous:
+                continue
+            app_label = custom_label if custom_label is not None else app_dir.rsplit("/", 1)[-1]
+        table = f"{app_label}_{name.lower()}"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", table):
+            continue
+        candidates.setdefault(name, set()).add(table)
     return {name: next(iter(tables)) for name, tables in candidates.items()
             if len(tables) == 1}
 
