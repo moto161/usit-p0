@@ -731,5 +731,132 @@ class DatabaseAccessExtractionTests(unittest.TestCase):
         self.assertEqual(rows[0]["tables"], ["photos"])
 
 
+class OrmModelTableTests(unittest.TestCase):
+    def test_query_with_tablename_resolves_select(self):
+        rows = extract_database_accesses({
+            "server/models.py": "class Photo:\n    __tablename__ = 'photos'\n",
+            "server/repos/photo_repo.py": "def load(session):\n    return session.query(Photo).all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["source"], "server/repos/photo_repo.py")
+        self.assertEqual(row["line"], 2)
+        self.assertEqual(row["callee"], "session.query")
+        self.assertEqual(row["operation"], "SELECT")
+        self.assertEqual(row["tables"], ["photos"])
+        self.assertEqual(row["columns"], [])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
+        self.assertEqual(row["confidence"], "STATIC_INFERENCE")
+        self.assertEqual(row["verification_status"], "NOT_VERIFIED")
+
+    def test_query_with_two_models_resolves_both_tables_sorted(self):
+        rows = extract_database_accesses({
+            "server/models.py": (
+                "class Photo:\n    __tablename__ = 'photos'\n"
+                "class Album:\n    __tablename__ = 'albums'\n"
+            ),
+            "server/repos/photo_repo.py": "session.query(Photo, Album).all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["orm_model"], ["Album", "Photo"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_query_with_unmapped_model_stays_unknown(self):
+        rows = extract_database_accesses({
+            "server/models.py": "class Photo:\n    pass\n",
+            "server/repos/photo_repo.py": "session.query(Photo).all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertNotIn("orm_model", rows[0])
+
+    def test_ambiguous_class_name_is_dropped(self):
+        rows = extract_database_accesses({
+            "server/models_a.py": "class Photo:\n    __tablename__ = 'photos'\n",
+            "server/models_b.py": "class Photo:\n    __tablename__ = 'pictures'\n",
+            "server/repos/photo_repo.py": "session.query(Photo).all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+
+    def test_same_class_name_same_table_resolves(self):
+        rows = extract_database_accesses({
+            "server/models_a.py": "class Photo:\n    __tablename__ = 'photos'\n",
+            "server/models_b.py": "class Photo:\n    __tablename__ = 'photos'\n",
+            "server/repos/photo_repo.py": "session.query(Photo).all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_query_with_column_argument_stays_unknown(self):
+        rows = extract_database_accesses({
+            "server/models.py": "class Photo:\n    __tablename__ = 'photos'\n",
+            "server/repos/photo_repo.py": "session.query(Photo.id).all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+
+    def test_query_with_no_arguments_stays_unknown(self):
+        rows = extract_database_accesses({
+            "server/repos/photo_repo.py": "session.query().all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_tablename_must_be_a_plain_identifier_string(self):
+        rows = extract_database_accesses({
+            "server/models.py": (
+                "class Photo:\n    __tablename__ = 42\n"
+                "class Album:\n    __tablename__ = 'my schema'\n"
+            ),
+            "server/repos/photo_repo.py": (
+                "session.query(Photo).all()\n"
+                "session.query(Album).all()\n"
+            ),
+        })
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["parse_status"], "UNKNOWN")
+            self.assertEqual(row["tables"], [])
+
+    def test_annotated_tablename_resolves(self):
+        rows = extract_database_accesses({
+            "server/models.py": "class Photo:\n    __tablename__: str = 'photos'\n",
+            "server/repos/photo_repo.py": "session.query(Photo).all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_literal_sql_still_resolved_beside_orm_query(self):
+        rows = extract_database_accesses({
+            "server/models.py": "class Photo:\n    __tablename__ = 'photos'\n",
+            "server/repos/photo_repo.py": (
+                "session.query(Photo).all()\n"
+                "cursor.execute(\"SELECT id FROM photos\")\n"
+            ),
+        })
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+        self.assertEqual(rows[1]["parse_status"], "RESOLVED")
+        self.assertEqual(rows[1]["tables"], ["photos"])
+
+    def test_module_level_tablename_is_ignored(self):
+        rows = extract_database_accesses({
+            "server/models.py": "__tablename__ = 'photos'\n",
+            "server/repos/photo_repo.py": "session.query(Photo).all()\n",
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

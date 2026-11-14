@@ -19,6 +19,12 @@ branches are recognized together; `AS [NOT] MATERIALIZED` is accepted.
 A literal holding several statements separated by top-level semicolons
 yields one record per SELECT/INSERT/UPDATE/DELETE statement (same source
 line); other fragments (BEGIN/COMMIT/SET/...) yield no record.
+SQLAlchemy-style ``session.query(Model)`` calls are typed from the
+project's own model classes: a model whose class body directly assigns
+``__tablename__ = '<table>'`` maps to that table, and a ``query()`` whose
+arguments are all such bare model names yields one SELECT record with
+``parse_status`` ``ORM_MODEL``. A model without a resolvable table, an
+ambiguous class name, or a non-model argument leaves the call UNKNOWN.
 """
 from __future__ import annotations
 
@@ -456,9 +462,65 @@ def _resolve_python_sql(node: ast.AST) -> tuple[str, bool] | None:
     return None
 
 
-def _extract_python(source: str) -> list[tuple[int, str, str | None, str, bool]]:
-    """Extract (line, callee, sql, parser, has_dynamic) from one Python file."""
-    found: list[tuple[int, str, str | None, str, bool]] = []
+def orm_model_tables(code_by_file: dict[str, str]) -> dict[str, str]:
+    """Map SQLAlchemy model class names to tables from ``__tablename__``.
+
+    Pure AST scan of the project's own ``.py`` files: a class whose body
+    directly assigns ``__tablename__ = '<table>'`` (plain ``Assign`` or
+    annotated ``AnnAssign`` with a string constant) maps its class name to
+    that table. A table name must be a plain identifier; anything else is
+    ignored. A class name mapping to more than one distinct table is
+    ambiguous and dropped entirely. No inheritance is followed, no default
+    table name is guessed, and no target code is imported or executed.
+    """
+    candidates: dict[str, set[str]] = {}
+    for path, source in sorted(code_by_file.items()):
+        if not path.lower().endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for stmt in node.body:
+                target: ast.expr | None = None
+                value: ast.expr | None = None
+                if isinstance(stmt, ast.Assign):
+                    if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
+                        continue
+                    target, value = stmt.targets[0], stmt.value
+                elif isinstance(stmt, ast.AnnAssign):
+                    if not isinstance(stmt.target, ast.Name) or stmt.value is None:
+                        continue
+                    target, value = stmt.target, stmt.value
+                else:
+                    continue
+                if target.id != "__tablename__":
+                    continue
+                if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                    continue
+                # The whole value must be one plain identifier: unlike a
+                # qualified SQL reference, 'my schema' must not silently
+                # become 'schema' (that is what _normalize_table would do
+                # with its last-segment rule).
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", value.value):
+                    continue
+                table = value.value
+                candidates.setdefault(node.name, set()).add(table)
+    return {name: next(iter(tables)) for name, tables in candidates.items()
+            if len(tables) == 1}
+
+
+def _extract_python(source: str, orm_tables: dict[str, str] | None = None) -> list[tuple[int, str, str | None, str, bool, list[str] | None]]:
+    """Extract (line, callee, sql, parser, has_dynamic, orm_models) from one Python file.
+
+    ``orm_models`` is the list of model class names when the call is a
+    ``.query(Model, ...)`` whose arguments are all bare names resolved by
+    ``orm_tables``; otherwise None.
+    """
+    found: list[tuple[int, str, str | None, str, bool, list[str] | None]] = []
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -469,6 +531,12 @@ def _extract_python(source: str) -> list[tuple[int, str, str | None, str, bool]]
                 func = node.func
                 if isinstance(func, ast.Attribute) and func.attr in _DB_METHODS:
                     receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
+                    orm_models: list[str] | None = None
+                    if (func.attr == "query" and orm_tables and node.args
+                            and all(isinstance(arg, ast.Name) for arg in node.args)):
+                        names = [arg.id for arg in node.args]
+                        if all(name in orm_tables for name in names):
+                            orm_models = names
                     resolved = _resolve_python_sql(node.args[0]) if node.args else None
                     if resolved is None:
                         sql, dynamic = None, False
@@ -476,7 +544,7 @@ def _extract_python(source: str) -> list[tuple[int, str, str | None, str, bool]]
                         sql, dynamic = resolved
                     parser = ("python-ast-literal-expression-dynamic" if dynamic
                               else "python-ast-literal-expression")
-                    found.append((node.lineno, receiver + "." + func.attr, sql, parser, dynamic))
+                    found.append((node.lineno, receiver + "." + func.attr, sql, parser, dynamic, orm_models))
                 self.generic_visit(node)
         Visitor().visit(tree)
         return found
@@ -496,7 +564,7 @@ def _extract_python(source: str) -> list[tuple[int, str, str | None, str, bool]]
                 if isinstance(func, ast.Attribute) and func.attr in _DB_METHODS:
                     receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
                     sql = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str) else None
-                    found.append((line_no, receiver + "." + func.attr, sql, "python-ast-single-line", False))
+                    found.append((line_no, receiver + "." + func.attr, sql, "python-ast-single-line", False, None))
                 self.generic_visit(node)
         LineVisitor().visit(line_tree)
     return found
@@ -669,21 +737,25 @@ def _parse_js_string_expr(text: str, pos: int) -> tuple[str, bool, int] | None:
         return "".join(parts), dynamic, pos
 
 
-def _extract_js(source: str) -> list[tuple[int, str, str | None, str, bool]]:
-    """Extract (line, callee, sql, parser, has_dynamic) from one JS/TS file."""
-    found: list[tuple[int, str, str | None, str, bool]] = []
+def _extract_js(source: str) -> list[tuple[int, str, str | None, str, bool, list[str] | None]]:
+    """Extract (line, callee, sql, parser, has_dynamic, orm_models) from one JS/TS file.
+
+    JS/TS has no ORM model mapping in this increment, so ``orm_models`` is
+    always None here.
+    """
+    found: list[tuple[int, str, str | None, str, bool, list[str] | None]] = []
     for match in _JS_CALL.finditer(source):
         receiver, method = match.group(1), match.group(2)
         line_no = source.count("\n", 0, match.start()) + 1
         parsed = _parse_js_string_expr(source, match.end())
         if parsed is None:
             found.append((line_no, receiver + "." + method, None,
-                          "js-ts-literal-expression", False))
+                          "js-ts-literal-expression", False, None))
         else:
             sql, dynamic, _end = parsed
             parser = ("js-ts-literal-expression-dynamic" if dynamic
                       else "js-ts-literal-expression")
-            found.append((line_no, receiver + "." + method, sql, parser, dynamic))
+            found.append((line_no, receiver + "." + method, sql, parser, dynamic, None))
     return found
 
 
@@ -694,15 +766,32 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
     yields one record per SELECT/INSERT/UPDATE/DELETE statement (same
     source line); other fragments yield no record. A call with no DML
     fragment keeps today's single UNKNOWN record, parsed from the whole
-    text, so the fail-closed shape is unchanged.
+    text, so the fail-closed shape is unchanged. A SQLAlchemy
+    ``.query(Model, ...)`` call whose arguments are all bare model names
+    resolved by the project's own ``__tablename__`` map yields one SELECT
+    record with ``parse_status`` ``ORM_MODEL`` instead.
     """
     records: list[dict[str, Any]] = []
+    orm_tables = orm_model_tables(code_by_file)
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
-            found = _extract_python(source)
+            found = _extract_python(source, orm_tables)
         else:
             found = _extract_js(source)
-        for line_no, callee, sql, parser, dynamic in found:
+        for line_no, callee, sql, parser, dynamic, orm_models in found:
+            if orm_models is not None:
+                records.append({
+                    "source": path, "line": line_no, "callee": callee,
+                    "access_method": callee.rsplit(".", 1)[-1],
+                    "operation": "SELECT",
+                    "tables": sorted({orm_tables[name] for name in orm_models}),
+                    "columns": [], "parse_status": "ORM_MODEL",
+                    "orm_model": sorted(orm_models),
+                    "parser": parser, "has_dynamic_parts": dynamic,
+                    "confidence": "STATIC_INFERENCE",
+                    "verification_status": "NOT_VERIFIED",
+                })
+                continue
             if isinstance(sql, str):
                 statements = _split_top_level_statements(sql)
                 dml = [s for s in statements if _DML_FIRST.match(s)]
