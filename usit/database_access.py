@@ -25,6 +25,12 @@ project's own model classes: a model whose class body directly assigns
 arguments are all such bare model names yields one SELECT record with
 ``parse_status`` ``ORM_MODEL``. A model without a resolvable table, an
 ambiguous class name, or a non-model argument leaves the call UNKNOWN.
+SQLAlchemy 2.0 ``select(Model, ...)`` calls are typed the same way, but
+only when the file imports ``select`` from SQLAlchemy (bare name or
+``<module>.select``); ``session.execute(select(...))`` -- including a
+chained ``select(...).where(...)`` -- is resolved to the same SELECT
+record, with the inner ``select()`` call consumed so it is not counted
+twice.
 Django-style ``Model.objects.filter/get/exclude/all/create`` calls are
 typed the same way from the project's own model classes: a model whose
 nested ``Meta`` class directly assigns ``db_table = '<table>'`` maps to
@@ -747,6 +753,71 @@ def _django_objects_base(node: ast.Call) -> tuple[str, str] | None:
     return receiver.value.id, func.attr
 
 
+def _sqlalchemy_select_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """Local names bound to SQLAlchemy's ``select`` and to its module.
+
+    Returns (bare_names, module_names): bare names come from
+    ``from sqlalchemy [or sqlalchemy.sql] import select [as X]``; module
+    names come from ``import sqlalchemy [or sqlalchemy.sql] [as X]``.
+    A bare ``select(...)`` with no such import is not recognized.
+    """
+    bare: set[str] = set()
+    modules: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module in ("sqlalchemy", "sqlalchemy.sql"):
+            for alias in node.names:
+                if alias.name == "select":
+                    bare.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("sqlalchemy", "sqlalchemy.sql"):
+                    modules.add(alias.asname or alias.name.split(".")[0])
+    return bare, modules
+
+
+def _is_direct_select_call(node: ast.Call, bare_names: set[str], module_names: set[str]) -> bool:
+    """Whether this call node itself is a bound ``select(...)`` call."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in bare_names
+    if isinstance(func, ast.Attribute) and func.attr == "select":
+        return isinstance(func.value, ast.Name) and func.value.id in module_names
+    return False
+
+
+def _select_call_models(node: ast.AST, bare_names: set[str], module_names: set[str],
+                        orm_tables: dict[str, str] | None) -> tuple[ast.Call, list[str] | None] | None:
+    """Resolve a ``select()`` call (or a chain bottoming out at one).
+
+    Walks down attribute-call chains (``select(...).where(...)``) to the
+    ``select()`` call. Returns ``(select_node, models)``: ``models`` is
+    the sorted model list when every argument resolves to a mapped model
+    (a bare name, or a ``Model.<column>`` attribute whose receiver is a
+    mapped bare name), else None. Returns None when the node is not a
+    ``select()`` call at all.
+    """
+    cur: ast.AST = node
+    while (isinstance(cur, ast.Call) and isinstance(cur.func, ast.Attribute)
+           and isinstance(cur.func.value, ast.Call)):
+        cur = cur.func.value
+    if not isinstance(cur, ast.Call) or not _is_direct_select_call(cur, bare_names, module_names):
+        return None
+    if not cur.args or cur.keywords:
+        return (cur, None)
+    models: list[str] = []
+    for arg in cur.args:
+        if isinstance(arg, ast.Name):
+            model = arg.id
+        elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+            model = arg.value.id
+        else:
+            return (cur, None)
+        if not orm_tables or model not in orm_tables:
+            return (cur, None)
+        models.append(model)
+    return (cur, sorted(set(models)))
+
+
 def _extract_python(source: str, orm_tables: dict[str, str] | None = None, django_tables: dict[str, str] | None = None) -> list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]]:
     """Extract (line, callee, sql, parser, has_dynamic, orm_models, orm_kind) from one Python file.
 
@@ -763,6 +834,7 @@ def _extract_python(source: str, orm_tables: dict[str, str] | None = None, djang
     except (SyntaxError, ValueError):
         tree = None
     if tree is not None:
+        select_bare, select_modules = _sqlalchemy_select_bindings(tree)
         class Visitor(ast.NodeVisitor):
             def visit_Call(self, node: ast.Call) -> None:
                 func = node.func
@@ -779,6 +851,18 @@ def _extract_python(source: str, orm_tables: dict[str, str] | None = None, djang
                         if all(name in orm_tables for name in names):
                             orm_models = names
                             orm_kind = "sqlalchemy"
+                    if orm_models is None and func.attr == "execute" and node.args:
+                        # O4: session.execute(select(...)) -- including a
+                        # chained select(...).where(...) -- resolves to
+                        # the same SELECT record; the inner select() call
+                        # is consumed so it is not counted twice.
+                        select_info = _select_call_models(
+                            node.args[0], select_bare, select_modules, orm_tables)
+                        if select_info is not None:
+                            select_node, select_models = select_info
+                            consumed.add(id(select_node))
+                            if select_models is not None:
+                                orm_models, orm_kind = select_models, "sqlalchemy"
                     resolved = _resolve_python_sql(node.args[0]) if node.args else None
                     if resolved is None:
                         sql, dynamic = None, False
@@ -787,6 +871,17 @@ def _extract_python(source: str, orm_tables: dict[str, str] | None = None, djang
                     parser = ("python-ast-literal-expression-dynamic" if dynamic
                               else "python-ast-literal-expression")
                     found.append((node.lineno, receiver + "." + func.attr, sql, parser, dynamic, orm_models, orm_kind))
+                elif _is_direct_select_call(node, select_bare, select_modules):
+                    # O4: a bound select(Model, ...) call on its own.
+                    _sel_node, sel_models = _select_call_models(
+                        node, select_bare, select_modules, orm_tables)
+                    callee = ast.unparse(func) if hasattr(ast, "unparse") else "select"
+                    if sel_models is not None:
+                        found.append((node.lineno, callee, None,
+                                      "python-ast-literal-expression", False, sel_models, "sqlalchemy"))
+                    else:
+                        found.append((node.lineno, callee, None,
+                                      "python-ast-literal-expression", False, None, None))
                 elif isinstance(func, ast.Attribute) and func.attr in _DJANGO_TERMINAL_METHODS and isinstance(func.value, ast.Call):
                     # Chained .update()/.delete(): walk down to the base
                     # Model.objects.<read method> call and report the

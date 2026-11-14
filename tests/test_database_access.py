@@ -1121,5 +1121,123 @@ class DjangoObjectsTests(unittest.TestCase):
         self.assertEqual(rows[0]["tables"], ["photos_photo"])
 
 
+class SqlAlchemySelectTests(unittest.TestCase):
+    _MODELS = (
+        "class Photo:\n    __tablename__ = 'photos'\n"
+        "class Album:\n    __tablename__ = 'albums'\n"
+        "class Unmapped:\n    pass\n"
+    )
+
+    def _rows(self, repo_source, models=None):
+        return extract_database_accesses({
+            "server/models.py": self._MODELS if models is None else models,
+            "server/repos.py": repo_source,
+        })
+
+    def test_bare_select_resolves_single_model(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo)\n")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["source"], "server/repos.py")
+        self.assertEqual(row["callee"], "select")
+        self.assertEqual(row["operation"], "SELECT")
+        self.assertEqual(row["tables"], ["photos"])
+        self.assertEqual(row["columns"], [])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
+
+    def test_bare_select_resolves_multiple_models_sorted(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo, Album)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["orm_model"], ["Album", "Photo"])
+
+    def test_bare_select_column_argument_resolves_model(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo.id)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["orm_model"], ["Photo"])
+
+    def test_bare_select_without_sqlalchemy_import_is_not_recognized(self):
+        rows = self._rows("def load():\n    return select(Photo)\n")
+        self.assertEqual(rows, [])
+
+    def test_bare_select_unmapped_model_is_unknown(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Unmapped)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "select")
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertNotIn("orm_model", rows[0])
+
+    def test_module_attribute_select_resolves(self):
+        rows = self._rows("import sqlalchemy as sa\n\n\ndef load():\n    return sa.select(Photo)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "sa.select")
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_execute_select_resolves_once(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load(session):\n    return session.execute(select(Photo))\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "session.execute")
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+        self.assertEqual(rows[0]["orm_model"], ["Photo"])
+
+    def test_execute_chained_select_resolves_once(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load(session):\n    return session.execute(select(Photo).where(Photo.owner_id == 1))\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_execute_select_multiple_models(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load(session):\n    return session.execute(select(Photo, Album))\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+
+    def test_execute_select_unmapped_model_is_unknown(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load(session):\n    return session.execute(select(Unmapped))\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "session.execute")
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_execute_raw_sql_still_resolves(self):
+        rows = self._rows("def load(session):\n    return session.execute(\"SELECT id FROM photos\")\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "RESOLVED")
+
+    def test_chained_select_statement_resolves_once(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo).where(Photo.owner_id == 1)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "select")
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_aliased_select_import_resolves(self):
+        rows = self._rows("from sqlalchemy import select as sel\n\n\ndef load():\n    return sel(Photo)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "sel")
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_select_imported_from_sqlalchemy_sql_resolves(self):
+        rows = self._rows("from sqlalchemy.sql import select\n\n\ndef load():\n    return select(Photo)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+
 if __name__ == "__main__":
     unittest.main()
