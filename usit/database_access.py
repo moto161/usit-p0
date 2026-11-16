@@ -737,6 +737,40 @@ _DJANGO_OPERATION = {"filter": "SELECT", "exclude": "SELECT", "get": "SELECT",
                      "all": "SELECT", "create": "INSERT",
                      "update": "UPDATE", "delete": "DELETE"}
 
+_TYPEORM_METHODS = ("find", "findOne", "findOneBy", "findAndCount", "count",
+                    "countBy", "exists", "existsBy", "save", "insert", "update",
+                    "delete", "remove", "softDelete", "softRemove", "restore",
+                    "recover")
+# TypeORM repository methods by operation. save() is an insert-or-update
+# (upsert): its operation cannot be determined statically, so it maps to
+# UNKNOWN while the table is still known. create() only instantiates an
+# entity in memory (no database access) and is deliberately absent.
+_TYPEORM_OPERATION = {
+    "find": "SELECT", "findOne": "SELECT", "findOneBy": "SELECT",
+    "findAndCount": "SELECT", "count": "SELECT", "countBy": "SELECT",
+    "exists": "SELECT", "existsBy": "SELECT",
+    "save": "UNKNOWN",
+    "insert": "INSERT", "update": "UPDATE",
+    "delete": "DELETE", "remove": "DELETE", "softDelete": "DELETE",
+    "softRemove": "DELETE", "restore": "UPDATE", "recover": "UPDATE",
+}
+_TYPEORM_ENTITY = re.compile(
+    r"@Entity\(\s*(?:"
+    r"\{[^}]*?name\s*:\s*(?:\"([^\"]+)\"|'([^']+)')\s*[^}]*\}"
+    r"|\"([^\"]+)\"|'([^']+)'"
+    r")?\s*\)"
+)
+_TYPEORM_GET_REPOSITORY = re.compile(
+    r"(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.)?getRepository\(\s*([A-Za-z_$][\w$]*)\s*\)"
+)
+_TYPEORM_METHOD_ALTS = "|".join(_TYPEORM_METHODS)
+_TYPEORM_BOUND_CALL = re.compile(
+    r"([A-Za-z_$][\w$]*)\s*\.\s*(" + _TYPEORM_METHOD_ALTS + r")\s*\("
+)
+_TYPEORM_INLINE_CALL = re.compile(
+    r"(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.)?getRepository\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\.\s*(" + _TYPEORM_METHOD_ALTS + r")\s*\("
+)
+
 
 def _django_objects_base(node: ast.Call) -> tuple[str, str] | None:
     """Return (model, method) for a ``Model.objects.<method>(...)`` call.
@@ -1131,11 +1165,47 @@ def _parse_js_string_expr(text: str, pos: int) -> tuple[str, bool, int] | None:
         return "".join(parts), dynamic, pos
 
 
-def _extract_js(source: str) -> list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]]:
+def typeorm_entity_tables(code_by_file: dict[str, str]) -> dict[str, str]:
+    """Map TypeORM entity class names to tables from explicit ``@Entity`` names.
+
+    Pure regex scan of the project's own TS/JS files: a class preceded by
+    ``@Entity("photos")``, ``@Entity('photos')`` or
+    ``@Entity({ name: "photos" })`` maps its class name to that table.
+    A bare ``@Entity()`` (default table name) is not mapped. A table name
+    must be a plain identifier; anything else is ignored. A class name
+    mapping to more than one distinct table is ambiguous and dropped
+    entirely. No target code is imported or executed.
+    """
+    candidates: dict[str, set[str]] = {}
+    for path, source in sorted(code_by_file.items()):
+        if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+            continue
+        for match in _TYPEORM_ENTITY.finditer(source):
+            table = next((g for g in match.groups() if g is not None), None)
+            if table is None:
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", table):
+                continue
+            class_match = re.search(r"\bclass\s+([A-Za-z_$][\w$]*)",
+                                    source[match.end():match.end() + 500])
+            if class_match is None:
+                continue
+            candidates.setdefault(class_match.group(1), set()).add(table)
+    return {name: next(iter(tables)) for name, tables in candidates.items()
+            if len(tables) == 1}
+
+
+def _extract_js(source: str, typeorm_tables: dict[str, str] | None = None) -> list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]]:
     """Extract (line, callee, sql, parser, has_dynamic, orm_models, orm_kind) from one JS/TS file.
 
-    JS/TS has no ORM model mapping in this increment, so ``orm_models``
-    and ``orm_kind`` are always None here.
+    SQL literal calls (``.execute`` / ``.query`` / ``.raw``) are typed
+    from their statement text as before. TypeORM repository calls are
+    typed from ``typeorm_tables``: a method call on a variable bound by
+    ``getRepository(Entity)`` (or an inline ``getRepository(Entity).<method>``
+    call) yields one record with ``orm_kind`` ``"typeorm"`` when the
+    entity is mapped, or a single UNKNOWN record when it is not. A
+    method call on an unbound receiver is not a database access on this
+    evidence and yields no record.
     """
     found: list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]] = []
     for match in _JS_CALL.finditer(source):
@@ -1150,6 +1220,42 @@ def _extract_js(source: str) -> list[tuple[int, str, str | None, str, bool, list
             parser = ("js-ts-literal-expression-dynamic" if dynamic
                       else "js-ts-literal-expression")
             found.append((line_no, receiver + "." + method, sql, parser, dynamic, None, None))
+    if typeorm_tables is not None:
+        # Repository bindings in this file, in source order: each entry is
+        # (end position of the getRepository call, variable, entity).
+        bindings: list[tuple[int, str, str]] = []
+        for get_match in _TYPEORM_GET_REPOSITORY.finditer(source):
+            assign = re.search(
+                r"([A-Za-z_$][\w$]*)\s*(?::[^\n=;]{0,100})?=\s*$",
+                source[:get_match.start()])
+            if assign is not None:
+                bindings.append((get_match.end(), assign.group(1), get_match.group(1)))
+        for call_match in _TYPEORM_INLINE_CALL.finditer(source):
+            entity, method = call_match.group(1), call_match.group(2)
+            line_no = source.count("\n", 0, call_match.start()) + 1
+            callee = f"getRepository({entity}).{method}"
+            if typeorm_tables and entity in typeorm_tables:
+                found.append((line_no, callee, None, "js-ts-literal-expression",
+                              False, [entity], "typeorm"))
+            else:
+                found.append((line_no, callee, None, "js-ts-literal-expression",
+                              False, None, None))
+        for call_match in _TYPEORM_BOUND_CALL.finditer(source):
+            receiver, method = call_match.group(1), call_match.group(2)
+            entity = None
+            for end_pos, var, bound_entity in bindings:
+                if var == receiver and end_pos < call_match.start():
+                    entity = bound_entity
+            if entity is None:
+                continue
+            line_no = source.count("\n", 0, call_match.start()) + 1
+            callee = receiver + "." + method
+            if typeorm_tables and entity in typeorm_tables:
+                found.append((line_no, callee, None, "js-ts-literal-expression",
+                              False, [entity], "typeorm"))
+            else:
+                found.append((line_no, callee, None, "js-ts-literal-expression",
+                              False, None, None))
     return found
 
 
@@ -1172,16 +1278,24 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
     records: list[dict[str, Any]] = []
     orm_tables = orm_model_tables(code_by_file)
     django_tables = django_model_tables(code_by_file)
+    typeorm_tables = typeorm_entity_tables(code_by_file)
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
             found = _extract_python(source, orm_tables, django_tables)
         else:
-            found = _extract_js(source)
+            found = _extract_js(source, typeorm_tables)
         for line_no, callee, sql, parser, dynamic, orm_models, orm_kind in found:
             if orm_models is not None:
-                tables_map = django_tables if orm_kind == "django" else orm_tables
                 method = callee.rsplit(".", 1)[-1]
-                operation = _DJANGO_OPERATION.get(method, "SELECT") if orm_kind == "django" else "SELECT"
+                if orm_kind == "django":
+                    tables_map = django_tables
+                    operation = _DJANGO_OPERATION.get(method, "SELECT")
+                elif orm_kind == "typeorm":
+                    tables_map = typeorm_tables
+                    operation = _TYPEORM_OPERATION.get(method, "UNKNOWN")
+                else:
+                    tables_map = orm_tables
+                    operation = "SELECT"
                 records.append({
                     "source": path, "line": line_no, "callee": callee,
                     "access_method": method,

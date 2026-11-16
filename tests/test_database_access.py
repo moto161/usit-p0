@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from usit.database_access import django_model_tables, extract_database_accesses
+from usit.database_access import (django_model_tables,
+                                  extract_database_accesses,
+                                  typeorm_entity_tables)
 
 
 class DatabaseAccessExtractionTests(unittest.TestCase):
@@ -1294,6 +1296,171 @@ class SqlAlchemySelectTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["operation"], "SELECT")
         self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+
+
+class TypeOrmEntityTableTests(unittest.TestCase):
+    def test_explicit_entity_name_maps(self):
+        tables = typeorm_entity_tables({
+            "server/photo.entity.ts": (
+                "import { Entity } from \"typeorm\";\n\n"
+                "@Entity(\"photos\")\n"
+                "export class Photo {\n}\n"
+            ),
+        })
+        self.assertEqual(tables, {"Photo": "photos"})
+
+    def test_entity_options_name_maps(self):
+        tables = typeorm_entity_tables({
+            "server/photo.entity.ts": (
+                "@Entity({ name: \"photos\" })\n"
+                "export class Photo {\n}\n"
+            ),
+        })
+        self.assertEqual(tables, {"Photo": "photos"})
+
+    def test_bare_entity_decorator_does_not_map(self):
+        tables = typeorm_entity_tables({
+            "server/photo.entity.ts": "@Entity()\nexport class Photo {\n}\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_same_entity_name_with_different_tables_is_dropped(self):
+        tables = typeorm_entity_tables({
+            "a/photo.entity.ts": "@Entity(\"photos\")\nexport class Photo {\n}\n",
+            "b/photo.entity.ts": "@Entity(\"images\")\nexport class Photo {\n}\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_non_identifier_table_name_is_ignored(self):
+        tables = typeorm_entity_tables({
+            "server/photo.entity.ts": "@Entity(\"my photos\")\nexport class Photo {\n}\n",
+        })
+        self.assertEqual(tables, {})
+
+
+class TypeOrmRepositoryTests(unittest.TestCase):
+    _ENTITY = (
+        "import { Entity } from \"typeorm\";\n\n"
+        "@Entity(\"photos\")\n"
+        "export class Photo {\n}\n"
+    )
+
+    def _rows(self, service_source):
+        return extract_database_accesses({
+            "server/photo.entity.ts": self._ENTITY,
+            "server/photos.service.ts": service_source,
+        })
+
+    def test_bound_find_resolves_select(self):
+        rows = self._rows(
+            "import { getRepository } from \"typeorm\";\n"
+            "const repo = getRepository(Photo);\n"
+            "export async function load() {\n"
+            "  return repo.find({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["source"], "server/photos.service.ts")
+        self.assertEqual(row["callee"], "repo.find")
+        self.assertEqual(row["operation"], "SELECT")
+        self.assertEqual(row["tables"], ["photos"])
+        self.assertEqual(row["columns"], [])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
+
+    def test_bound_find_one_resolves_select(self):
+        rows = self._rows(
+            "import { getRepository } from \"typeorm\";\n"
+            "const repo = getRepository(Photo);\n"
+            "export async function load() {\n"
+            "  return repo.findOne({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_bound_save_has_unknown_operation(self):
+        rows = self._rows(
+            "import { getRepository } from \"typeorm\";\n"
+            "const repo = getRepository(Photo);\n"
+            "export async function load() {\n"
+            "  return repo.save({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_write_methods_map_operations(self):
+        cases = (("insert", "INSERT"), ("update", "UPDATE"), ("delete", "DELETE"))
+        for method, operation in cases:
+            rows = self._rows(
+                "import { getRepository } from \"typeorm\";\n"
+                "const repo = getRepository(Photo);\n"
+                "export async function load() {\n"
+                f"  return repo.{method}({{}});\n"
+                "}\n"
+            )
+            self.assertEqual(len(rows), 1, method)
+            self.assertEqual(rows[0]["operation"], operation, method)
+            self.assertEqual(rows[0]["tables"], ["photos"], method)
+
+    def test_inline_get_repository_resolves(self):
+        rows = self._rows(
+            "import { getRepository } from \"typeorm\";\n"
+            "export async function load() {\n"
+            "  return getRepository(Photo).findOne({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "getRepository(Photo).findOne")
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_unmapped_entity_is_unknown(self):
+        rows = self._rows(
+            "import { getRepository } from \"typeorm\";\n"
+            "export async function load() {\n"
+            "  return getRepository(Unmapped).find({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_create_produces_no_record(self):
+        rows = self._rows(
+            "import { getRepository } from \"typeorm\";\n"
+            "const repo = getRepository(Photo);\n"
+            "export async function load() {\n"
+            "  return repo.create({});\n"
+            "}\n"
+        )
+        self.assertEqual(rows, [])
+
+    def test_unbound_receiver_produces_no_record(self):
+        rows = self._rows(
+            "export async function load() {\n"
+            "  return other.find({});\n"
+            "}\n"
+        )
+        self.assertEqual(rows, [])
+
+    def test_data_source_get_repository_resolves(self):
+        rows = self._rows(
+            "import { AppDataSource } from \"./data-source\";\n"
+            "const repo = AppDataSource.getRepository(Photo);\n"
+            "export async function load() {\n"
+            "  return repo.find({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
 
 
 if __name__ == "__main__":
