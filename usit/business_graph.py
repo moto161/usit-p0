@@ -55,8 +55,18 @@ def _source_line(record: Mapping[str, Any]) -> int | None:
 
 def _collect_call_chains(edges: list[dict[str, Any]], root_symbol_id: str,
                          symbol_ids: set[str], *, max_depth: int = 8,
-                         max_chains: int = 100) -> tuple[list[dict[str, Any]], bool]:
-    """Expand statically resolved caller→callee evidence with cycle/size guards."""
+                         max_chains: int = 100) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
+    """Expand statically resolved caller→callee evidence with cycle/size guards.
+
+    Returns (chains, truncated, frontier). The frontier names the call
+    edges the caps cut off, so a truncated chain detail is still auditable:
+    a DEPTH_LIMIT entry is an outgoing edge of a node the walk reached at
+    max_depth and did not expand; a CHAIN_LIMIT entry is the edge the walk
+    was about to expand when the chain cap stopped enumeration. Edges the
+    walk never reached are not guessed -- only the triggering edge is
+    recorded for the chain cap. Entries are deduplicated and sorted by
+    (call-site path, line, target, reason).
+    """
     adjacency: dict[str, list[dict[str, Any]]] = {}
     for edge in edges:
         caller = edge.get("caller_symbol_id")
@@ -76,6 +86,27 @@ def _collect_call_chains(edges: list[dict[str, Any]], root_symbol_id: str,
 
     chains: list[dict[str, Any]] = []
     truncated = False
+    frontier: list[dict[str, Any]] = []
+    frontier_seen: set[tuple[str, str, str, int, str]] = set()
+
+    def record_frontier(caller: str, edge: Mapping[str, Any], reason: str) -> None:
+        evidence = edge.get("evidence") or {}
+        key = (
+            caller,
+            str(edge.get("target") or ""),
+            str(evidence.get("path") or ""),
+            int(evidence.get("line") or 0),
+            reason,
+        )
+        if key in frontier_seen:
+            return
+        frontier_seen.add(key)
+        frontier.append({
+            "caller_symbol_id": caller,
+            "target_id": edge.get("target"),
+            "reason": reason,
+            "call_site": {"path": evidence.get("path"), "line": evidence.get("line")},
+        })
 
     def step_for(edge: Mapping[str, Any]) -> dict[str, Any]:
         evidence = edge.get("evidence") or {}
@@ -98,6 +129,7 @@ def _collect_call_chains(edges: list[dict[str, Any]], root_symbol_id: str,
             return
         for edge in outgoing:
             if len(chains) >= max_chains:
+                record_frontier(caller, edge, "CHAIN_LIMIT")
                 truncated = True
                 return
             next_steps = steps + [step_for(edge)]
@@ -110,6 +142,9 @@ def _collect_call_chains(edges: list[dict[str, Any]], root_symbol_id: str,
                 continue
             if len(next_steps) >= max_depth:
                 has_more = bool(adjacency.get(target))
+                if has_more:
+                    for cut_edge in adjacency.get(target, []):
+                        record_frontier(target, cut_edge, "DEPTH_LIMIT")
                 chains.append({"steps": next_steps, "depth_limit_reached": has_more})
                 truncated = truncated or has_more
                 continue
@@ -125,7 +160,13 @@ def _collect_call_chains(edges: list[dict[str, Any]], root_symbol_id: str,
          step.get("target_id") or "")
         for step in chain["steps"]
     ))
-    return chains, truncated
+    frontier.sort(key=lambda item: (
+        str(item.get("call_site", {}).get("path") or ""),
+        int(item.get("call_site", {}).get("line") or 0),
+        str(item.get("target_id") or ""),
+        str(item.get("reason") or ""),
+    ))
+    return chains, truncated, frontier
 
 
 def _reachable_symbols(edges: list[dict[str, Any]], root_symbol_id: str,
@@ -268,6 +309,7 @@ def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[st
                 "resolution_status": handler_status,
             },
             "call_chain": call_steps,
+            "call_chain_truncated_frontier": association.get("call_chain_truncated_frontier", []),
             "database_accesses": db_refs,
             "authorization": {
                 "status": authorization.get("status") or "UNKNOWN",
@@ -613,7 +655,7 @@ def project_business_graph(graph: Mapping[str, Any],
                             if item.get("type") in {"function", "method"}
                             and isinstance(item.get("id"), str)
                         }
-                        call_chains, chains_truncated = _collect_call_chains(
+                        call_chains, chains_truncated, chain_frontier = _collect_call_chains(
                             edges, target["id"], symbol_ids,
                         )
                         handler_call_chains += len(call_chains)
@@ -628,7 +670,9 @@ def project_business_graph(graph: Mapping[str, Any],
                             "downstream_call_evidence": downstream,
                             "call_chain_evidence": call_chains,
                             "call_chain_truncated": chains_truncated,
+                            "call_chain_truncated_frontier": chain_frontier,
                             "call_chain_max_depth": 8,
+                            "call_chain_max_chains": 100,
                         }
                     relation = {
                         "source": node_id, "target": target["id"], "type": "references",
