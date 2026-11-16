@@ -1513,6 +1513,21 @@ def project_business_graph(graph: Mapping[str, Any],
             # Accesses exist but no table was recorded at all.
             entity_linkage = "NOT_LINKED_OR_UNKNOWN"
         stages = flow.get("stage_status") if isinstance(flow.get("stage_status"), Mapping) else {}
+        # R5-2: surface the call-chain truncation frontier in the view
+        # (R7-2 parallel for unlinked tables). The frontier is copied
+        # from the flow as-is; the coverage flag says whether the
+        # displayed chain is complete.
+        frontier = flow.get("call_chain_truncated_frontier")
+        if not isinstance(frontier, list):
+            frontier = []
+        unlinked_requirements = [
+            "PRD feature ↔ endpoint mapping: NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION",
+            "Runtime page reachability and event execution: UNKNOWN",
+            "Executed test coverage: NOT_MEASURED",
+        ]
+        if frontier:
+            unlinked_requirements.append(
+                "Call chain truncated at analysis limit; calls beyond the frontier were not expanded.")
         identity = {"endpoint_id": endpoint_id, "method": flow.get("method"), "endpoint": flow.get("endpoint"), "source": flow.get("source")}
         business_function_views.append({
             "business_function_id": _stable_id("business-function-view", identity),
@@ -1521,16 +1536,16 @@ def project_business_graph(graph: Mapping[str, Any],
             "source": flow.get("source"), "frontend_entrypoints": frontend,
             "frontend_entrypoint_count": len(frontend), "handler": flow.get("handler"),
             "call_chain": flow.get("call_chain", []), "database_accesses": flow.get("database_accesses", []),
+            "call_chain_truncated_frontier": frontier,
             "documented_entity_links": entity_links,
             "unlinked_database_tables": unlinked_tables,
             "authorization": flow.get("authorization"),
             "identity_resource_flow": flow.get("identity_resource_flow", []), "stage_status": dict(stages),
             "coverage": {"frontend_static_linkage": "LINKED" if frontend else "NOT_LINKED",
                          "database_entity_linkage": entity_linkage,
+                         "call_chain_completeness": "TRUNCATED" if frontier else "COMPLETE",
                          "test_design": "NOT_ASSESSED_BY_GRAPH", "test_execution": "NOT_MEASURED"},
-            "unlinked_requirements": ["PRD feature ↔ endpoint mapping: NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION",
-                                      "Runtime page reachability and event execution: UNKNOWN",
-                                      "Executed test coverage: NOT_MEASURED"],
+            "unlinked_requirements": unlinked_requirements,
             "confidence": "STATIC_INFERENCE", "verification_status": "NOT_VERIFIED",
         })
     business_function_views.sort(key=lambda item: (

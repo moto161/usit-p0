@@ -1434,6 +1434,133 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(view["unlinked_database_tables"], [])
         self.assertEqual(view["coverage"]["database_entity_linkage"], "NOT_LINKED_OR_UNKNOWN")
 
+    def _deep_chain_view(self):
+        source = graph()
+        handler = "symbol:server/routes/photos.js#uploadPhoto:35"
+        symbols = [handler] + [
+            f"symbol:module_{index}.py#step_{index}:{index + 1}"
+            for index in range(9)
+        ]
+        for index, symbol in enumerate(symbols):
+            path = "server/routes/photos.js" if index == 0 else f"module_{index}.py"
+            name = "uploadPhoto" if index == 0 else f"step_{index - 1}"
+            source["nodes"].append({
+                "id": symbol, "type": "function", "label": name,
+                "evidence": {"path": path, "line": 35 if index == 0 else index},
+            })
+        for index in range(len(symbols) - 1):
+            path = "server/routes/photos.js" if index == 0 else f"module_{index}.py"
+            source["edges"].append({
+                "source": "file:" + path, "target": symbols[index + 1],
+                "type": "calls", "caller_symbol_id": symbols[index],
+                "resolution_status": "RESOLVED", "resolved": True,
+                "evidence": {"path": path, "line": index + 40},
+                "method": "typescript-compiler-api", "confidence": "high",
+            })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        return _function_view(result)
+
+    def test_function_view_surfaces_depth_truncation_frontier(self):
+        view = self._deep_chain_view()
+        frontier = view["call_chain_truncated_frontier"]
+        self.assertEqual(len(frontier), 1)
+        self.assertEqual(frontier[0]["reason"], "DEPTH_LIMIT")
+        self.assertEqual(frontier[0]["caller_symbol_id"], "symbol:module_7.py#step_7:8")
+        self.assertEqual(frontier[0]["target_id"], "symbol:module_8.py#step_8:9")
+        self.assertEqual(frontier[0]["call_site"], {"path": "module_8.py", "line": 48})
+        self.assertEqual(view["coverage"]["call_chain_completeness"], "TRUNCATED")
+        self.assertIn("Call chain truncated at analysis limit; calls beyond the frontier were not expanded.",
+                      view["unlinked_requirements"])
+
+    def test_function_view_surfaces_chain_count_truncation_frontier(self):
+        source = graph()
+        handler = "symbol:server/routes/photos.js#uploadPhoto:35"
+        source["nodes"].append({
+            "id": handler, "type": "function", "label": "uploadPhoto",
+            "evidence": {"path": "server/routes/photos.js", "line": 35},
+        })
+        for index in range(101):
+            leaf = f"symbol:leaf.py#leaf_{index}:1"
+            source["nodes"].append({
+                "id": leaf, "type": "function", "label": f"leaf_{index}",
+                "evidence": {"path": "leaf.py", "line": 1},
+            })
+            source["edges"].append({
+                "source": "file:server/routes/photos.js", "target": leaf,
+                "type": "calls", "caller_symbol_id": handler,
+                "resolution_status": "RESOLVED", "resolved": True,
+                "evidence": {"path": "server/routes/photos.js", "line": 40 + index},
+                "method": "typescript-compiler-api", "confidence": "high",
+            })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        view = _function_view(result)
+        frontier = view["call_chain_truncated_frontier"]
+        self.assertEqual(len(frontier), 1)
+        self.assertEqual(frontier[0]["reason"], "CHAIN_LIMIT")
+        self.assertEqual(frontier[0]["caller_symbol_id"], handler)
+        self.assertEqual(frontier[0]["target_id"], "symbol:leaf.py#leaf_100:1")
+        self.assertEqual(frontier[0]["call_site"],
+                         {"path": "server/routes/photos.js", "line": 140})
+        self.assertEqual(view["coverage"]["call_chain_completeness"], "TRUNCATED")
+
+    def test_function_view_reports_complete_chain_without_truncation(self):
+        source = graph()
+        handler = "symbol:server/routes/photos.js#uploadPhoto:35"
+        service = "symbol:server/services/photo_service.js#savePhoto:8"
+        repository = "symbol:server/repos/photo_repo.js#insert:12"
+        source["nodes"].extend([
+            {"id": handler, "type": "function", "label": "uploadPhoto",
+             "evidence": {"path": "server/routes/photos.js", "line": 35}},
+            {"id": service, "type": "function", "label": "savePhoto",
+             "evidence": {"path": "server/services/photo_service.js", "line": 8}},
+            {"id": repository, "type": "function", "label": "insert",
+             "evidence": {"path": "server/repos/photo_repo.js", "line": 12}},
+        ])
+        def call(caller, target, path, line):
+            return {
+                "source": "file:" + path, "target": target, "type": "calls",
+                "caller_symbol_id": caller, "resolution_status": "RESOLVED",
+                "resolved": True, "evidence": {"path": path, "line": line},
+                "target_location": {"path": target.split("#")[0].removeprefix("symbol:")},
+                "method": "typescript-compiler-api", "confidence": "high",
+            }
+        source["edges"].extend([
+            call(handler, service, "server/routes/photos.js", 39),
+            call(service, repository, "server/services/photo_service.js", 10),
+        ])
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        view = _function_view(result)
+        self.assertEqual(view["call_chain_truncated_frontier"], [])
+        self.assertEqual(view["coverage"]["call_chain_completeness"], "COMPLETE")
+        self.assertEqual(len(view["unlinked_requirements"]), 3)
+        self.assertNotIn("Call chain truncated at analysis limit; calls beyond the frontier were not expanded.",
+                         view["unlinked_requirements"])
+
+    def test_function_view_with_no_calls_reports_complete_chain(self):
+        source = graph()
+        handler = "symbol:server/routes/photos.js#uploadPhoto:35"
+        source["nodes"].append({
+            "id": handler, "type": "function", "label": "uploadPhoto",
+            "evidence": {"path": "server/routes/photos.js", "line": 35},
+        })
+        result = project_business_graph(source, {"endpoints": [{
+            "method": "POST", "path": "/photos", "source": "server/routes/photos.js:20",
+            "line": 20, "handler_reference": "uploadPhoto",
+        }]})
+        view = _function_view(result)
+        self.assertEqual(view["call_chain"], [])
+        self.assertEqual(view["call_chain_truncated_frontier"], [])
+        self.assertEqual(view["coverage"]["call_chain_completeness"], "COMPLETE")
+
 
     def test_propagates_python_identity_source_to_exact_resolved_call_parameter(self):
         source = graph()
