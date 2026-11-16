@@ -8,6 +8,7 @@ from usit.database_access import extract_database_accesses
 from usit.identity_evidence import extract_identity_evidence
 from usit.js_ts_parser import analyze_js_ts_project, ts_function_owners
 from usit.scanner import discover_files
+from usit.vue_parser import vue_script_for_adapter
 
 
 class IdentityEvidenceTests(unittest.TestCase):
@@ -3244,6 +3245,262 @@ class TsNamespaceImportReturnPropagationTests(unittest.TestCase):
             "  const uid = get_uid(req);\n"
             "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
             "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
+class VueFunctionOwnershipTests(unittest.TestCase):
+    def _rows_files(self, files):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                (root / name).write_text(source, encoding="utf-8")
+            # Memory mode, exactly like the scanner: a `.vue` file joins
+            # through its line-padded `<script>` text.
+            js_ts_source = {}
+            for name, source in files.items():
+                if name.endswith(".vue"):
+                    script = vue_script_for_adapter(source)
+                    if script is not None:
+                        js_ts_source[name] = script
+                elif Path(name).suffix.lower() in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+                    js_ts_source[name] = source
+            parsed = analyze_js_ts_project(root, [], js_ts_source=js_ts_source)
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners)
+
+    def _rows(self, source, filename="App.vue"):
+        return self._rows_files({filename: source})
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _SETUP = (
+        "<template>\n"
+        "  <button @click=\"load\">Load</button>\n"
+        "</template>\n"
+        "<script setup lang=\"ts\">\n"
+        "function get_uid(req: any) {\n"
+        "  return req.user.id;\n"
+        "}\n"
+        "async function load(req: any) {\n"
+        "  const uid = get_uid(req);\n"
+        "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+        "}\n"
+        "</script>\n"
+    )
+
+    _AUTH_VUE = (
+        "<template>\n"
+        "  <div>Auth</div>\n"
+        "</template>\n"
+        "<script setup lang=\"ts\">\n"
+        "export function get_uid(req: any) {\n"
+        "  return req.user.id;\n"
+        "}\n"
+        "</script>\n"
+    )
+
+    def test_script_setup_top_level_function_binds(self):
+        rows = self._rows(self._SETUP)
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 10)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [6, 9, 10])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "App.vue")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:App.vue#load:8")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_template_braces_do_not_corrupt_ownership(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <div>{{ user.name }}</div>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script setup lang=\"ts\">\n"
+            "function get_uid(req: any) {\n"
+            "  return req.user.id;\n"
+            "}\n"
+            "async function load(req: any) {\n"
+            "  const uid = get_uid(req);\n"
+            "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "}\n"
+            "</script>\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 11)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [7, 10, 11])
+        self.assertEqual(binding["owner_symbol_id"], "symbol:App.vue#load:9")
+
+    def test_style_braces_do_not_corrupt_ownership(self):
+        rows = self._rows(
+            self._SETUP
+            + "<style>\n"
+            ".btn { color: red; }\n"
+            "</style>\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 10)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [6, 9, 10])
+
+    def test_plain_script_top_level_function_binds(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "export function get_uid(req: any) {\n"
+            "  return req.user.id;\n"
+            "}\n"
+            "export function load(req: any) {\n"
+            "  const uid = get_uid(req);\n"
+            "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "}\n"
+            "</script>\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 10)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [6, 9, 10])
+        self.assertEqual(binding["owner_symbol_id"], "symbol:App.vue#load:8")
+
+    def test_named_import_from_ts_file_binds(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "App.vue": (
+                "<template>\n"
+                "  <button @click=\"load\">Load</button>\n"
+                "</template>\n"
+                "<script setup lang=\"ts\">\n"
+                "import { get_uid } from \"./auth\";\n"
+                "async function load(req: any) {\n"
+                "  const uid = get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+                "</script>\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 8)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 7, 8])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_named_import_from_vue_file_binds(self):
+        rows = self._rows_files({
+            "auth.vue": self._AUTH_VUE,
+            "App.vue": (
+                "<template>\n"
+                "  <button @click=\"load\">Load</button>\n"
+                "</template>\n"
+                "<script setup lang=\"ts\">\n"
+                "import { get_uid } from \"./auth\";\n"
+                "async function load(req: any) {\n"
+                "  const uid = get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+                "</script>\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 8)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [6, 7, 8])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.vue")
+
+    def test_named_import_from_vue_file_with_extension_binds(self):
+        rows = self._rows_files({
+            "auth.vue": self._AUTH_VUE,
+            "App.vue": (
+                "<template>\n"
+                "  <button @click=\"load\">Load</button>\n"
+                "</template>\n"
+                "<script setup lang=\"ts\">\n"
+                "import { get_uid } from \"./auth.vue\";\n"
+                "async function load(req: any) {\n"
+                "  const uid = get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+                "</script>\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 8)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.vue")
+
+    def test_namespace_import_from_vue_file_binds(self):
+        rows = self._rows_files({
+            "auth.vue": self._AUTH_VUE,
+            "App.vue": (
+                "<template>\n"
+                "  <button @click=\"load\">Load</button>\n"
+                "</template>\n"
+                "<script setup lang=\"ts\">\n"
+                "import * as auth from \"./auth\";\n"
+                "async function load(req: any) {\n"
+                "  const uid = auth.get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+                "</script>\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 8)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [6, 7, 8])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.vue")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_vue_without_script_produces_no_records(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+        )
+        self.assertEqual(rows, [])
+
+    def test_options_api_methods_do_not_bind(self):
+        # Out of scope for V2 (only `function` declarations qualify; the
+        # Options API `methods:` object literal has no class profile): the
+        # adapter reports the methods and their owners, but no identity
+        # profile exists for them. A pseudo-class mechanism is V3.
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "export default {\n"
+            "  methods: {\n"
+            "    get_uid(req: any) {\n"
+            "      return req.user.id;\n"
+            "    },\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
         )
         self.assertEqual(self._direct_bindings(rows), [])
 

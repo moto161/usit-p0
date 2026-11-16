@@ -36,6 +36,7 @@ from .database_access import extract_database_accesses
 from .identity_evidence import extract_identity_evidence
 from .js_ts_parser import SOURCE_EXTENSIONS, analyze_js_ts_project, ts_function_owners
 from .permission_evidence import extract_authorization_evidence
+from .vue_parser import vue_script_for_adapter
 
 SCHEMA_VERSION = "usit-business-semantics-v1"
 
@@ -403,16 +404,23 @@ class BusinessSemanticsAdapter:
         """P3: line -> function-symbol map for JS/TS files, via the TS parser.
 
         Memory mode over the already-read sources (the same shape the scanner
-        uses). Vue files are excluded on purpose (P3 is TS/JS only; a Vue
-        follow-up reuses the scanner's line-padded script wiring). Any parser
-        failure — unavailable parser, adapter error, no JS/TS files — degrades
-        to an empty map, so identity records stay UNKNOWN exactly as before.
+        uses). V2: Vue files join through the scanner's line-padded script
+        wiring, so their `<script>` functions own the same lines the
+        identity evidence scans. Any parser failure — unavailable parser,
+        adapter error, no JS/TS files — degrades to an empty map, so
+        identity records stay UNKNOWN exactly as before.
         """
-        js_ts_source = {
-            rel: text for rel, text in code_blob_by_file.items()
-            if Path(rel).suffix.lower() in SOURCE_EXTENSIONS
-            and Path(rel).suffix.lower() != ".vue"
-        }
+        js_ts_source = {}
+        for rel, text in code_blob_by_file.items():
+            suffix = Path(rel).suffix.lower()
+            if suffix not in SOURCE_EXTENSIONS:
+                continue
+            if suffix == ".vue":
+                script = vue_script_for_adapter(text)
+                if script is not None:
+                    js_ts_source[rel] = script
+            else:
+                js_ts_source[rel] = text
         if not js_ts_source:
             return {}
         try:

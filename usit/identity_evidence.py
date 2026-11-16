@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .python_resolver import _module_for_path, _package_for_module, _relative_module
+from .vue_parser import vue_script_for_adapter
 
 _TRUSTED = re.compile(
     r"\b(?:req|request)\.(?:user|auth\.user)\.(?:id|userId)\b"
@@ -930,7 +931,7 @@ def _ts_top_level_function_returns(path: str, source: str) -> dict[str, list[tup
     Arrow-function consts, function expressions and object methods are
     out of scope. A function defined twice merges its returns.
     """
-    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
     functions: dict[str, list[tuple[int, str]]] = {}
     # Frames: kind "function" | "nested", interior brace depth, name,
@@ -1012,7 +1013,7 @@ def _ts_top_level_function_profiles(path: str, source: str) -> dict[str, dict[st
     and dropped. The profile carries the bare function name and the
     defining file, for propagation records.
     """
-    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
     returns_map = _ts_top_level_function_returns(path, source)
     helpers: dict[str, dict[str, Any]] = {}
@@ -1054,7 +1055,7 @@ def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str],
     delegating through ``super`` need the project-wide
     ``_ts_all_identity_return_methods``.
     """
-    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
     methods, _ranges, _candidates, _names, _defined = _ts_class_scan(path, source)
     return _ts_direct_identity_profiles(path, methods)
@@ -1147,7 +1148,7 @@ def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
     inside a nested function or class definition within that method are
     excluded: their ``this`` does not refer to the outer instance.
     """
-    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
     _methods, ranges, _candidates, _names, _defined = _ts_class_scan(path, source)
     return ranges
@@ -1202,7 +1203,7 @@ def _ts_import_bindings(path: str, source: str) -> dict[str, tuple[str, str]]:
     dropped. Multi-line imports are joined until the ``from "..."``
     part is complete.
     """
-    if not path.lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue")):
         return {}
     bindings: dict[str, tuple[str, str]] = {}
     ambiguous: set[str] = set()
@@ -1251,7 +1252,7 @@ def _ts_namespace_imports(path: str, source: str) -> dict[str, str]:
     Multi-line imports are joined until the ``from \"...\"`` part is
     complete, like ``_ts_import_bindings``.
     """
-    if not path.lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue")):
         return {}
     bindings: dict[str, str] = {}
     ambiguous: set[str] = set()
@@ -1351,10 +1352,15 @@ def _ts_resolve_import(specifier: str, from_path: str,
     if not specifier.startswith(("./", "../")):
         return None
     base = posixpath.normpath(posixpath.join(posixpath.dirname(from_path), specifier))
-    for candidate in [base + ext for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")]:
+    # V2: an explicit `.vue` suffix resolves directly when the file is in
+    # the project (the extension candidates below would look for
+    # `<name>.vue.ts` instead).
+    if base in code_by_file:
+        return base
+    for candidate in [base + ext for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue")]:
         if candidate in code_by_file:
             return candidate
-    for candidate in [base + "/index" + ext for ext in (".ts", ".tsx", ".js", ".jsx")]:
+    for candidate in [base + "/index" + ext for ext in (".ts", ".tsx", ".js", ".jsx", ".vue")]:
         if candidate in code_by_file:
             return candidate
     return None
@@ -1492,7 +1498,7 @@ def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, st
     defined in the same file; any other assignment shape, a different
     class, or a class not defined in this file disqualifies it.
     """
-    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
     _methods, _ranges, candidates, class_names, _defined = _ts_class_scan(path, source)
     bindings: dict[tuple[str, str], str] = {}
@@ -1756,6 +1762,17 @@ def extract_identity_evidence(code_by_file: dict[str, str],
     identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
     bare_call = re.compile(r"([A-Za-z_$][\w$]*)\s*\(.*\)$")
     attr_call = re.compile(r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*\(.*\)$")
+    # V2: a `.vue` file is scanned through its line-padded `<script>` text
+    # (template/style braces never reach the brace-depth tracking), so every
+    # TS precompute and the per-file line loop below use the effective
+    # source. Padding keeps line numbers equal to the file's, and records
+    # still carry the `.vue` path. A `.vue` file without a `<script>` block
+    # scans as empty. Python precomputes keep the original text.
+    effective_code_by_file = {
+        file_path: (vue_script_for_adapter(file_source) or "")
+        if file_path.lower().endswith(".vue") else file_source
+        for file_path, file_source in code_by_file.items()
+    }
     module_index = _python_module_index(code_by_file)
     same_file_helpers = {
         file_path: _python_identity_return_helpers(file_path, file_source)
@@ -1779,32 +1796,32 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
-    ts_same_file_methods = _ts_all_identity_return_methods(code_by_file)
+    ts_same_file_methods = _ts_all_identity_return_methods(effective_code_by_file)
     ts_same_file_functions = {
         file_path: _ts_top_level_function_profiles(file_path, file_source)
-        for file_path, file_source in code_by_file.items()
+        for file_path, file_source in effective_code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
-    ts_named_function_bindings = _ts_named_function_bindings(code_by_file, ts_same_file_functions)
-    ts_namespace_import_bindings = _ts_namespace_import_bindings(code_by_file)
+    ts_named_function_bindings = _ts_named_function_bindings(effective_code_by_file, ts_same_file_functions)
+    ts_namespace_import_bindings = _ts_namespace_import_bindings(effective_code_by_file)
     ts_same_file_ranges = {
         file_path: _ts_class_method_ranges(file_path, file_source)
-        for file_path, file_source in code_by_file.items()
+        for file_path, file_source in effective_code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
     ts_same_file_instance = {
         file_path: _ts_instance_attribute_classes(file_path, file_source)
-        for file_path, file_source in code_by_file.items()
+        for file_path, file_source in effective_code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
-    ts_cross_instance_bindings = _ts_cross_file_instance_bindings(code_by_file)
+    ts_cross_instance_bindings = _ts_cross_file_instance_bindings(effective_code_by_file)
     ts_defined_methods = {
         file_path: _ts_class_scan(file_path, file_source)[4]
-        for file_path, file_source in code_by_file.items()
+        for file_path, file_source in effective_code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
-    ts_base_classes = _ts_base_classes(code_by_file)
-    for path, source in sorted(code_by_file.items()):
+    ts_base_classes = _ts_base_classes(effective_code_by_file)
+    for path, source in sorted(effective_code_by_file.items()):
         if path.lower().endswith(".py"):
             function_owners = _python_function_owners(path, source)
             imported_helpers = _python_imported_identity_helpers(
