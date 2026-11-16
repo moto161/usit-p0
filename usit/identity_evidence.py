@@ -436,6 +436,14 @@ _TS_METHOD_RE = re.compile(
     r"([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\((?:[^(){}]|\([^()]*\))*\)\s*(?::\s*[^{]+?)?\s*\{"
 )
 _TS_RETURN_RE = re.compile(r"^\s*return\s+([^;]+?)\s*;?\s*$")
+_TS_FIELD_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|readonly|declare|override|abstract|static)\s+)*"
+    r"([A-Za-z_$][\w$]*)\s*(?:!)?\s*(?::\s*[^=;{]+?)?\s*=\s*(.+?)\s*;?\s*$"
+)
+_TS_THIS_ASSIGN_RE = re.compile(
+    r"^\s*this\.([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+?)\s*;?\s*$"
+)
+_TS_NEW_RE = re.compile(r"^new\s+([A-Za-z_$][\w$]*)\s*(?:\(|;|$)")
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
 
@@ -455,14 +463,19 @@ def _strip_ts_line(line: str) -> str:
 
 
 def _ts_class_scan(path: str, source: str) -> tuple[
-        dict[tuple[str, str], list[tuple[int, str]]], dict[int, str]]:
+        dict[tuple[str, str], list[tuple[int, str]]], dict[int, str],
+        dict[tuple[str, str], set[str | None]], set[str]]:
     """One brace-counting pass over a TS/JS file.
 
-    Returns ``(methods, ranges)``: ``methods`` maps ``(class, method)``
-    pairs directly defined in a top-level class to their direct
-    ``(line, expression)`` returns; ``ranges`` maps line numbers to
-    their enclosing top-level class name, for lines inside such a
-    method. Returns inside nested functions or classes are excluded
+    Returns ``(methods, ranges, attr_candidates, class_names)``:
+    ``methods`` maps ``(class, method)`` pairs directly defined in a
+    top-level class to their direct ``(line, expression)`` returns;
+    ``ranges`` maps line numbers to their enclosing top-level class
+    name, for lines inside such a method; ``attr_candidates`` maps
+    ``(class, attribute)`` pairs to the set of classes constructed for
+    them (``None`` for a non-construction binding, which disqualifies
+    the attribute); ``class_names`` is the set of top-level class
+    names. Returns inside nested functions or classes are excluded
     from both. A method header must open its body on the same line;
     anything else fails closed (no method, no returns). Only the
     direct returns are collected -- whether they qualify as identity
@@ -470,14 +483,17 @@ def _ts_class_scan(path: str, source: str) -> tuple[
     """
     methods: dict[tuple[str, str], list[tuple[int, str]]] = {}
     ranges: dict[int, str] = {}
+    attr_candidates: dict[tuple[str, str], set[str | None]] = {}
+    class_names: set[str] = set()
     # Frames: kind "class" | "method" | "nested", interior brace depth,
     # class name, method name. "nested" covers nested functions and
     # nested classes, whose lines and returns never belong to the outer
-    # method.
+    # method; its "flavor" ("arrow" | "function" | "class") records
+    # whether the nested body captures the outer ``this``.
     stack: list[dict[str, Any]] = []
     depth = 0
     in_template = False
-    pending_nested = False
+    pending_nested: str | None = None
     for line_no, raw in enumerate(source.splitlines(), 1):
         # A multi-line template literal: skip detection and returns on
         # its inner lines, but keep counting braces like the rest of
@@ -490,7 +506,7 @@ def _ts_class_scan(path: str, source: str) -> tuple[
         opens = stripped.count("{")
         closes = stripped.count("}")
         was_pending_nested = pending_nested
-        pending_nested = False
+        pending_nested = None
 
         def interior(match_end: int) -> int:
             prefix = stripped[:match_end]
@@ -500,21 +516,26 @@ def _ts_class_scan(path: str, source: str) -> tuple[
             class_frame = next((f for f in reversed(stack) if f["kind"] == "class"), None)
             method_frame = next((f for f in reversed(stack) if f["kind"] == "method"), None)
             nested = any(f["kind"] == "nested" for f in stack)
+            nested_this = not any(
+                f["kind"] == "nested" and f.get("flavor") in ("function", "class")
+                for f in stack)
             if class_frame is None and depth == 0:
                 match = _TS_CLASS_RE.match(stripped)
                 if match and "{" in stripped:
                     stack.append({"kind": "class", "depth": interior(stripped.index("{") + 1),
                                   "class": match.group(1), "method": None})
                     class_frame = stack[-1]
+                    class_names.add(match.group(1))
             elif method_frame is None and class_frame is not None and not nested:
                 match = _TS_METHOD_RE.match(stripped)
                 if match:
                     name = match.group(1)
                     is_static = "static" in re.findall(r"[A-Za-z_$][\w$]*", stripped[:match.start(1)])
-                    if name != "constructor" and not is_static:
+                    if not is_static:
                         stack.append({"kind": "method",
                                       "depth": interior(match.end()),
                                       "class": class_frame["class"], "method": name,
+                                      "constructor": name == "constructor",
                                       "returns": []})
                         method_frame = stack[-1]
             if method_frame is not None and class_frame is not None and "{" in stripped:
@@ -524,35 +545,70 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                 # own depth and must not shadow the whole method.
                 brace_depth = interior(stripped.index("{") + 1)
                 if brace_depth > method_frame["depth"]:
-                    if _TS_CLASS_RE.match(stripped) or _TS_NESTED_FN_RE.search(stripped):
+                    flavor: str | None = None
+                    if _TS_CLASS_RE.match(stripped):
+                        flavor = "class"
+                    elif _TS_NESTED_FN_RE.search(stripped):
+                        flavor = ("arrow" if "=>" in stripped[:stripped.index("{")]
+                                  else "function")
+                    elif was_pending_nested is not None:
+                        flavor = was_pending_nested
+                    if flavor is not None:
                         stack.append({"kind": "nested", "depth": brace_depth,
-                                      "class": None, "method": None})
+                                      "class": None, "method": None, "flavor": flavor})
                         nested = True
-                    elif was_pending_nested:
-                        stack.append({"kind": "nested", "depth": brace_depth,
-                                      "class": None, "method": None})
-                        nested = True
+                        nested_this = flavor == "arrow"
             if method_frame is not None and not nested:
                 ranges[line_no] = method_frame["class"]
                 ret = _TS_RETURN_RE.match(stripped)
                 if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
                     method_frame["returns"].append((line_no, ret.group(1).strip()))
+            if method_frame is not None and nested_this:
+                # T2: this.<attr> = new <Class>(...) inside a method (an
+                # arrow body's `this` still refers to the outer instance;
+                # a nested `function` or class body does not). Any other
+                # assignment shape records None and disqualifies the
+                # attribute, exactly like the Python rule.
+                assign = _TS_THIS_ASSIGN_RE.match(stripped)
+                if assign:
+                    constructed = _TS_NEW_RE.match(assign.group(2))
+                    attr_candidates.setdefault(
+                        (method_frame["class"], assign.group(1)), set()).add(
+                        constructed.group(1) if constructed else None)
+            if (class_frame is not None and method_frame is None and not nested
+                    and depth == class_frame["depth"]):
+                # T2: a class field declaration with an initializer, e.g.
+                # private helper = new AuthHelper();. The depth guard keeps
+                # body lines of a method whose header the scanner failed to
+                # recognize from being read as field declarations. A static
+                # field is not an instance attribute. A non-new initializer
+                # records None and disqualifies the attribute.
+                field = _TS_FIELD_RE.match(stripped)
+                if field:
+                    is_static = "static" in re.findall(
+                        r"[A-Za-z_$][\w$]*", stripped[:field.start(1)])
+                    if not is_static:
+                        constructed = _TS_NEW_RE.match(field.group(2))
+                        attr_candidates.setdefault(
+                            (class_frame["class"], field.group(1)), set()).add(
+                            constructed.group(1) if constructed else None)
             if method_frame is not None and not nested:
                 # An arrow or function header whose body brace lands on the
                 # next line (Allman style): remember it for exactly one line.
-                if (re.search(r"=>\s*$", stripped)
-                        or re.search(r"\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\([^;{]*\)\s*$", stripped)):
-                    pending_nested = True
+                if re.search(r"=>\s*$", stripped):
+                    pending_nested = "arrow"
+                elif re.search(r"\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\([^;{]*\)\s*$", stripped):
+                    pending_nested = "function"
         depth += opens - closes
         while stack and stack[-1]["depth"] > depth:
             frame = stack.pop()
-            if frame["kind"] == "method" and frame["returns"]:
+            if frame["kind"] == "method" and frame["returns"] and not frame.get("constructor"):
                 methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
     while stack:
         frame = stack.pop()
-        if frame["kind"] == "method" and frame["returns"]:
+        if frame["kind"] == "method" and frame["returns"] and not frame.get("constructor"):
             methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
-    return methods, ranges
+    return methods, ranges, attr_candidates, class_names
 
 
 def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
@@ -569,7 +625,7 @@ def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str],
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
         return {}
-    methods, _ranges = _ts_class_scan(path, source)
+    methods, _ranges, _candidates, _names = _ts_class_scan(path, source)
     helpers: dict[tuple[str, str], dict[str, Any]] = {}
     for key, returns in methods.items():
         profile: dict[str, Any] | None = None
@@ -605,8 +661,34 @@ def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
         return {}
-    _methods, ranges = _ts_class_scan(path, source)
+    _methods, ranges, _candidates, _names = _ts_class_scan(path, source)
     return ranges
+
+
+def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
+    """Map (class, attribute) pairs to the class constructed for them, for TS/JS.
+
+    The TS mirror of ``_python_instance_attribute_classes``: for each
+    top-level class, collect ``this.<attr> = new <Class>(...)``
+    assignments across its directly defined methods (including the
+    constructor and nested arrow functions, whose bodies capture
+    ``this``; nested ``function`` declarations and nested classes do
+    not) plus class field declarations with a ``new`` initializer
+    (``private helper = new AuthHelper();``). An attribute qualifies
+    only when every such binding constructs the same top-level class
+    defined in the same file; any other assignment shape, a different
+    class, or a class not defined in this file disqualifies it.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+        return {}
+    _methods, _ranges, candidates, class_names = _ts_class_scan(path, source)
+    bindings: dict[tuple[str, str], str] = {}
+    for key, constructed in candidates.items():
+        if len(constructed) == 1:
+            only = next(iter(constructed))
+            if only is not None and only in class_names:
+                bindings[key] = only
+    return bindings
 
 
 def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
@@ -892,6 +974,11 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
+    ts_same_file_instance = {
+        file_path: _ts_instance_attribute_classes(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
             function_owners = _python_function_owners(path, source)
@@ -906,6 +993,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             instance_bindings = same_file_instance_bindings.get(path, {})
             ts_method_helpers = {}
             ts_class_ranges = {}
+            ts_instance_bindings = {}
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
@@ -916,6 +1004,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             instance_bindings = {}
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
+            ts_instance_bindings = ts_same_file_instance.get(path, {})
         else:
             function_owners = {}
             return_helpers = {}
@@ -925,6 +1014,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             instance_bindings = {}
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
+            ts_instance_bindings = ts_same_file_instance.get(path, {})
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -1111,7 +1201,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                          {"path": path, "line": line_no, "variable": name}
                                      ]}
                 elif (return_helpers or bindings or method_helpers
-                        or instance_bindings or ts_method_helpers):
+                        or instance_bindings or ts_method_helpers
+                        or ts_instance_bindings):
                     # P4/P5: one hop through a same-file or from-imported
                     # helper, e.g. uid = get_uid(req). Only a bare call
                     # counts: no method call, no await, no attribute access
@@ -1142,6 +1233,15 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                 enclosing = ts_class_ranges.get(line_no)
                                 if enclosing is not None:
                                     helper = ts_method_helpers.get((enclosing, parts[1]))
+                            elif len(parts) == 3 and parts[0] == "this":
+                                # T2: one hop through an instance attribute
+                                # bound in the enclosing TS/JS class, e.g.
+                                # uid = this.helper.get_uid(req).
+                                enclosing = ts_class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    target = ts_instance_bindings.get((enclosing, parts[1]))
+                                    if target is not None:
+                                        helper = ts_method_helpers.get((target, parts[2]))
                             elif len(parts) == 3 and parts[0] == "self":
                                 # P8: one hop through an instance attribute
                                 # bound in the enclosing class, e.g.
