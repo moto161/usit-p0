@@ -771,6 +771,35 @@ _TYPEORM_INLINE_CALL = re.compile(
     r"(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.)?getRepository\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\.\s*(" + _TYPEORM_METHOD_ALTS + r")\s*\("
 )
 
+_PRISMA_METHODS = ("findMany", "findFirst", "findUnique", "findFirstOrThrow",
+                   "findUniqueOrThrow", "count", "aggregate", "groupBy",
+                   "create", "createMany", "update", "updateMany",
+                   "delete", "deleteMany", "upsert")
+# Prisma Client model methods by operation. upsert() is an insert-or-update:
+# its operation cannot be determined statically, so it maps to UNKNOWN
+# while the table is still known. $queryRaw / $executeRaw / $transaction /
+# $connect / $disconnect are not model methods and are deliberately absent.
+_PRISMA_OPERATION = {
+    "findMany": "SELECT", "findFirst": "SELECT", "findUnique": "SELECT",
+    "findFirstOrThrow": "SELECT", "findUniqueOrThrow": "SELECT",
+    "count": "SELECT", "aggregate": "SELECT", "groupBy": "SELECT",
+    "upsert": "UNKNOWN",
+    "create": "INSERT", "createMany": "INSERT",
+    "update": "UPDATE", "updateMany": "UPDATE",
+    "delete": "DELETE", "deleteMany": "DELETE",
+}
+_PRISMA_MODEL = re.compile(
+    r"\bmodel\s+([A-Za-z_$][\w$]*)\s*\{([^}]*)\}"
+)
+_PRISMA_MAP = re.compile(
+    r"@@map\(\s*(?:\"([^\"]+)\"|'([^']+)')\s*\)"
+)
+_PRISMA_NEW_CLIENT = re.compile(r"\bnew\s+PrismaClient\s*\(")
+_PRISMA_METHOD_ALTS = "|".join(_PRISMA_METHODS)
+_PRISMA_CALL = re.compile(
+    r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.([A-Za-z_$][\w$]*)\.(" + _PRISMA_METHOD_ALTS + r")\s*\("
+)
+
 
 def _django_objects_base(node: ast.Call) -> tuple[str, str] | None:
     """Return (model, method) for a ``Model.objects.<method>(...)`` call.
@@ -1195,7 +1224,38 @@ def typeorm_entity_tables(code_by_file: dict[str, str]) -> dict[str, str]:
             if len(tables) == 1}
 
 
-def _extract_js(source: str, typeorm_tables: dict[str, str] | None = None) -> list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]]:
+def prisma_model_tables(code_by_file: dict[str, str]) -> dict[str, str]:
+    """Map Prisma model names to tables from explicit ``@@map`` names.
+
+    Pure regex scan of the project's own ``*.prisma`` files: a model block
+    ``model <Name> { ... @@map("<table>") ... }`` maps the model name to
+    that table. The client field name is the model name with its first
+    letter lowercased (``Photo`` -> ``photo``), so call sites recover the
+    model name by uppercasing the field's first letter. A model without
+    ``@@map`` is not mapped. A table name must be a plain identifier;
+    anything else is ignored. A model name mapping to more than one
+    distinct table is ambiguous and dropped entirely. No target code is
+    imported or executed.
+    """
+    candidates: dict[str, set[str]] = {}
+    for path, source in sorted(code_by_file.items()):
+        if not path.lower().endswith(".prisma"):
+            continue
+        for model_match in _PRISMA_MODEL.finditer(source):
+            map_match = _PRISMA_MAP.search(model_match.group(2))
+            if map_match is None:
+                continue
+            table = next((g for g in map_match.groups() if g is not None), None)
+            if table is None:
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", table):
+                continue
+            candidates.setdefault(model_match.group(1), set()).add(table)
+    return {name: next(iter(tables)) for name, tables in candidates.items()
+            if len(tables) == 1}
+
+
+def _extract_js(source: str, typeorm_tables: dict[str, str] | None = None, prisma_tables: dict[str, str] | None = None) -> list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]]:
     """Extract (line, callee, sql, parser, has_dynamic, orm_models, orm_kind) from one JS/TS file.
 
     SQL literal calls (``.execute`` / ``.query`` / ``.raw``) are typed
@@ -1203,7 +1263,12 @@ def _extract_js(source: str, typeorm_tables: dict[str, str] | None = None) -> li
     typed from ``typeorm_tables``: a method call on a variable bound by
     ``getRepository(Entity)`` (or an inline ``getRepository(Entity).<method>``
     call) yields one record with ``orm_kind`` ``"typeorm"`` when the
-    entity is mapped, or a single UNKNOWN record when it is not. A
+    entity is mapped, or a single UNKNOWN record when it is not. Prisma
+    Client calls are typed from ``prisma_tables``: a ``<client>.<model>
+    .<method>`` call on a recognized PrismaClient instance (a variable
+    bound by ``new PrismaClient(...)``, or a receiver ending in
+    ``prisma``) yields one record with ``orm_kind`` ``"prisma"`` when the
+    model field is mapped, or a single UNKNOWN record when it is not. A
     method call on an unbound receiver is not a database access on this
     evidence and yields no record.
     """
@@ -1256,6 +1321,36 @@ def _extract_js(source: str, typeorm_tables: dict[str, str] | None = None) -> li
             else:
                 found.append((line_no, callee, None, "js-ts-literal-expression",
                               False, None, None))
+    if prisma_tables is not None:
+        # PrismaClient bindings in this file, in source order: each entry
+        # is (end position of the new PrismaClient call, variable).
+        client_bindings: list[tuple[int, str]] = []
+        for new_match in _PRISMA_NEW_CLIENT.finditer(source):
+            assign = re.search(
+                r"([A-Za-z_$][\w$]*)\s*(?::[^\n=;]{0,100})?=\s*$",
+                source[:new_match.start()])
+            if assign is not None:
+                client_bindings.append((new_match.end(), assign.group(1)))
+        for call_match in _PRISMA_CALL.finditer(source):
+            receiver, field, method = (call_match.group(1), call_match.group(2),
+                                       call_match.group(3))
+            last_segment = receiver.rsplit(".", 1)[-1]
+            is_client = last_segment == "prisma" or any(
+                var == last_segment and end_pos < call_match.start()
+                for end_pos, var in client_bindings)
+            if not is_client:
+                continue
+            line_no = source.count("\n", 0, call_match.start()) + 1
+            callee = receiver + "." + field + "." + method
+            # The client field is the model name with its first letter
+            # lowercased, so uppercasing it recovers the model name.
+            model = field[0].upper() + field[1:]
+            if prisma_tables and model in prisma_tables:
+                found.append((line_no, callee, None, "js-ts-literal-expression",
+                              False, [model], "prisma"))
+            else:
+                found.append((line_no, callee, None, "js-ts-literal-expression",
+                              False, None, None))
     return found
 
 
@@ -1274,16 +1369,22 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
     own ``Meta.db_table`` map yields one SELECT record the same way,
     ``.create`` yields INSERT, and a chained ``.update`` / ``.delete``
     yields UPDATE / DELETE; an unresolvable model leaves the call UNKNOWN.
+    A Prisma ``<client>.<model>.<method>`` call resolved by the project's
+    own ``schema.prisma`` ``@@map`` table name yields one record the same
+    way, with the operation from the method (``findMany`` / ``findUnique``
+    / ``create`` / ``update`` / ``delete`` and kin; ``upsert`` is UNKNOWN);
+    an unresolvable model leaves the call UNKNOWN.
     """
     records: list[dict[str, Any]] = []
     orm_tables = orm_model_tables(code_by_file)
     django_tables = django_model_tables(code_by_file)
     typeorm_tables = typeorm_entity_tables(code_by_file)
+    prisma_tables = prisma_model_tables(code_by_file)
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
             found = _extract_python(source, orm_tables, django_tables)
         else:
-            found = _extract_js(source, typeorm_tables)
+            found = _extract_js(source, typeorm_tables, prisma_tables)
         for line_no, callee, sql, parser, dynamic, orm_models, orm_kind in found:
             if orm_models is not None:
                 method = callee.rsplit(".", 1)[-1]
@@ -1293,6 +1394,9 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
                 elif orm_kind == "typeorm":
                     tables_map = typeorm_tables
                     operation = _TYPEORM_OPERATION.get(method, "UNKNOWN")
+                elif orm_kind == "prisma":
+                    tables_map = prisma_tables
+                    operation = _PRISMA_OPERATION.get(method, "UNKNOWN")
                 else:
                     tables_map = orm_tables
                     operation = "SELECT"

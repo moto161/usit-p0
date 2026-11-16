@@ -4,7 +4,7 @@ import unittest
 
 from usit.database_access import (django_model_tables,
                                   extract_database_accesses,
-                                  typeorm_entity_tables)
+                                  prisma_model_tables, typeorm_entity_tables)
 
 
 class DatabaseAccessExtractionTests(unittest.TestCase):
@@ -1456,6 +1456,182 @@ class TypeOrmRepositoryTests(unittest.TestCase):
             "const repo = AppDataSource.getRepository(Photo);\n"
             "export async function load() {\n"
             "  return repo.find({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+
+class PrismaModelTableTests(unittest.TestCase):
+    def test_explicit_map_maps(self):
+        tables = prisma_model_tables({
+            "prisma/schema.prisma": (
+                "model Photo {\n"
+                "  id Int @id\n"
+                "\n"
+                "  @@map(\"photos\")\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(tables, {"Photo": "photos"})
+
+    def test_model_without_map_does_not_map(self):
+        tables = prisma_model_tables({
+            "prisma/schema.prisma": "model Tag {\n  id Int @id\n}\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_same_model_name_with_different_tables_is_dropped(self):
+        tables = prisma_model_tables({
+            "a/schema.prisma": "model Photo {\n  id Int @id\n\n  @@map(\"photos\")\n}\n",
+            "b/schema.prisma": "model Photo {\n  id Int @id\n\n  @@map(\"images\")\n}\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_non_identifier_table_name_is_ignored(self):
+        tables = prisma_model_tables({
+            "prisma/schema.prisma": "model Photo {\n  id Int @id\n\n  @@map(\"my photos\")\n}\n",
+        })
+        self.assertEqual(tables, {})
+
+    def test_multi_word_model_maps(self):
+        tables = prisma_model_tables({
+            "prisma/schema.prisma": (
+                "model PhotoAlbum {\n"
+                "  id Int @id\n"
+                "\n"
+                "  @@map(\"photo_albums\")\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(tables, {"PhotoAlbum": "photo_albums"})
+
+
+class PrismaClientTests(unittest.TestCase):
+    _SCHEMA = (
+        "model Photo {\n"
+        "  id Int @id\n"
+        "\n"
+        "  @@map(\"photos\")\n"
+        "}\n"
+        "model Tag {\n"
+        "  id Int @id\n"
+        "}\n"
+    )
+
+    def _rows(self, service_source):
+        return extract_database_accesses({
+            "prisma/schema.prisma": self._SCHEMA,
+            "server/photos.service.ts": service_source,
+        })
+
+    def test_bound_find_many_resolves_select(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photo.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["source"], "server/photos.service.ts")
+        self.assertEqual(row["callee"], "prisma.photo.findMany")
+        self.assertEqual(row["operation"], "SELECT")
+        self.assertEqual(row["tables"], ["photos"])
+        self.assertEqual(row["columns"], [])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
+
+    def test_bound_find_unique_resolves_select(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photo.findUnique({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_bound_create_resolves_insert(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photo.create({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_bound_update_resolves_update(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photo.update({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UPDATE")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_bound_delete_resolves_delete(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photo.delete({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "DELETE")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_bound_upsert_has_unknown_operation(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photo.upsert({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_unmapped_model_is_unknown(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.tag.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_unbound_receiver_produces_no_record(self):
+        rows = self._rows(
+            "export async function load() {\n"
+            "  return other.photo.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(rows, [])
+
+    def test_non_prisma_client_name_bound_resolves(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const db = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return db.photo.count({});\n"
             "}\n"
         )
         self.assertEqual(len(rows), 1)
