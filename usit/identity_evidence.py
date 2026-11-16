@@ -9,7 +9,9 @@ is the same identity expression (``INTERPROCEDURAL_SINGLE_HOP_RETURN``);
 the helper may live in the same file, be brought in by a ``from`` import,
 be reached through a module binding (``import X`` / ``from P import M``)
 as an attribute call, or be a method of the enclosing class reached
-through ``self`` / ``cls``. This is not a general taint engine and
+through ``self`` / ``cls``, or be a method of a class an instance
+attribute was constructed from (``self.helper = AuthHelper()`` then
+``self.helper.get_uid(...)``). This is not a general taint engine and
 never proves runtime identity or authorization.
 """
 from __future__ import annotations
@@ -426,6 +428,64 @@ def _python_class_method_ranges(path: str, source: str) -> dict[int, str]:
     return ranges
 
 
+def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
+    """Map (class, attribute) pairs to the class constructed for them.
+
+    For each top-level class, collect ``self.<attr> = <ClassName>(...)``
+    assignments across its directly defined methods (including assignments
+    inside nested definitions, whose closures still capture ``self``).
+    An attribute qualifies only when every such assignment constructs the
+    same top-level class defined in the same file; any other assignment
+    shape, a different class, or a class not defined in this file
+    disqualifies it. Non-Python files and syntax-invalid Python produce
+    no bindings.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    candidates: dict[tuple[str, str], set[str | None]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for item in ast.walk(method):
+                targets: list[ast.expr] = []
+                value: ast.expr | None = None
+                if isinstance(item, ast.Assign):
+                    targets = item.targets
+                    value = item.value
+                elif isinstance(item, ast.AnnAssign) and item.value is not None:
+                    targets = [item.target]
+                    value = item.value
+                else:
+                    continue
+                if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+                    constructed: str | None = value.func.id
+                else:
+                    constructed = None
+                for target in targets:
+                    if not (isinstance(target, ast.Attribute)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == "self"):
+                        continue
+                    key = (node.name, target.attr)
+                    candidates.setdefault(key, set()).add(
+                        constructed if constructed in class_names else None)
+    bindings: dict[tuple[str, str], str] = {}
+    for key, constructed in candidates.items():
+        if len(constructed) == 1:
+            only = next(iter(constructed))
+            if only is not None:
+                bindings[key] = only
+    return bindings
+
+
 def _python_module_index(code_by_file: dict[str, str]) -> dict[str, str]:
     """Map dotted module names to project files, dropping ambiguous ones.
 
@@ -631,6 +691,11 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
+    same_file_instance_bindings = {
+        file_path: _python_instance_attribute_classes(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
     module_bindings = {
         file_path: _python_module_bindings(file_path, file_source, module_index)
         for file_path, file_source in code_by_file.items()
@@ -647,6 +712,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             bindings = module_bindings.get(path, {})
             method_helpers = same_file_methods.get(path, {})
             class_ranges = _python_class_method_ranges(path, source)
+            instance_bindings = same_file_instance_bindings.get(path, {})
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
@@ -654,12 +720,14 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             bindings = {}
             method_helpers = {}
             class_ranges = {}
+            instance_bindings = {}
         else:
             function_owners = {}
             return_helpers = {}
             bindings = {}
             method_helpers = {}
             class_ranges = {}
+            instance_bindings = {}
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -845,7 +913,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      "propagation": aliases[rhs]["propagation"] + [
                                          {"path": path, "line": line_no, "variable": name}
                                      ]}
-                elif return_helpers or bindings or method_helpers:
+                elif return_helpers or bindings or method_helpers or instance_bindings:
                     # P4/P5: one hop through a same-file or from-imported
                     # helper, e.g. uid = get_uid(req). Only a bare call
                     # counts: no method call, no await, no attribute access
@@ -869,6 +937,15 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                 enclosing = class_ranges.get(line_no)
                                 if enclosing is not None:
                                     helper = method_helpers.get((enclosing, parts[1]))
+                            elif len(parts) == 3 and parts[0] == "self":
+                                # P8: one hop through an instance attribute
+                                # bound in the enclosing class, e.g.
+                                # uid = self.helper.get_uid(req).
+                                enclosing = class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    target = instance_bindings.get((enclosing, parts[1]))
+                                    if target is not None:
+                                        helper = method_helpers.get((target, parts[2]))
                     if helper is not None:
                         aliases[name] = {
                             "kind": helper["kind"], "expression": helper["expression"],
