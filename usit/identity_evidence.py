@@ -451,6 +451,10 @@ _TS_NAMED_IMPORT_RE = re.compile(
 _TS_IMPORT_SPEC_RE = re.compile(
     r"^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$"
 )
+_TS_EXTENDS_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+"
+    r"([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b"
+)
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
 
@@ -471,10 +475,10 @@ def _strip_ts_line(line: str) -> str:
 
 def _ts_class_scan(path: str, source: str) -> tuple[
         dict[tuple[str, str], list[tuple[int, str]]], dict[int, str],
-        dict[tuple[str, str], set[str | None]], set[str]]:
+        dict[tuple[str, str], set[str | None]], set[str], set[tuple[str, str]]]:
     """One brace-counting pass over a TS/JS file.
 
-    Returns ``(methods, ranges, attr_candidates, class_names)``:
+    Returns ``(methods, ranges, attr_candidates, class_names, defined)``:
     ``methods`` maps ``(class, method)`` pairs directly defined in a
     top-level class to their direct ``(line, expression)`` returns;
     ``ranges`` maps line numbers to their enclosing top-level class
@@ -482,16 +486,20 @@ def _ts_class_scan(path: str, source: str) -> tuple[
     ``(class, attribute)`` pairs to the set of classes constructed for
     them (``None`` for a non-construction binding, which disqualifies
     the attribute); ``class_names`` is the set of top-level class
-    names. Returns inside nested functions or classes are excluded
-    from both. A method header must open its body on the same line;
-    anything else fails closed (no method, no returns). Only the
-    direct returns are collected -- whether they qualify as identity
-    returns is decided by ``_ts_identity_return_methods``.
+    names; ``defined`` is the set of ``(class, method)`` pairs directly
+    defined in a top-level class (including methods without returns;
+    used for the inheritance shadowing check). Returns inside nested
+    functions or classes are excluded from both. A method header must
+    open its body on the same line; anything else fails closed (no
+    method, no returns). Only the direct returns are collected --
+    whether they qualify as identity returns is decided by
+    ``_ts_identity_return_methods``.
     """
     methods: dict[tuple[str, str], list[tuple[int, str]]] = {}
     ranges: dict[int, str] = {}
     attr_candidates: dict[tuple[str, str], set[str | None]] = {}
     class_names: set[str] = set()
+    defined: set[tuple[str, str]] = set()
     # Frames: kind "class" | "method" | "nested", interior brace depth,
     # class name, method name. "nested" covers nested functions and
     # nested classes, whose lines and returns never belong to the outer
@@ -545,6 +553,7 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                                       "constructor": name == "constructor",
                                       "returns": []})
                         method_frame = stack[-1]
+                        defined.add((class_frame["class"], name))
             if method_frame is not None and class_frame is not None and "{" in stripped:
                 # A nested function or class opens a nested frame only when
                 # its brace sits deeper than the method body: a brace in a
@@ -615,7 +624,7 @@ def _ts_class_scan(path: str, source: str) -> tuple[
         frame = stack.pop()
         if frame["kind"] == "method" and frame["returns"] and not frame.get("constructor"):
             methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
-    return methods, ranges, attr_candidates, class_names
+    return methods, ranges, attr_candidates, class_names, defined
 
 
 def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
@@ -632,7 +641,7 @@ def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str],
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
         return {}
-    methods, _ranges, _candidates, _names = _ts_class_scan(path, source)
+    methods, _ranges, _candidates, _names, _defined = _ts_class_scan(path, source)
     helpers: dict[tuple[str, str], dict[str, Any]] = {}
     for key, returns in methods.items():
         profile: dict[str, Any] | None = None
@@ -668,7 +677,7 @@ def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
         return {}
-    _methods, ranges, _candidates, _names = _ts_class_scan(path, source)
+    _methods, ranges, _candidates, _names, _defined = _ts_class_scan(path, source)
     return ranges
 
 
@@ -800,7 +809,7 @@ def _ts_cross_file_instance_bindings(
     for path, source in code_by_file.items():
         if path.lower().endswith(".py"):
             continue
-        _methods, _ranges, candidates, class_names = _ts_class_scan(path, source)
+        _methods, _ranges, candidates, class_names, _defined = _ts_class_scan(path, source)
         imports = _ts_import_bindings(path, source)
         bindings: dict[tuple[str, str], tuple[str, str]] = {}
         for (cls, attr), constructed in candidates.items():
@@ -816,12 +825,88 @@ def _ts_cross_file_instance_bindings(
             target = _ts_resolve_import(specifier, path, code_by_file)
             if target is None or target == path:
                 continue
-            _m, _r, _c, target_classes = _ts_class_scan(target, code_by_file[target])
+            _m, _r, _c, target_classes, _d = _ts_class_scan(target, code_by_file[target])
             if imported in target_classes:
                 bindings[(cls, attr)] = (target, imported)
         if bindings:
             result[path] = bindings
     return result
+
+
+def _ts_base_classes(
+        code_by_file: dict[str, str]) -> dict[str, dict[str, tuple[str, str]]]:
+    """Map files to {class: (base file, base class)} for TS/JS extends clauses.
+
+    Only ``class X extends Y`` with a bare-identifier base counts: the
+    base resolves to a top-level class of the same file first, else
+    through a named import (T3) to a project file defining it. An
+    expression base (``extends mixin(...)``), a namespaced base
+    (``extends ns.Base``) or an unresolvable base leaves the class
+    without a base (fail closed). Only top-level classes are recorded.
+    """
+    result: dict[str, dict[str, tuple[str, str]]] = {}
+    for path, source in code_by_file.items():
+        if path.lower().endswith(".py"):
+            continue
+        _m, _r, _c, class_names, _d = _ts_class_scan(path, source)
+        imports = _ts_import_bindings(path, source)
+        bases: dict[str, tuple[str, str]] = {}
+        for line in source.splitlines():
+            match = _TS_EXTENDS_RE.match(_strip_ts_comment(line))
+            if not match:
+                continue
+            cls, base = match.group(1), match.group(2)
+            if cls not in class_names:
+                continue
+            if base in class_names:
+                bases[cls] = (path, base)
+                continue
+            binding = imports.get(base)
+            if binding is None:
+                continue
+            specifier, imported = binding
+            target = _ts_resolve_import(specifier, path, code_by_file)
+            if target is None or target == path:
+                continue
+            _m2, _r2, _c2, target_classes, _d2 = _ts_class_scan(
+                target, code_by_file[target])
+            if imported in target_classes:
+                bases[cls] = (target, imported)
+        if bases:
+            result[path] = bases
+    return result
+
+
+def _ts_method_profile(file: str, cls: str, method: str,
+                       profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
+                       defined: dict[str, set[tuple[str, str]]],
+                       bases: dict[str, dict[str, tuple[str, str]]],
+                       skip_self: bool = False) -> dict[str, Any] | None:
+    """Resolve a method to its single identity return profile, walking the extends chain.
+
+    The class itself first (unless ``skip_self``, for ``super`` calls,
+    which skip the current class): defined but without an identity
+    profile means shadowed -- return None and do not walk up. Not
+    defined: walk up the extends chain (at most 8 levels, cycle-safe);
+    each ancestor either defines the method (profile or shadowed None)
+    or not (continue). A profile carries the defining file's path.
+    """
+    if not skip_self and (cls, method) in defined.get(file, set()):
+        return profiles.get(file, {}).get((cls, method))
+    seen: set[tuple[str, str]] = set()
+    current_file, current_class = file, cls
+    for _ in range(8):
+        base = bases.get(current_file, {}).get(current_class)
+        if base is None:
+            return None
+        base_file, base_class = base
+        if (base_file, base_class) in seen:
+            return None
+        seen.add((base_file, base_class))
+        if (base_class, method) in defined.get(base_file, set()):
+            return profiles.get(base_file, {}).get((base_class, method))
+        current_file, current_class = base_file, base_class
+    return None
 
 
 def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
@@ -840,7 +925,7 @@ def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, st
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
         return {}
-    _methods, _ranges, candidates, class_names = _ts_class_scan(path, source)
+    _methods, _ranges, candidates, class_names, _defined = _ts_class_scan(path, source)
     bindings: dict[tuple[str, str], str] = {}
     for key, constructed in candidates.items():
         if len(constructed) == 1:
@@ -1139,6 +1224,12 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         if not file_path.lower().endswith(".py")
     }
     ts_cross_instance_bindings = _ts_cross_file_instance_bindings(code_by_file)
+    ts_defined_methods = {
+        file_path: _ts_class_scan(file_path, file_source)[4]
+        for file_path, file_source in code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    ts_base_classes = _ts_base_classes(code_by_file)
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
             function_owners = _python_function_owners(path, source)
@@ -1155,6 +1246,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_class_ranges = {}
             ts_instance_bindings = {}
             ts_cross_bindings = {}
+            ts_has_base = False
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
@@ -1167,6 +1259,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
             ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
+            ts_has_base = path in ts_base_classes
         else:
             function_owners = {}
             return_helpers = {}
@@ -1178,6 +1271,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
             ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
+            ts_has_base = path in ts_base_classes
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -1365,7 +1459,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      ]}
                 elif (return_helpers or bindings or method_helpers
                         or instance_bindings or ts_method_helpers
-                        or ts_instance_bindings or ts_cross_bindings):
+                        or ts_instance_bindings or ts_cross_bindings
+                        or ts_has_base):
                     # P4/P5: one hop through a same-file or from-imported
                     # helper, e.g. uid = get_uid(req). Only a bare call
                     # counts: no method call, no await, no attribute access
@@ -1392,10 +1487,26 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                             elif len(parts) == 2 and parts[0] == "this":
                                 # T1: one hop through a method of the
                                 # enclosing TS/JS class, e.g.
-                                # uid = this.get_uid(req).
+                                # uid = this.get_uid(req). T4: when the
+                                # enclosing class does not define the
+                                # method, walk up the extends chain (a
+                                # definition without an identity profile
+                                # shadows the base and stops the walk).
                                 enclosing = ts_class_ranges.get(line_no)
                                 if enclosing is not None:
-                                    helper = ts_method_helpers.get((enclosing, parts[1]))
+                                    helper = _ts_method_profile(
+                                        path, enclosing, parts[1],
+                                        ts_same_file_methods, ts_defined_methods,
+                                        ts_base_classes)
+                            elif len(parts) == 2 and parts[0] == "super":
+                                # T4: one hop through the direct base
+                                # class, e.g. uid = super.get_uid(req).
+                                enclosing = ts_class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    helper = _ts_method_profile(
+                                        path, enclosing, parts[1],
+                                        ts_same_file_methods, ts_defined_methods,
+                                        ts_base_classes, skip_self=True)
                             elif len(parts) == 3 and parts[0] == "this":
                                 # T2: one hop through an instance attribute
                                 # bound in the enclosing TS/JS class, e.g.
@@ -1404,7 +1515,12 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                 if enclosing is not None:
                                     target = ts_instance_bindings.get((enclosing, parts[1]))
                                     if target is not None:
-                                        helper = ts_method_helpers.get((target, parts[2]))
+                                        # T4: the helper's class may itself
+                                        # inherit the method.
+                                        helper = _ts_method_profile(
+                                            path, target, parts[2],
+                                            ts_same_file_methods, ts_defined_methods,
+                                            ts_base_classes)
                                     else:
                                         # T3: the attribute's class lives in
                                         # another file, brought in by a named
@@ -1413,8 +1529,10 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                         cross = ts_cross_bindings.get((enclosing, parts[1]))
                                         if cross is not None:
                                             target_file, target_class = cross
-                                            helper = ts_same_file_methods.get(
-                                                target_file, {}).get((target_class, parts[2]))
+                                            helper = _ts_method_profile(
+                                                target_file, target_class, parts[2],
+                                                ts_same_file_methods, ts_defined_methods,
+                                                ts_base_classes)
                             elif len(parts) == 3 and parts[0] == "self":
                                 # P8: one hop through an instance attribute
                                 # bound in the enclosing class, e.g.

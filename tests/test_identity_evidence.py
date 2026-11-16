@@ -2311,5 +2311,245 @@ class TsCrossFileClassReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
 
 
+class TsInheritedMethodReturnPropagationTests(unittest.TestCase):
+    def _rows_files(self, files):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                (root / name).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners)
+
+    def _rows(self, source, filename="handlers.ts"):
+        return self._rows_files({filename: source})
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _BASE = (
+        "export class BaseAuth {\n"
+        "  get_uid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def test_inherited_method_binds(self):
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class PhotoHandler extends BaseAuth {\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 10)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 9, 10])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:8")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_imported_base_class_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._BASE,
+            "handlers.ts": (
+                'import { BaseAuth } from "./auth";\n'
+                "\n"
+                "export class PhotoHandler extends BaseAuth {\n"
+                "  load(req: any) {\n"
+                "    const uid = this.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 6)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 5, 6])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_inherited_request_identity_binds(self):
+        rows = self._rows(
+            "export class BaseAuth {\n"
+            "  get_owner(req: any) {\n"
+            "    return req.body.user_id;\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            "export class PhotoHandler extends BaseAuth {\n"
+            "  load(req: any) {\n"
+            "    const owner = this.get_owner(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_owner")
+
+    def test_overriding_with_non_identity_shadows_base(self):
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class PhotoHandler extends BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    return null;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_overriding_with_other_identity_binds_that_one(self):
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class PhotoHandler extends BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.body.user_id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+
+    def test_super_call_as_alias_binds(self):
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class PhotoHandler extends BaseAuth {\n"
+            "  load(req: any) {\n"
+            "    const uid = super.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 10)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 9, 10])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        # T5 scope, not a regression: an override delegating through
+        # super (two hops) stays unbound in T4.
+        delegating = self._rows(
+            self._BASE
+            + "\n"
+            + "export class AlbumHandler extends BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    return super.get_uid(req);\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(delegating), [])
+
+    def test_grandparent_method_binds(self):
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class Middle extends BaseAuth {\n"
+            "}\n"
+            "\n"
+            "export class Leaf extends Middle {\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 13)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 12, 13])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_cyclic_extends_terminates_without_binding(self):
+        rows = self._rows(
+            "export class A extends B {\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+            "export class B extends A {\n"
+            "  other() {\n"
+            "    return 1;\n"
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_expression_or_namespaced_base_does_not_bind(self):
+        mixin = self._rows(
+            self._BASE
+            + "\n"
+            + "export class PhotoHandler extends mixin(BaseAuth) {\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(mixin), [])
+        namespaced = self._rows(
+            self._BASE
+            + "\n"
+            + "export class PhotoHandler extends ns.BaseAuth {\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(namespaced), [])
+
+    def test_helper_constructed_from_subclass_binds(self):
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class SubHandler extends BaseAuth {\n"
+            "}\n"
+            "\n"
+            + "export class PhotoHandler {\n"
+            "  constructor() {\n"
+            "    this.helper = new SubHandler();\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.helper.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 16)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 15, 16])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+
 if __name__ == "__main__":
     unittest.main()
