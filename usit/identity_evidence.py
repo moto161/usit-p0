@@ -894,35 +894,44 @@ _TS_VUE_METHODS_RE = re.compile(
 
 def _ts_vue_options_methods(path: str, source: str) -> tuple[
         dict[tuple[str, str], list[tuple[int, str]]], dict[int, str],
-        set[tuple[str, str]]]:
+        set[tuple[str, str]], dict[tuple[str, str], set[str | None]]]:
     """Scan a Vue Options API ``methods:`` block for identity returns.
 
-    Returns ``(methods, ranges, defined)`` in the same shapes as
-    ``_ts_class_scan``'s first, second and fifth values, keyed on the
-    synthetic class ``__vue_options__``: ``methods`` maps
-    ``(__vue_options__, method)`` to direct ``(line, expression)``
+    Returns ``(methods, ranges, defined, attr_candidates)`` in the same
+    shapes as ``_ts_class_scan``'s first, second, fifth and third
+    values, keyed on the synthetic class ``__vue_options__``: ``methods``
+    maps ``(__vue_options__, method)`` to direct ``(line, expression)``
     returns; ``ranges`` maps lines inside an options method to the
     synthetic class; ``defined`` is the set of directly defined
     options methods (for the shadowing check, which treats a
-    definition without an identity profile as shadowing).
+    definition without an identity profile as shadowing);
+    ``attr_candidates`` maps ``(__vue_options__, attribute)`` to the
+    set of classes constructed for it by ``this.<attr> = new <Class>``
+    assignments in options methods (``None`` for a non-construction
+    binding, which disqualifies the attribute).
 
-    Only ``.vue`` files, only the ``methods:`` property of the
-    default-export object (``export default {`` or
-    ``export default defineComponent({``); ``computed:`` / ``watch:``
-    / ``data()`` and non-default objects never qualify. A method
-    header must open its body on the same line; returns inside nested
-    functions or classes are excluded, exactly like the class scan.
+    Only ``.vue`` files, only the default-export object (``export
+    default {`` or ``export default defineComponent({``). Identity
+    return profiles are collected only for methods inside ``methods:``;
+    direct methods of the default object (lifecycle hooks such as
+    ``created()``, ``data()``) still map their lines and their
+    ``this.<attr> = new <Class>`` assignments -- that is where
+    instance attributes are bound -- but their returns are never
+    profiled (like a class constructor). ``computed:`` / ``watch:`` /
+    non-default objects never qualify, and the ``setup()`` hook is
+    excluded outright (its ``this`` is undefined at runtime).
     A top-level class literally named ``__vue_options__`` in the same
     file, or a second ``export default``, fails the whole scan closed.
     """
     methods: dict[tuple[str, str], list[tuple[int, str]]] = {}
     ranges: dict[int, str] = {}
     defined: set[tuple[str, str]] = set()
+    attr_candidates: dict[tuple[str, str], set[str | None]] = {}
     if not path.lower().endswith(".vue"):
-        return methods, ranges, defined
+        return methods, ranges, defined, attr_candidates
     _m, _r, _c, class_names, _d = _ts_class_scan(path, source)
     if _VUE_OPTIONS_CLASS in class_names:
-        return methods, ranges, defined
+        return methods, ranges, defined, attr_candidates
     # Frames: kind "default" | "methods" | "method" | "nested", interior
     # brace depth, method name.
     stack: list[dict[str, Any]] = []
@@ -950,25 +959,52 @@ def _ts_vue_options_methods(path: str, source: str) -> tuple[
             methods_frame = next((f for f in reversed(stack) if f["kind"] == "methods"), None)
             method_frame = next((f for f in reversed(stack) if f["kind"] == "method"), None)
             nested = any(f["kind"] == "nested" for f in stack)
+            nested_this = not any(
+                f["kind"] == "nested" and f.get("flavor") in ("function", "class")
+                for f in stack)
             if default_frame is None and depth == 0:
                 match = _TS_VUE_DEFAULT_EXPORT_RE.match(stripped)
                 if match:
                     if default_seen:
-                        return {}, {}, set()
+                        return {}, {}, set(), {}
                     default_seen = True
                     stack.append({"kind": "default",
                                   "depth": interior(stripped.index("{") + 1),
                                   "method": None})
                     default_frame = stack[-1]
-            elif (methods_frame is None and default_frame is not None
-                    and method_frame is None and not nested
-                    and depth == default_frame["depth"]):
-                match = _TS_VUE_METHODS_RE.match(stripped)
-                if match:
-                    stack.append({"kind": "methods",
-                                  "depth": interior(stripped.index("{") + 1),
-                                  "method": None})
-                    methods_frame = stack[-1]
+            elif (method_frame is None and default_frame is not None
+                    and not nested and depth == default_frame["depth"]):
+                # At the default object's direct depth: either the
+                # `methods:` property or a direct method (a lifecycle
+                # hook such as `created()`, or `data()`). The two
+                # checks share one branch because a line at this depth
+                # can only be one of them; the `methods:` check runs
+                # first so its property is never read as a method.
+                if methods_frame is None:
+                    match = _TS_VUE_METHODS_RE.match(stripped)
+                    if match:
+                        stack.append({"kind": "methods",
+                                      "depth": interior(stripped.index("{") + 1),
+                                      "method": None})
+                        methods_frame = stack[-1]
+                if methods_frame is None and method_frame is None:
+                    # A direct method of the default object. Its lines
+                    # and `this.<attr> = new <Class>` assignments count
+                    # (that is where instance attributes are bound),
+                    # but its returns are never profiled -- like a class
+                    # constructor, a hook's return value is not a
+                    # helper. `setup()` is excluded: its `this` is
+                    # undefined.
+                    match = _TS_METHOD_RE.match(stripped)
+                    if match:
+                        name = match.group(1)
+                        if name not in ("constructor", "setup"):
+                            stack.append({"kind": "method",
+                                          "depth": interior(match.end()),
+                                          "method": name, "returns": [],
+                                          "in_methods": False})
+                            method_frame = stack[-1]
+                            defined.add((_VUE_OPTIONS_CLASS, name))
             elif method_frame is None and methods_frame is not None and not nested:
                 match = _TS_METHOD_RE.match(stripped)
                 if match:
@@ -976,7 +1012,8 @@ def _ts_vue_options_methods(path: str, source: str) -> tuple[
                     if name != "constructor":
                         stack.append({"kind": "method",
                                       "depth": interior(match.end()),
-                                      "method": name, "returns": []})
+                                      "method": name, "returns": [],
+                                      "in_methods": True})
                         method_frame = stack[-1]
                         defined.add((_VUE_OPTIONS_CLASS, name))
             if method_frame is not None and "{" in stripped:
@@ -996,11 +1033,27 @@ def _ts_vue_options_methods(path: str, source: str) -> tuple[
                         stack.append({"kind": "nested", "depth": brace_depth,
                                       "method": None, "flavor": flavor})
                         nested = True
+                        nested_this = flavor == "arrow"
             if method_frame is not None and not nested:
                 ranges[line_no] = _VUE_OPTIONS_CLASS
-                ret = _TS_RETURN_RE.match(stripped)
-                if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
-                    method_frame["returns"].append((line_no, ret.group(1).strip()))
+                # Only `methods:` methods profile their returns;
+                # lifecycle hooks and `data()` never do.
+                if method_frame.get("in_methods"):
+                    ret = _TS_RETURN_RE.match(stripped)
+                    if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
+                        method_frame["returns"].append((line_no, ret.group(1).strip()))
+            if method_frame is not None and nested_this:
+                # V4: this.<attr> = new <Class>(...) inside an options
+                # method (an arrow body's `this` still refers to the
+                # outer instance; a nested `function` or class body does
+                # not). Any other assignment shape records None and
+                # disqualifies the attribute, exactly like the class rule.
+                assign = _TS_THIS_ASSIGN_RE.match(stripped)
+                if assign:
+                    constructed = _TS_NEW_RE.match(assign.group(2))
+                    attr_candidates.setdefault(
+                        (_VUE_OPTIONS_CLASS, assign.group(1)), set()).add(
+                        constructed.group(1) if constructed else None)
             if method_frame is not None and not nested:
                 # An arrow or function header whose body brace lands on the
                 # next line (Allman style): remember it for exactly one line.
@@ -1017,7 +1070,7 @@ def _ts_vue_options_methods(path: str, source: str) -> tuple[
         frame = stack.pop()
         if frame["kind"] == "method" and frame["returns"]:
             methods.setdefault((_VUE_OPTIONS_CLASS, frame["method"]), []).extend(frame["returns"])
-    return methods, ranges, defined
+    return methods, ranges, defined, attr_candidates
 
 
 def _ts_direct_identity_profiles(
@@ -1522,6 +1575,12 @@ def _ts_cross_file_instance_bindings(
         if path.lower().endswith(".py"):
             continue
         _methods, _ranges, candidates, class_names, _defined = _ts_class_scan(path, source)
+        # V4: instance attributes bound in Vue Options API methods
+        # share the same candidate map, keyed on the synthetic class
+        # `__vue_options__`.
+        _om, _or, _od, opt_candidates = _ts_vue_options_methods(path, source)
+        for key, constructed in opt_candidates.items():
+            candidates.setdefault(key, set()).update(constructed)
         imports = _ts_import_bindings(path, source)
         bindings: dict[tuple[str, str], tuple[str, str]] = {}
         for (cls, attr), constructed in candidates.items():
@@ -1638,6 +1697,12 @@ def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, st
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
     _methods, _ranges, candidates, class_names, _defined = _ts_class_scan(path, source)
+    # V4: instance attributes bound in Vue Options API methods
+    # (created() and friends) share the same candidate map, keyed on
+    # the synthetic class `__vue_options__`.
+    _om, _or, _od, opt_candidates = _ts_vue_options_methods(path, source)
+    for key, constructed in opt_candidates.items():
+        candidates.setdefault(key, set()).update(constructed)
     bindings: dict[tuple[str, str], str] = {}
     for key, constructed in candidates.items():
         if len(constructed) == 1:
@@ -1968,7 +2033,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in effective_code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
-    for file_path, (opt_methods, opt_ranges, opt_defined) in ts_vue_options.items():
+    for file_path, (opt_methods, opt_ranges, opt_defined, _opt_attrs) in ts_vue_options.items():
         if opt_methods:
             ts_same_file_methods.setdefault(file_path, {}).update(
                 _ts_direct_identity_profiles(file_path, opt_methods))

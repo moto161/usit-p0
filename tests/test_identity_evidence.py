@@ -3734,6 +3734,331 @@ class VueFunctionOwnershipTests(unittest.TestCase):
         })
         self.assertEqual(self._direct_bindings(rows), [])
 
+    _OPTIONS_HELPER = (
+        "<template>\n"
+        "  <button @click=\"load\">Load</button>\n"
+        "</template>\n"
+        "<script lang=\"ts\">\n"
+        "class AuthHelper {\n"
+        "  get_uid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "}\n"
+        "export default {\n"
+        "  created() {\n"
+        "    this.helper = new AuthHelper();\n"
+        "  },\n"
+        "  methods: {\n"
+        "    load(req: any) {\n"
+        "      const uid = this.helper.get_uid(req);\n"
+        "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+        "    },\n"
+        "  },\n"
+        "};\n"
+        "</script>\n"
+    )
+
+    def test_options_api_created_helper_binds(self):
+        rows = self._rows(self._OPTIONS_HELPER)
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 17)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [7, 16, 17])
+        self.assertEqual(binding["details"]["propagation"][0]["function"],
+                         "AuthHelper.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "App.vue")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:App.vue#load:15")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_options_api_mounted_helper_binds(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  mounted() {\n"
+            "    this.helper = new AuthHelper();\n"
+            "  },\n"
+            "  methods: {\n"
+            "    load(req: any) {\n"
+            "      const uid = this.helper.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 17)
+        self.assertEqual(binding["details"]["propagation"][0]["function"],
+                         "AuthHelper.get_uid")
+
+    def test_options_api_helper_bound_in_method_binds(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  methods: {\n"
+            "    load(req: any) {\n"
+            "      this.helper = new AuthHelper();\n"
+            "      const uid = this.helper.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 15)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [7, 14, 15])
+
+    def test_options_api_helper_bound_in_nested_arrow_binds(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  created() {\n"
+            "    const bind = () => {\n"
+            "      this.helper = new AuthHelper();\n"
+            "    };\n"
+            "    bind();\n"
+            "  },\n"
+            "  methods: {\n"
+            "    load(req: any) {\n"
+            "      const uid = this.helper.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 20)
+        self.assertEqual(binding["details"]["propagation"][0]["function"],
+                         "AuthHelper.get_uid")
+
+    def test_options_api_helper_bound_in_nested_function_does_not_bind(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  created() {\n"
+            "    function bind() {\n"
+            "      this.helper = new AuthHelper();\n"
+            "    }\n"
+            "    bind();\n"
+            "  },\n"
+            "  methods: {\n"
+            "    load(req: any) {\n"
+            "      const uid = this.helper.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_options_api_helper_bound_to_two_classes_does_not_bind(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "class OtherHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  created() {\n"
+            "    this.helper = new AuthHelper();\n"
+            "  },\n"
+            "  mounted() {\n"
+            "    this.helper = new OtherHelper();\n"
+            "  },\n"
+            "  methods: {\n"
+            "    load(req: any) {\n"
+            "      const uid = this.helper.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_options_api_helper_non_construction_binding_does_not_bind(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  created() {\n"
+            "    this.helper = getHelper();\n"
+            "  },\n"
+            "  methods: {\n"
+            "    load(req: any) {\n"
+            "      const uid = this.helper.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_options_api_helper_from_ts_file_binds(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export class AuthHelper {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "App.vue": (
+                "<template>\n"
+                "  <button @click=\"load\">Load</button>\n"
+                "</template>\n"
+                "<script lang=\"ts\">\n"
+                "import { AuthHelper } from \"./auth\";\n"
+                "export default {\n"
+                "  created() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  },\n"
+                "  methods: {\n"
+                "    load(req: any) {\n"
+                "      const uid = this.helper.get_uid(req);\n"
+                "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "    },\n"
+                "  },\n"
+                "};\n"
+                "</script>\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 13)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 12, 13])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"],
+                         "AuthHelper.get_uid")
+
+    def test_options_api_helper_from_vue_file_binds(self):
+        rows = self._rows_files({
+            "auth.vue": (
+                "<template>\n"
+                "  <div>Auth</div>\n"
+                "</template>\n"
+                "<script lang=\"ts\">\n"
+                "export class AuthHelper {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+                "</script>\n"
+            ),
+            "App.vue": (
+                "<template>\n"
+                "  <button @click=\"load\">Load</button>\n"
+                "</template>\n"
+                "<script lang=\"ts\">\n"
+                "import { AuthHelper } from \"./auth\";\n"
+                "export default {\n"
+                "  created() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  },\n"
+                "  methods: {\n"
+                "    load(req: any) {\n"
+                "      const uid = this.helper.get_uid(req);\n"
+                "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "    },\n"
+                "  },\n"
+                "};\n"
+                "</script>\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 13)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.vue")
+        self.assertEqual(binding["details"]["propagation"][0]["function"],
+                         "AuthHelper.get_uid")
+
+    def test_options_api_data_object_helper_does_not_bind(self):
+        # Out of scope for V4: `data()` returning an object literal with
+        # `helper: new AuthHelper()` is not a `this.helper = ...`
+        # assignment, so no attribute binding is recorded.
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  data() {\n"
+            "    return { helper: new AuthHelper() };\n"
+            "  },\n"
+            "  methods: {\n"
+            "    load(req: any) {\n"
+            "      const uid = this.helper.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
 
 if __name__ == "__main__":
     unittest.main()
