@@ -849,8 +849,17 @@ class BusinessSemanticsAdapter:
         authorization_checks = extract_authorization_evidence(code_blob_by_file)
         # P3: TS/JS identity records resolve their function owner through the
         # TS parser's function line ranges; Python keeps its AST owners.
+        # T7: the root tsconfig/jsconfig text lets cross-file TS imports
+        # resolve through `paths` aliases as well as relative paths.
+        ts_config_text = None
+        for config_name in ("tsconfig.json", "jsconfig.json"):
+            config_data = self._read_text(self.root / config_name)
+            if config_data["read_ok"] and config_data["text"]:
+                ts_config_text = config_data["text"]
+                break
         identity_evidence = extract_identity_evidence(
-            code_blob_by_file, self._js_ts_function_owners(code_blob_by_file))
+            code_blob_by_file, self._js_ts_function_owners(code_blob_by_file),
+            ts_config=ts_config_text)
 
         # (3) PRD features marked ✅ DONE whose backing permission field is never
         #     referenced in code.  This is the strongest "documented-but-fake"

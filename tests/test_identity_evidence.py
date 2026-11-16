@@ -3054,6 +3054,209 @@ class IdentityInheritedMethodReturnPropagationTests(unittest.TestCase):
                          "BaseAuth.get_uid")
 
 
+class TsConfigPathsImportTests(unittest.TestCase):
+    def _rows_files(self, files, ts_config=None):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+            if ts_config is not None:
+                (root / "tsconfig.json").write_text(ts_config, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners, ts_config=ts_config)
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _AUTH_CLASS = (
+        "export class AuthHelper {\n"
+        "  get_uid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    _HANDLER_ALIASED = (
+        'import { AuthHelper } from "@/auth";\n'
+        "\n"
+        "export class PhotoHandler {\n"
+        "  constructor() {\n"
+        "    this.helper = new AuthHelper();\n"
+        "  }\n"
+        "  load(req: any) {\n"
+        "    const uid = this.helper.get_uid(req);\n"
+        '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+        "  }\n"
+        "}\n"
+    )
+
+    _ALIASED = '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}\n'
+
+    def test_aliased_class_helper_binds(self):
+        rows = self._rows_files(
+            {"src/auth.ts": self._AUTH_CLASS, "src/handlers.ts": self._HANDLER_ALIASED},
+            ts_config=self._ALIASED)
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:src/handlers.ts#load:7")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_exact_pattern_binds(self):
+        rows = self._rows_files(
+            {"src/auth.ts": self._AUTH_CLASS,
+             "src/handlers.ts": self._HANDLER_ALIASED.replace('"@/auth"', '"@auth"')},
+            ts_config='{"compilerOptions": {"paths": {"@auth": ["src/auth.ts"]}}}\n')
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+
+    def test_base_url_relative_targets_bind(self):
+        rows = self._rows_files(
+            {"src/auth.ts": self._AUTH_CLASS, "src/handlers.ts": self._HANDLER_ALIASED},
+            ts_config='{"compilerOptions": {"baseUrl": "src", "paths": {"@/*": ["*"]}}}\n')
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+
+    def test_aliased_top_level_function_binds(self):
+        rows = self._rows_files(
+            {"src/auth.ts": (
+                "export function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+             "src/handlers.ts": (
+                'import { get_uid } from "@/auth";\n'
+                "\n"
+                "export function load(req: any) {\n"
+                "  const uid = get_uid(req);\n"
+                '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
+            )},
+            ts_config=self._ALIASED)
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 4, 5])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:src/handlers.ts#load:3")
+
+    def test_aliased_namespace_import_binds(self):
+        rows = self._rows_files(
+            {"src/auth.ts": (
+                "export function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+             "src/handlers.ts": (
+                'import * as auth from "@/auth";\n'
+                "\n"
+                "export function load(req: any) {\n"
+                "  const uid = auth.get_uid(req);\n"
+                '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
+            )},
+            ts_config=self._ALIASED)
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 4, 5])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+
+    def test_aliased_base_class_binds(self):
+        rows = self._rows_files(
+            {"src/base.ts": (
+                "export class Base {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+             "src/handlers.ts": (
+                'import { Base } from "@/base";\n'
+                "\n"
+                "export class PhotoHandler extends Base {\n"
+                "  load(req: any) {\n"
+                "    const uid = this.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            )},
+            ts_config=self._ALIASED)
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 6)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 5, 6])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/base.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "Base.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:src/handlers.ts#load:4")
+
+    def test_first_target_missing_falls_through_to_second(self):
+        rows = self._rows_files(
+            {"src/auth.ts": self._AUTH_CLASS, "src/handlers.ts": self._HANDLER_ALIASED},
+            ts_config='{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["no/such/*", "src/*"]}}}\n')
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+
+    def test_bare_package_without_mapping_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH_CLASS,
+            "handlers.ts": (
+                'import { AuthHelper } from "@acme/auth";\n'
+                "\n"
+                "export class PhotoHandler {\n"
+                "  constructor() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  }\n"
+                "  load(req: any) {\n"
+                "    const uid = this.helper.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mapped_target_missing_does_not_bind(self):
+        rows = self._rows_files(
+            {"src/auth.ts": self._AUTH_CLASS, "src/handlers.ts": self._HANDLER_ALIASED},
+            ts_config='{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/no-such/*"]}}}\n')
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_commented_tsconfig_binds(self):
+        rows = self._rows_files(
+            {"src/auth.ts": self._AUTH_CLASS, "src/handlers.ts": self._HANDLER_ALIASED},
+            ts_config=(
+                "// project paths\n"
+                '{"compilerOptions": {\n'
+                '  "baseUrl": ".",\n'
+                '  "paths": {"@/*": ["src/*"],},\n'
+                "}}\n"
+            ))
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+
+
 class TsNamespaceImportReturnPropagationTests(unittest.TestCase):
     def _rows_files(self, files):
         with tempfile.TemporaryDirectory() as td:

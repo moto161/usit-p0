@@ -1472,14 +1472,15 @@ def _ts_namespace_imports(path: str, source: str) -> dict[str, str]:
 
 
 def _ts_namespace_import_bindings(
-        code_by_file: dict[str, str]) -> dict[str, dict[str, str]]:
+        code_by_file: dict[str, str],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None) -> dict[str, dict[str, str]]:
     """Map files to {namespace local: target file} for namespace imports.
 
-    Only relative specifiers resolving to a project file count; package
-    imports, ``tsconfig`` path aliases and anything outside the project
-    fail closed. The target file's top-level function profiles decide
-    whether a ``ns.<fn>(...)`` call binds -- this map alone binds
-    nothing.
+    Relative specifiers and ``tsconfig`` path aliases (T7, via
+    ``ts_paths``) resolving to a project file count; bare package
+    imports and anything outside the project fail closed. The target
+    file's top-level function profiles decide whether a ``ns.<fn>(...)``
+    call binds -- this map alone binds nothing.
     """
     result: dict[str, dict[str, str]] = {}
     for path, source in code_by_file.items():
@@ -1487,7 +1488,7 @@ def _ts_namespace_import_bindings(
             continue
         bindings: dict[str, str] = {}
         for local, specifier in _ts_namespace_imports(path, source).items():
-            target = _ts_resolve_import(specifier, path, code_by_file)
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is not None and target != path:
                 bindings[local] = target
         if bindings:
@@ -1497,17 +1498,18 @@ def _ts_namespace_import_bindings(
 
 def _ts_named_function_bindings(
         code_by_file: dict[str, str],
-        top_level_profiles: dict[str, dict[str, dict[str, Any]]]
+        top_level_profiles: dict[str, dict[str, dict[str, Any]]],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None
         ) -> dict[str, dict[str, dict[str, Any]]]:
     """Map files to {local name: profile} for named-imported top-level functions.
 
     The TS mirror of ``_python_imported_identity_helpers`` for functions:
-    only ``import { name [as alias] } from \"./x\"`` whose target file
-    directly defines a qualifying top-level function under the original
-    name. A local name shadowed by a top-level function defined in the
-    importing file itself is skipped (the local definition wins).
-    Re-exports (the target file itself importing the name) are not
-    followed.
+    only ``import { name [as alias] } from \"./x\"`` (or a ``tsconfig``
+    path alias, T7) whose target file directly defines a qualifying
+    top-level function under the original name. A local name shadowed
+    by a top-level function defined in the importing file itself is
+    skipped (the local definition wins). Re-exports (the target file
+    itself importing the name) are not followed.
     """
     result: dict[str, dict[str, dict[str, Any]]] = {}
     for path, source in code_by_file.items():
@@ -1518,7 +1520,7 @@ def _ts_named_function_bindings(
         for local, (specifier, imported) in _ts_import_bindings(path, source).items():
             if local in local_names or local in bindings:
                 continue
-            target = _ts_resolve_import(specifier, path, code_by_file)
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is None or target == path:
                 continue
             profile = top_level_profiles.get(target, {}).get(imported)
@@ -1529,22 +1531,108 @@ def _ts_named_function_bindings(
     return result
 
 
-def _ts_resolve_import(specifier: str, from_path: str,
-                       code_by_file: dict[str, str]) -> str | None:
-    """Resolve a relative TS/JS import specifier to a project file path.
+def _strip_jsonc_comments(text: str) -> str:
+    """Strip `//` and `/* */` comments from JSONC text, keeping strings intact."""
+    out: list[str] = []
+    index = 0
+    in_string = False
+    while index < len(text):
+        ch = text[index]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and index + 1 < len(text):
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if ch == '"':
+                in_string = False
+            index += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            index += 1
+            continue
+        if ch == "/" and index + 1 < len(text) and text[index + 1] == "/":
+            while index < len(text) and text[index] != "\n":
+                index += 1
+            continue
+        if ch == "/" and index + 1 < len(text) and text[index + 1] == "*":
+            index += 2
+            while index + 1 < len(text) and not (text[index] == "*" and text[index + 1] == "/"):
+                index += 1
+            index += 2
+            continue
+        out.append(ch)
+        index += 1
+    return "".join(out)
 
-    Only relative specifiers (``./`` / ``../``) resolve, against the
-    importing file's directory, trying the usual extension and
-    ``index`` variants. The target must be a file in ``code_by_file``;
-    package imports, ``tsconfig`` path aliases and anything outside
-    the project fail closed.
+
+def _tsconfig_paths(config_text: str | None) -> tuple[str, list[tuple[str, str | None, list[str]]]] | None:
+    """Parse the root tsconfig/jsconfig `paths` mapping (T7).
+
+    Returns ``(base_url, patterns)`` where ``base_url`` is the
+    ``compilerOptions.baseUrl`` ("" when absent, i.e. the tsconfig's
+    own directory) and ``patterns`` is a list of
+    ``(prefix, suffix, targets)`` for each pattern with at most one
+    ``*`` (the matched middle is substituted into each target, which
+    is relative to ``base_url``). Anything unparseable, missing, or
+    malformed returns None (fail closed). Only the config file's own
+    ``compilerOptions.paths`` is read; an ``extends`` base file is
+    never followed.
     """
-    if not specifier.startswith(("./", "../")):
+    if not config_text:
         return None
-    base = posixpath.normpath(posixpath.join(posixpath.dirname(from_path), specifier))
-    # V2: an explicit `.vue` suffix resolves directly when the file is in
-    # the project (the extension candidates below would look for
-    # `<name>.vue.ts` instead).
+    try:
+        data = json.loads(config_text)
+    except (ValueError, TypeError):
+        try:
+            cleaned = re.sub(r",\s*([}\]])", r"\1", _strip_jsonc_comments(config_text))
+            data = json.loads(cleaned)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(data, dict):
+        return None
+    options = data.get("compilerOptions")
+    if not isinstance(options, dict):
+        return None
+    paths = options.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        return None
+    base_url = options.get("baseUrl", "")
+    if not isinstance(base_url, str):
+        return None
+    base_url = posixpath.normpath(base_url) if base_url not in ("", ".") else ""
+    patterns: list[tuple[str, str | None, list[str]]] = []
+    for pattern, targets in paths.items():
+        if not isinstance(pattern, str) or pattern.count("*") > 1:
+            continue
+        if not isinstance(targets, list):
+            continue
+        clean_targets = [t for t in targets if isinstance(t, str) and t]
+        if not clean_targets:
+            continue
+        if "*" in pattern:
+            prefix, suffix = pattern.split("*", 1)
+        else:
+            # An exact pattern matches only the specifier itself;
+            # suffix None marks it so the resolver does not treat a
+            # longer specifier sharing the prefix as a match.
+            prefix, suffix = pattern, None
+        patterns.append((prefix, suffix, clean_targets))
+    if not patterns:
+        return None
+    return base_url, patterns
+
+
+def _ts_resolve_candidate(base: str, code_by_file: dict[str, str]) -> str | None:
+    """Try a resolved base path against the project files.
+
+    An explicit suffix resolves directly when the file is in the
+    project (the extension candidates below would look for
+    `<name>.vue.ts` instead); otherwise the usual extension and
+    ``index`` variants are tried.
+    """
     if base in code_by_file:
         return base
     for candidate in [base + ext for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue")]:
@@ -1556,8 +1644,56 @@ def _ts_resolve_import(specifier: str, from_path: str,
     return None
 
 
+def _ts_resolve_import(specifier: str, from_path: str,
+                       code_by_file: dict[str, str],
+                       ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None) -> str | None:
+    """Resolve a TS/JS import specifier to a project file path.
+
+    Relative specifiers (``./`` / ``../``) resolve against the
+    importing file's directory, trying the usual extension and
+    ``index`` variants. A non-relative specifier resolves only
+    through a ``tsconfig``/``jsconfig`` ``paths`` mapping (T7, via
+    ``ts_paths``): the longest-prefix pattern wins, its targets are
+    tried in declaration order, each relative to ``baseUrl``. The
+    target must be a file in ``code_by_file``; bare package imports,
+    ``node_modules`` and anything outside the project fail closed.
+    """
+    if specifier.startswith(("./", "../")):
+        base = posixpath.normpath(posixpath.join(posixpath.dirname(from_path), specifier))
+        return _ts_resolve_candidate(base, code_by_file)
+    if ts_paths is None:
+        return None
+    base_url, patterns = ts_paths
+    best: tuple[str, str | None, list[str], str] | None = None
+    for prefix, suffix, targets in patterns:
+        if suffix is None:
+            # Exact pattern: only the specifier itself matches.
+            if specifier != prefix:
+                continue
+            middle = ""
+        else:
+            if not specifier.startswith(prefix) or not specifier.endswith(suffix):
+                continue
+            if len(specifier) < len(prefix) + len(suffix):
+                continue
+            middle = specifier[len(prefix):len(specifier) - len(suffix) if suffix else len(specifier)]
+        if best is None or len(prefix) > len(best[0]):
+            best = (prefix, suffix, targets, middle)
+    if best is None:
+        return None
+    prefix, _suffix, targets, middle = best
+    for target in targets:
+        substituted = target.replace("*", middle, 1)
+        base = posixpath.normpath(posixpath.join(base_url, substituted)) if base_url else posixpath.normpath(substituted)
+        resolved = _ts_resolve_candidate(base, code_by_file)
+        if resolved is not None:
+            return resolved
+    return None
+
+
 def _ts_cross_file_instance_bindings(
-        code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], tuple[str, str]]]:
+        code_by_file: dict[str, str],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None) -> dict[str, dict[tuple[str, str], tuple[str, str]]]:
     """Map files to cross-file (class, attribute) -> (target file, class) bindings.
 
     The TS mirror of ``_python_imported_identity_helpers`` for instance
@@ -1566,7 +1702,8 @@ def _ts_cross_file_instance_bindings(
     (those are the same-file T2 bindings) and, when the constructed
     name is a named import resolving to a project file that defines
     the imported name as a top-level class, record the cross-file
-    binding. The T2 disqualification rule applies first: an attribute
+    binding. The import may be relative or a ``tsconfig`` path alias
+    (T7). The T2 disqualification rule applies first: an attribute
     with a non-construction binding or two different constructed
     classes is dropped here too.
     """
@@ -1593,7 +1730,7 @@ def _ts_cross_file_instance_bindings(
             if binding is None:
                 continue
             specifier, imported = binding
-            target = _ts_resolve_import(specifier, path, code_by_file)
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is None or target == path:
                 continue
             _m, _r, _c, target_classes, _d = _ts_class_scan(target, code_by_file[target])
@@ -1605,15 +1742,17 @@ def _ts_cross_file_instance_bindings(
 
 
 def _ts_base_classes(
-        code_by_file: dict[str, str]) -> dict[str, dict[str, tuple[str, str]]]:
+        code_by_file: dict[str, str],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None) -> dict[str, dict[str, tuple[str, str]]]:
     """Map files to {class: (base file, base class)} for TS/JS extends clauses.
 
     Only ``class X extends Y`` with a bare-identifier base counts: the
     base resolves to a top-level class of the same file first, else
-    through a named import (T3) to a project file defining it. An
-    expression base (``extends mixin(...)``), a namespaced base
-    (``extends ns.Base``) or an unresolvable base leaves the class
-    without a base (fail closed). Only top-level classes are recorded.
+    through a named import (T3, relative or a ``tsconfig`` path alias,
+    T7) to a project file defining it. An expression base
+    (``extends mixin(...)``), a namespaced base (``extends ns.Base``)
+    or an unresolvable base leaves the class without a base (fail
+    closed). Only top-level classes are recorded.
     """
     result: dict[str, dict[str, tuple[str, str]]] = {}
     for path, source in code_by_file.items():
@@ -1636,7 +1775,7 @@ def _ts_base_classes(
             if binding is None:
                 continue
             specifier, imported = binding
-            target = _ts_resolve_import(specifier, path, code_by_file)
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is None or target == path:
                 continue
             _m2, _r2, _c2, target_classes, _d2 = _ts_class_scan(
@@ -1944,7 +2083,8 @@ def _resolve_module_attribute_helper(
 
 
 def extract_identity_evidence(code_by_file: dict[str, str],
-                              function_owners_by_file: dict[str, dict[int, str]] | None = None) -> list[dict[str, Any]]:
+                              function_owners_by_file: dict[str, dict[int, str]] | None = None,
+                              ts_config: str | None = None) -> list[dict[str, Any]]:
     """Extract identity evidence plus bounded, same-scope local-variable propagation.
 
     Propagation is intentionally limited to straight-line assignments within one
@@ -1956,6 +2096,11 @@ def extract_identity_evidence(code_by_file: dict[str, str],
     (``js_ts_parser.ts_function_owners``). Python files always keep their
     AST-proven owners; without the map, non-Python records stay owner-less
     (``UNKNOWN``), exactly as before.
+
+    ``ts_config`` (T7) optionally supplies the root tsconfig/jsconfig text;
+    its ``compilerOptions.paths`` mapping lets cross-file TS imports
+    resolve through path aliases (``@/auth``) as well as relative
+    paths. Without it, aliased imports fail closed, exactly as before.
     """
     records: list[dict[str, Any]] = []
     assignment = re.compile(
@@ -1975,6 +2120,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         if file_path.lower().endswith(".vue") else file_source
         for file_path, file_source in code_by_file.items()
     }
+    # T7: the root tsconfig/jsconfig `paths` mapping, parsed once and
+    # threaded into every cross-file TS resolver below.
+    ts_paths = _tsconfig_paths(ts_config)
     module_index = _python_module_index(code_by_file)
     same_file_helpers = {
         file_path: _python_identity_return_helpers(file_path, file_source)
@@ -2004,8 +2152,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in effective_code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
-    ts_named_function_bindings = _ts_named_function_bindings(effective_code_by_file, ts_same_file_functions)
-    ts_namespace_import_bindings = _ts_namespace_import_bindings(effective_code_by_file)
+    ts_named_function_bindings = _ts_named_function_bindings(effective_code_by_file, ts_same_file_functions, ts_paths)
+    ts_namespace_import_bindings = _ts_namespace_import_bindings(effective_code_by_file, ts_paths)
     ts_same_file_ranges = {
         file_path: _ts_class_method_ranges(file_path, file_source)
         for file_path, file_source in effective_code_by_file.items()
@@ -2016,13 +2164,13 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in effective_code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
-    ts_cross_instance_bindings = _ts_cross_file_instance_bindings(effective_code_by_file)
+    ts_cross_instance_bindings = _ts_cross_file_instance_bindings(effective_code_by_file, ts_paths)
     ts_defined_methods = {
         file_path: _ts_class_scan(file_path, file_source)[4]
         for file_path, file_source in effective_code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
-    ts_base_classes = _ts_base_classes(effective_code_by_file)
+    ts_base_classes = _ts_base_classes(effective_code_by_file, ts_paths)
     # V3: Vue Options API `methods:` blocks scan as a synthetic class
     # `__vue_options__`; merge their profiles, ranges and defined sets
     # into the class-based maps so the T1 `this` branch resolves them.
