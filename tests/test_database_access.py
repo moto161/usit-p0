@@ -1821,6 +1821,131 @@ class PrismaClientTests(unittest.TestCase):
         self.assertEqual(rows[0]["tables"], ["photos"])
         self.assertEqual(rows[0]["orm_model"], ["Photo"])
 
+    def test_destructured_model_find_many_resolves_select(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "const { photo } = prisma;\n"
+            "export async function load() {\n"
+            "  return photo.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["callee"], "photo.findMany")
+        self.assertEqual(row["operation"], "SELECT")
+        self.assertEqual(row["tables"], ["photos"])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
+
+    def test_destructured_multiple_models_resolve(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "const { photo, tag } = prisma;\n"
+            "export async function load() {\n"
+            "  await photo.findMany({});\n"
+            "  return tag.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["callee"], "photo.findMany")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[1]["callee"], "tag.findMany")
+        self.assertEqual(rows[1]["tables"], ["Tag"])
+
+    def test_destructured_from_renamed_client_binds(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const db = new PrismaClient();\n"
+            "const { photo } = db;\n"
+            "export async function load() {\n"
+            "  return photo.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_destructured_from_unbound_receiver_produces_no_record(self):
+        rows = self._rows(
+            "const { photo } = other;\n"
+            "export async function load() {\n"
+            "  return photo.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(rows, [])
+
+    def test_call_before_destructuring_produces_no_record(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  await photo.findMany({});\n"
+            "  const { photo } = prisma;\n"
+            "}\n"
+        )
+        self.assertEqual(rows, [])
+
+    def test_destructured_unmapped_model_is_unknown(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "const { widget } = prisma;\n"
+            "export async function load() {\n"
+            "  return widget.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_param_client_find_many_resolves_select(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "export async function load(db: PrismaClient) {\n"
+            "  return db.photo.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["callee"], "db.photo.findMany")
+        self.assertEqual(row["operation"], "SELECT")
+        self.assertEqual(row["tables"], ["photos"])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
+
+    def test_param_client_arrow_function_resolves(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "export const load = (db: PrismaClient) => db.photo.count({});\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_unannotated_param_client_produces_no_record(self):
+        rows = self._rows(
+            "export async function load(db) {\n"
+            "  return db.photo.findMany({});\n"
+            "}\n"
+        )
+        self.assertEqual(rows, [])
+
+    def test_param_client_with_destructuring_resolves_insert(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "export async function load(db: PrismaClient) {\n"
+            "  const { photo } = db;\n"
+            "  return photo.create({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "photo.create")
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+
 
 if __name__ == "__main__":
     unittest.main()

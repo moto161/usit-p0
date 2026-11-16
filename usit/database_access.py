@@ -797,6 +797,14 @@ _PRISMA_MAP = re.compile(
     r"@@map\(\s*(?:\"([^\"]+)\"|'([^']+)')\s*\)"
 )
 _PRISMA_NEW_CLIENT = re.compile(r"\bnew\s+PrismaClient\s*\(")
+_PRISMA_PARAM_CLIENT = re.compile(r"\b([A-Za-z_$][\w$]*)\s*:\s*PrismaClient\b")
+_PRISMA_DESTRUCTURE = re.compile(
+    r"(?:const|let|var)\s*\{\s*([^}]*)\s*\}\s*=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;?"
+)
+_PRISMA_METHOD_ALTS = "|".join(_PRISMA_METHODS)
+_PRISMA_DESTRUCTURED_CALL = re.compile(
+    r"([A-Za-z_$][\w$]*)\.(" + _PRISMA_METHOD_ALTS + r")\s*\("
+)
 _PRISMA_METHOD_ALTS = "|".join(_PRISMA_METHODS)
 _PRISMA_CALL = re.compile(
     r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.([A-Za-z_$][\w$]*)\.(" + _PRISMA_METHOD_ALTS + r")\s*\("
@@ -1279,11 +1287,14 @@ def _extract_js(source: str, typeorm_tables: dict[str, str] | None = None, prism
     entity is mapped, or a single UNKNOWN record when it is not. Prisma
     Client calls are typed from ``prisma_tables``: a ``<client>.<model>
     .<method>`` call on a recognized PrismaClient instance (a variable
-    bound by ``new PrismaClient(...)``, or a receiver ending in
-    ``prisma``) yields one record with ``orm_kind`` ``"prisma"`` when the
-    model field is mapped, or a single UNKNOWN record when it is not. A
-    method call on an unbound receiver is not a database access on this
-    evidence and yields no record.
+    bound by ``new PrismaClient(...)``, a function parameter annotated
+    ``: PrismaClient``, or a receiver ending in ``prisma``) yields one
+    record with ``orm_kind`` ``"prisma"`` when the model field is
+    mapped, or a single UNKNOWN record when it is not. A model
+    destructured from a recognized client (``const { photo } = prisma;``)
+    yields the same record for a two-segment ``photo.<method>`` call.
+    A method call on an unbound receiver is not a database access on
+    this evidence and yields no record.
     """
     found: list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]] = []
     for match in _JS_CALL.finditer(source):
@@ -1344,19 +1355,71 @@ def _extract_js(source: str, typeorm_tables: dict[str, str] | None = None, prism
                 source[:new_match.start()])
             if assign is not None:
                 client_bindings.append((new_match.end(), assign.group(1)))
+        # O11: a function parameter annotated `: PrismaClient` is a
+        # client binding too, e.g. async function load(db: PrismaClient).
+        # The character before the name must be `(` or `,`, so an object
+        # type (`{ db: PrismaClient }`) or a class field does not count.
+        param_clients: list[tuple[int, str]] = []
+        for param_match in _PRISMA_PARAM_CLIENT.finditer(source):
+            before = source[:param_match.start(1)].rstrip()
+            if before and before[-1] in "(,":
+                param_clients.append((param_match.end(), param_match.group(1)))
+
+        def _is_client_receiver(receiver: str, pos: int) -> bool:
+            last_segment = receiver.rsplit(".", 1)[-1]
+            return last_segment == "prisma" or any(
+                var == last_segment and end_pos < pos
+                for end_pos, var in client_bindings + param_clients)
+
         for call_match in _PRISMA_CALL.finditer(source):
             receiver, field, method = (call_match.group(1), call_match.group(2),
                                        call_match.group(3))
-            last_segment = receiver.rsplit(".", 1)[-1]
-            is_client = last_segment == "prisma" or any(
-                var == last_segment and end_pos < call_match.start()
-                for end_pos, var in client_bindings)
-            if not is_client:
+            if not _is_client_receiver(receiver, call_match.start()):
                 continue
             line_no = source.count("\n", 0, call_match.start()) + 1
             callee = receiver + "." + field + "." + method
             # The client field is the model name with its first letter
             # lowercased, so uppercasing it recovers the model name.
+            model = field[0].upper() + field[1:]
+            if prisma_tables and model in prisma_tables:
+                found.append((line_no, callee, None, "js-ts-literal-expression",
+                              False, [model], "prisma"))
+            else:
+                found.append((line_no, callee, None, "js-ts-literal-expression",
+                              False, None, None))
+        # O11: models destructured from a recognized client, e.g.
+        # const { photo } = prisma; then photo.findMany(...). Each entry
+        # is (end position of the destructuring, local name, field).
+        model_bindings: list[tuple[int, str, str]] = []
+        for destructure_match in _PRISMA_DESTRUCTURE.finditer(source):
+            fields_text, rhs = (destructure_match.group(1),
+                                destructure_match.group(2))
+            if not _is_client_receiver(rhs, destructure_match.start()):
+                continue
+            for item in fields_text.split(","):
+                item = item.strip()
+                if not item or "=" in item or item.startswith("..."):
+                    continue
+                if ":" in item:
+                    field, local = (part.strip() for part in item.split(":", 1))
+                else:
+                    field, local = item, item
+                if not (re.fullmatch(r"[A-Za-z_$][\w$]*", field)
+                        and re.fullmatch(r"[A-Za-z_$][\w$]*", local)):
+                    continue
+                if any(local_name == local for _, local_name, _ in model_bindings):
+                    continue
+                model_bindings.append((destructure_match.end(), local, field))
+        for call_match in _PRISMA_DESTRUCTURED_CALL.finditer(source):
+            receiver, method = call_match.group(1), call_match.group(2)
+            field = None
+            for end_pos, local, bound_field in model_bindings:
+                if local == receiver and end_pos < call_match.start():
+                    field = bound_field
+            if field is None:
+                continue
+            line_no = source.count("\n", 0, call_match.start()) + 1
+            callee = receiver + "." + method
             model = field[0].upper() + field[1:]
             if prisma_tables and model in prisma_tables:
                 found.append((line_no, callee, None, "js-ts-literal-expression",
