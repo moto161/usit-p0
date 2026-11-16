@@ -2801,5 +2801,257 @@ class TsSuperDelegationReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][1]["function"], "SubHandler.get_uid")
 
 
+class IdentityInheritedMethodReturnPropagationTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _BASE = (
+        "class BaseAuth:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.user.id\n"
+    )
+
+    def test_inherited_method_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth):\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.py#load:7")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_imported_base_class_binds(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._BASE,
+            "handlers.py": (
+                "from auth import BaseAuth\n"
+                "\n\n"
+                "class PhotoHandler(BaseAuth):\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_inherited_request_identity_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                "class BaseAuth:\n"
+                "    def get_owner(self, req):\n"
+                "        return req.body.user_id\n"
+                "\n\n"
+                "class PhotoHandler(BaseAuth):\n"
+                "    def load(self, req):\n"
+                "        owner = self.get_owner(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner])\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_owner")
+
+    def test_overriding_with_non_identity_shadows_base(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth):\n"
+                "    def get_uid(self, req):\n"
+                "        return None\n"
+                "\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_overriding_with_other_identity_binds_that_one(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth):\n"
+                "    def get_uid(self, req):\n"
+                "        return req.body.user_id\n"
+                "\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+
+    def test_super_call_as_alias_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth):\n"
+                "    def load(self, req):\n"
+                "        uid = super().get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_grandparent_method_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class Middle(BaseAuth):\n"
+                "    pass\n"
+                "\n\n"
+                "class Leaf(Middle):\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 13)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 12, 13])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_cyclic_extends_terminates_without_binding(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                "class A(B):\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+                "\n\n"
+                "class B(A):\n"
+                "    def other(self):\n"
+                "        return 1\n"
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_expression_attribute_or_multiple_base_does_not_bind(self):
+        mixin = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(mixin(BaseAuth)):\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(mixin), [])
+        attribute = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(auth.BaseAuth):\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(attribute), [])
+        multiple = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class Other:\n"
+                "    pass\n"
+                "\n\n"
+                "class PhotoHandler(BaseAuth, Other):\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(multiple), [])
+
+    def test_super_delegation_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth):\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+                "\n\n"
+                "class AlbumHandler(BaseAuth):\n"
+                "    def get_uid(self, req):\n"
+                "        return super().get_uid(req)\n"
+                "\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 18)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 14, 17, 18])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "AlbumHandler.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.py#load:16")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+        # P8 combination: the helper class itself inherits the method.
+        helper = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class SubHandler(BaseAuth):\n"
+                "    pass\n"
+                "\n\n"
+                "class PhotoHandler:\n"
+                "    def __init__(self):\n"
+                "        self.helper = SubHandler()\n"
+                "\n"
+                "    def load(self, req):\n"
+                "        uid = self.helper.get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        helper_binding = next(row for row in helper
+                              if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(helper_binding["line"], 16)
+        self.assertEqual([item["line"] for item in helper_binding["details"]["propagation"]],
+                         [3, 15, 16])
+        self.assertEqual(helper_binding["details"]["propagation"][0]["function"],
+                         "BaseAuth.get_uid")
+
+
 if __name__ == "__main__":
     unittest.main()

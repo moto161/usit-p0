@@ -360,6 +360,87 @@ def _python_identity_return_helpers(path: str, source: str) -> dict[str, dict[st
     return helpers
 
 
+def _python_class_method_returns(path: str, source: str) -> dict[
+        tuple[str, str], dict[str, Any]]:
+    """Map (class, method) pairs to their direct returns, for Python.
+
+    Each entry carries the method's ``function_line`` and its direct
+    ``(line, ast.unparse text)`` returns (returns inside nested
+    functions or classes excluded, same traversal as
+    ``_identity_return_profile``). A (class, method) defined twice
+    merges its returns, matching ``_python_identity_return_methods``.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    methods: dict[tuple[str, str], dict[str, Any]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            returns: list[ast.Return] = []
+            stack = list(method.body)
+            while stack:
+                item = stack.pop()
+                if isinstance(item, ast.Return):
+                    returns.append(item)
+                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                else:
+                    stack.extend(ast.iter_child_nodes(item))
+            entry = methods.setdefault((node.name, method.name),
+                                       {"function_line": method.lineno, "returns": []})
+            entry["returns"].extend((ret.lineno, ast.unparse(ret.value))
+                                    for ret in returns if ret.value is not None)
+    return methods
+
+
+def _python_direct_identity_profiles(
+        path: str, methods: dict[tuple[str, str], dict[str, Any]]
+        ) -> dict[tuple[str, str], dict[str, Any]]:
+    """Direct identity profiles for one file's (class, method) -> returns map.
+
+    A method qualifies only when every direct return fully matches one
+    identity pattern, all the same kind and the same expression text.
+    The profile carries the qualified ``Class.method`` name, the
+    defining file, the method's definition line and an empty
+    ``delegation`` list (direct profiles delegate to nothing).
+    """
+    helpers: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, info in methods.items():
+        profile: dict[str, Any] | None = None
+        for line_no, text in info["returns"]:
+            if _TRUSTED.fullmatch(text):
+                kind = "trusted"
+            elif _REQUEST.fullmatch(text):
+                kind = "request"
+            else:
+                profile = None
+                break
+            if profile is None:
+                profile = {"kind": kind, "expression": text,
+                           "return_lines": [line_no],
+                           "function_line": info["function_line"]}
+            elif profile["kind"] != kind or profile["expression"] != text:
+                profile = None
+                break
+            else:
+                profile["return_lines"].append(line_no)
+        if profile is not None:
+            # Return lines are sorted and deduplicated, matching the
+            # previous _python_identity_return_methods merge (the AST
+            # stack walk collects them in reverse source order).
+            profile["return_lines"] = sorted(set(profile["return_lines"]))
+            helpers[key] = {**profile, "path": path,
+                            "function": f"{key[0]}.{key[1]}", "delegation": []}
+    return helpers
+
+
 def _python_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
     """Map (class, method) pairs to their single identity return.
 
@@ -368,33 +449,197 @@ def _python_identity_return_methods(path: str, source: str) -> dict[tuple[str, s
     A (class, method) defined twice with different return profiles is
     ambiguous and dropped. The profile carries the qualified ``Class.method``
     name and the defining file, for propagation records. Non-Python files
-    and syntax-invalid Python deliberately produce no methods.
+    and syntax-invalid Python deliberately produce no methods. This is the
+    direct-only version; methods delegating through ``super()`` need the
+    project-wide ``_python_all_identity_return_methods``.
     """
-    if not path.lower().endswith(".py"):
-        return {}
+    return _python_direct_identity_profiles(path, _python_class_method_returns(path, source))
+
+
+def _python_top_level_class_names(source: str) -> set[str]:
+    """Top-level class names defined in one Python source (AST, fail-closed)."""
     try:
-        tree = ast.parse(source, filename=path)
+        tree = ast.parse(source)
     except (SyntaxError, ValueError):
-        return {}
-    candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef):
+        return set()
+    return {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+
+
+def _python_base_classes(
+        code_by_file: dict[str, str]) -> dict[str, dict[str, tuple[str, str]]]:
+    """Map files to {class: (base file, base class)} for Python extends clauses.
+
+    Only single inheritance with a bare-identifier base counts
+    (``class X(Base)``): the base resolves to a top-level class of the
+    same file first, else through a ``from <module> import Base`` to a
+    project file defining it (same import rules as
+    ``_python_imported_identity_helpers``; re-exports not followed).
+    Multiple inheritance, expression bases (``class X(mixin(Base))``)
+    and attribute bases (``class X(auth.Base)``) leave the class
+    without a base (fail closed). Only top-level classes are recorded.
+    """
+    module_index = _python_module_index(code_by_file)
+    result: dict[str, dict[str, tuple[str, str]]] = {}
+    for path, source in code_by_file.items():
+        if not path.lower().endswith(".py"):
             continue
-        for method in node.body:
-            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        try:
+            tree = ast.parse(source, filename=path)
+        except (SyntaxError, ValueError):
+            continue
+        class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+        caller_package = _package_for_module(_module_for_path(path), path)
+        bases: dict[str, tuple[str, str]] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
                 continue
-            profile = _identity_return_profile(method)
-            if profile is not None:
-                candidates.setdefault((node.name, method.name), []).append(profile)
-    methods: dict[tuple[str, str], dict[str, Any]] = {}
-    for key, profiles in candidates.items():
-        first = profiles[0]
-        if all(p["kind"] == first["kind"] and p["expression"] == first["expression"]
-               for p in profiles):
-            methods[key] = {**first, "return_lines": sorted(
-                {line for p in profiles for line in p["return_lines"]}),
-                "path": path, "function": f"{key[0]}.{key[1]}"}
-    return methods
+            if len(node.bases) != 1 or not isinstance(node.bases[0], ast.Name):
+                continue
+            base = node.bases[0].id
+            if base in class_names:
+                bases[node.name] = (path, base)
+                continue
+            target_path: str | None = None
+            for import_node in tree.body:
+                if not isinstance(import_node, ast.ImportFrom) or import_node.module is None:
+                    continue
+                if import_node.level and import_node.level > 0:
+                    absolute = _relative_module(caller_package, import_node.level,
+                                                import_node.module)
+                else:
+                    absolute = import_node.module
+                if absolute is None:
+                    continue
+                candidate = module_index.get(absolute)
+                if candidate is None:
+                    continue
+                if any(alias.name == base and (alias.asname or alias.name) == base
+                       for alias in import_node.names):
+                    target_path = candidate
+                    break
+            if target_path is None:
+                continue
+            if base in _python_top_level_class_names(code_by_file[target_path]):
+                bases[node.name] = (target_path, base)
+        if bases:
+            result[path] = bases
+    return result
+
+
+def _python_method_profile(file: str, cls: str, method: str,
+                           profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
+                           defined: dict[str, set[tuple[str, str]]],
+                           bases: dict[str, dict[str, tuple[str, str]]],
+                           skip_self: bool = False) -> dict[str, Any] | None:
+    """Resolve a method to its single identity return profile, walking the extends chain.
+
+    The Python mirror of ``_ts_method_profile``: the class itself first
+    (unless ``skip_self``, for ``super()`` calls, which skip the current
+    class): defined but without an identity profile means shadowed --
+    return None and do not walk up. Not defined: walk up the extends
+    chain (at most 8 levels, cycle-safe); each ancestor either defines
+    the method (profile or shadowed None) or not (continue). A profile
+    carries the defining file's path.
+    """
+    if not skip_self and (cls, method) in defined.get(file, set()):
+        return profiles.get(file, {}).get((cls, method))
+    seen: set[tuple[str, str]] = set()
+    current_file, current_class = file, cls
+    for _ in range(8):
+        base = bases.get(current_file, {}).get(current_class)
+        if base is None:
+            return None
+        base_file, base_class = base
+        if (base_file, base_class) in seen:
+            return None
+        seen.add((base_file, base_class))
+        if (base_class, method) in defined.get(base_file, set()):
+            return profiles.get(base_file, {}).get((base_class, method))
+        current_file, current_class = base_file, base_class
+    return None
+
+
+def _python_all_identity_return_methods(
+        code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
+    """Project-wide Python identity return profiles, including super() delegation.
+
+    Direct profiles first, then up to 8 fixpoint rounds resolving
+    methods whose every direct return is an identity expression or a
+    ``super().<method>(...)`` call to an already-profiled base method
+    (P9 chain walk, ``skip_self=True``; only zero-argument ``super()``
+    counts). All returns must agree on kind, expression and delegation
+    steps: a direct return mixed with a super-delegated return, or
+    super calls to different targets, disqualifies the method. A
+    delegating profile carries ``delegation``: the target profile's
+    return evidence items (its own delegation first, then its return
+    lines), each ``{path, line, function, returns}``.
+    """
+    scans = {
+        path: _python_class_method_returns(path, source)
+        for path, source in code_by_file.items()
+        if path.lower().endswith(".py")
+    }
+    bases = _python_base_classes(code_by_file)
+    defined = {
+        path: {(cls, method) for (cls, method) in methods}
+        for path, methods in scans.items()
+    }
+    profiles = {
+        path: _python_direct_identity_profiles(path, methods)
+        for path, methods in scans.items()
+    }
+    for _round in range(8):
+        changed = False
+        for path, methods in scans.items():
+            for key, info in methods.items():
+                if key in profiles[path]:
+                    continue
+                profile: dict[str, Any] | None = None
+                delegation: list[dict[str, Any]] | None = None
+                for line_no, text in info["returns"]:
+                    step: list[dict[str, Any]] | None = None
+                    if _TRUSTED.fullmatch(text):
+                        kind, expr = "trusted", text
+                    elif _REQUEST.fullmatch(text):
+                        kind, expr = "request", text
+                    else:
+                        match = _PY_SUPER_CALL_RE.match(text)
+                        if not match:
+                            profile = None
+                            break
+                        target = _python_method_profile(
+                            path, key[0], match.group(1), profiles, defined, bases,
+                            skip_self=True)
+                        if target is None:
+                            profile = None
+                            break
+                        kind, expr = target["kind"], target["expression"]
+                        step = target.get("delegation", []) + [
+                            {"path": target["path"], "line": return_line,
+                             "function": target["function"],
+                             "returns": target["expression"]}
+                            for return_line in target["return_lines"]]
+                    if profile is None:
+                        profile = {"kind": kind, "expression": expr,
+                                   "return_lines": [line_no],
+                                   "function_line": info["function_line"]}
+                        delegation = step if step is not None else []
+                    elif (profile["kind"] != kind or profile["expression"] != expr
+                          or delegation != (step if step is not None else [])):
+                        profile = None
+                        break
+                    else:
+                        profile["return_lines"].append(line_no)
+                if profile is not None:
+                    profile["return_lines"] = sorted(set(profile["return_lines"]))
+                    profiles[path][key] = {
+                        **profile, "path": path,
+                        "function": f"{key[0]}.{key[1]}",
+                        "delegation": delegation if delegation is not None else []}
+                    changed = True
+        if not changed:
+            break
+    return profiles
 
 
 def _python_class_method_ranges(path: str, source: str) -> dict[int, str]:
@@ -456,6 +701,8 @@ _TS_EXTENDS_RE = re.compile(
     r"([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b"
 )
 _TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
+_PY_SUPER_CALL_RE = re.compile(r"^super\(\)\.([A-Za-z_]\w*)\s*\(")
+_PY_SUPER_CALL_RHS = re.compile(r"super\(\)\.([A-Za-z_]\w*)\s*\(.*\)$")
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
 
@@ -752,6 +999,7 @@ def _ts_all_identity_return_methods(
                     else:
                         profile["return_lines"].append(line_no)
                 if profile is not None:
+                    profile["return_lines"] = sorted(set(profile["return_lines"]))
                     profiles[path][key] = {
                         **profile, "path": path,
                         "function": f"{key[0]}.{key[1]}",
@@ -1288,11 +1536,13 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
-    same_file_methods = {
-        file_path: _python_identity_return_methods(file_path, file_source)
+    same_file_methods = _python_all_identity_return_methods(code_by_file)
+    py_defined_methods = {
+        file_path: set(_python_class_method_returns(file_path, file_source))
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
+    py_base_classes = _python_base_classes(code_by_file)
     same_file_instance_bindings = {
         file_path: _python_instance_attribute_classes(file_path, file_source)
         for file_path, file_source in code_by_file.items()
@@ -1338,6 +1588,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_instance_bindings = {}
             ts_cross_bindings = {}
             ts_has_base = False
+            py_has_base = path in py_base_classes
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
@@ -1351,6 +1602,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_instance_bindings = ts_same_file_instance.get(path, {})
             ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
             ts_has_base = path in ts_base_classes
+            py_has_base = False
         else:
             function_owners = {}
             return_helpers = {}
@@ -1363,6 +1615,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_instance_bindings = ts_same_file_instance.get(path, {})
             ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
             ts_has_base = path in ts_base_classes
+            py_has_base = False
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -1551,7 +1804,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                 elif (return_helpers or bindings or method_helpers
                         or instance_bindings or ts_method_helpers
                         or ts_instance_bindings or ts_cross_bindings
-                        or ts_has_base):
+                        or ts_has_base or py_has_base):
                     # P4/P5: one hop through a same-file or from-imported
                     # helper, e.g. uid = get_uid(req). Only a bare call
                     # counts: no method call, no await, no attribute access
@@ -1569,12 +1822,18 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                         if helper is None and attr_match:
                             # P7: one hop through a method of the enclosing
                             # class, e.g. uid = self.get_uid(req) or
-                            # uid = cls.get_uid(req).
+                            # uid = cls.get_uid(req). P9: when the enclosing
+                            # class does not define the method, walk up the
+                            # extends chain (a definition without an identity
+                            # profile shadows the base and stops the walk).
                             parts = attr_match.group(1).split(".")
                             if len(parts) == 2 and parts[0] in ("self", "cls"):
                                 enclosing = class_ranges.get(line_no)
                                 if enclosing is not None:
-                                    helper = method_helpers.get((enclosing, parts[1]))
+                                    helper = _python_method_profile(
+                                        path, enclosing, parts[1],
+                                        same_file_methods, py_defined_methods,
+                                        py_base_classes)
                             elif len(parts) == 2 and parts[0] == "this":
                                 # T1: one hop through a method of the
                                 # enclosing TS/JS class, e.g.
@@ -1632,7 +1891,24 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                 if enclosing is not None:
                                     target = instance_bindings.get((enclosing, parts[1]))
                                     if target is not None:
-                                        helper = method_helpers.get((target, parts[2]))
+                                        # P9: the helper's class may itself
+                                        # inherit the method.
+                                        helper = _python_method_profile(
+                                            path, target, parts[2],
+                                            same_file_methods, py_defined_methods,
+                                            py_base_classes)
+                    if helper is None:
+                        # P9: one hop through the direct base class, e.g.
+                        # uid = super().get_uid(req). (attr_call cannot
+                        # match this: its dotted prefix contains "()".)
+                        super_match = _PY_SUPER_CALL_RHS.fullmatch(rhs)
+                        if super_match:
+                            enclosing = class_ranges.get(line_no)
+                            if enclosing is not None:
+                                helper = _python_method_profile(
+                                    path, enclosing, super_match.group(1),
+                                    same_file_methods, py_defined_methods,
+                                    py_base_classes, skip_self=True)
                     if helper is not None:
                         aliases[name] = {
                             "kind": helper["kind"], "expression": helper["expression"],
