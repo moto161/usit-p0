@@ -864,24 +864,41 @@ function main(input) {
     // null for a `let` declared without an initializer) per function/block
     // scope; the module frame at the bottom stays visible file-wide, while
     // lookup stops at the nearest enclosing function frame, so closures
-    // never resolve. `var` is never recorded (hoisting breaks the
-    // straight-line reading). Lookup is source-ordered: a binding only
-    // exists after its declaration has been visited.
+    // never resolve. R3-4: `var` is recorded too -- it has neither flag
+    // bit (there is no NodeFlags.Var), and it is function-scoped, so its
+    // binding lives in the nearest function/module frame rather than the
+    // current block frame. A `var` declared inside a block registers the
+    // binding in that block's dirty map, so the binding is deleted when
+    // the block pops: the initializer may never have run, and the value
+    // outside the block is unknown. Lookup is source-ordered: a binding
+    // only exists after its declaration has been visited, so a call
+    // before a `var` declaration never resolves (hoisting lifts the
+    // declaration, not the assignment).
     const urlBindingScopes = [{ isFunction: false, isModule: true, map: new Map(), dirty: new Map() }];
     function recordUrlBinding(statement) {
       const flags = statement.declarationList.flags;
       const isConst = !!(flags & ts.NodeFlags.Const);
       const isLet = !!(flags & ts.NodeFlags.Let);
-      if (!isConst && !isLet) return;
+      const isVar = !isConst && !isLet;
+      let target = urlBindingScopes[urlBindingScopes.length - 1];
+      if (isVar) {
+        for (let i = urlBindingScopes.length - 1; i >= 0; i--) {
+          if (urlBindingScopes[i].isFunction || urlBindingScopes[i].isModule) {
+            target = urlBindingScopes[i];
+            break;
+          }
+        }
+      }
+      const current = urlBindingScopes[urlBindingScopes.length - 1];
       for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name)) continue;
         if (isConst) {
           if (declaration.initializer) {
-            urlBindingScopes[urlBindingScopes.length - 1].map.set(declaration.name.text, declaration.initializer);
+            target.map.set(declaration.name.text, declaration.initializer);
           }
         } else {
-          urlBindingScopes[urlBindingScopes.length - 1].map.set(
-            declaration.name.text, declaration.initializer || null);
+          target.map.set(declaration.name.text, declaration.initializer || null);
+          if (isVar && target !== current) current.dirty.set(declaration.name.text, target);
         }
       }
     }

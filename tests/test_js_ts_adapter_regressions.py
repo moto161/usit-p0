@@ -910,5 +910,114 @@ class PlusChainUrlTests(unittest.TestCase):
         self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
 
 
+class VarBoundUrlTests(unittest.TestCase):
+    def _calls(self, source, filename="api.js"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / filename).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = parsed["files"][filename]["api_client_calls"]
+            return sorted(calls, key=lambda item: item["line"])
+
+    def test_var_literal_url_resolves(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  var url = '/api/photos';\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_var_plus_chain_url_resolves_as_template(self):
+        calls = self._calls(
+            "function load(id) {\n"
+            "  var url = '/api/photos/' + id;\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos/{?}")
+        self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_var_call_before_declaration_stays_dynamic(self):
+        # Hoisting lifts the declaration, not the assignment: at the call
+        # the value is undefined, so it must not resolve.
+        calls = self._calls(
+            "function load() {\n"
+            "  const r = fetch(url);\n"
+            "  var url = '/api/photos';\n"
+            "  return r;\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_var_declared_in_block_stays_dynamic_outside(self):
+        calls = self._calls(
+            "function load(flag) {\n"
+            "  if (flag) { var url = '/api/other'; }\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_var_declared_in_block_resolves_inside(self):
+        calls = self._calls(
+            "function load(flag) {\n"
+            "  if (flag) {\n"
+            "    var url = '/api/other';\n"
+            "    return fetch(url);\n"
+            "  }\n"
+            "  return fetch('/api/fallback');\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["path"], "/api/other")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+        self.assertEqual(calls[1]["path"], "/api/fallback")
+        self.assertEqual(calls[1]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_var_declared_then_assigned_resolves(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  var url;\n"
+            "  url = '/api/photos';\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_var_in_closure_stays_dynamic(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  var url = '/api/photos';\n"
+            "  function inner() { return fetch(url); }\n"
+            "  return inner();\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_var_compound_assignment_stays_dynamic(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  var url = '/api/photos';\n"
+            "  url += '/more';\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+
 if __name__ == "__main__":
     unittest.main()
