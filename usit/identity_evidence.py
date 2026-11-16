@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import posixpath
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -444,6 +445,12 @@ _TS_THIS_ASSIGN_RE = re.compile(
     r"^\s*this\.([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+?)\s*;?\s*$"
 )
 _TS_NEW_RE = re.compile(r"^new\s+([A-Za-z_$][\w$]*)\s*(?:\(|;|$)")
+_TS_NAMED_IMPORT_RE = re.compile(
+    r"import\s*\{([^}]*)\}\s*from\s*[\"']([^\"']+)[\"']"
+)
+_TS_IMPORT_SPEC_RE = re.compile(
+    r"^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$"
+)
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
 
@@ -663,6 +670,158 @@ def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
         return {}
     _methods, ranges, _candidates, _names = _ts_class_scan(path, source)
     return ranges
+
+
+def _strip_ts_comment(line: str) -> str:
+    """Remove // and same-line /* */ comments, keeping string contents.
+
+    ``_strip_ts_line`` also blanks string contents, which is right for
+    return scanning but wrong for import parsing (the module specifier
+    is a string). This keeps strings intact and only cuts comments.
+    """
+    out: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(line):
+        ch = line[index]
+        if quote is not None:
+            out.append(ch)
+            if ch == "\\" and index + 1 < len(line):
+                out.append(line[index + 1])
+                index += 2
+                continue
+            if ch == quote:
+                quote = None
+            index += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            out.append(ch)
+        elif ch == "/" and index + 1 < len(line) and line[index + 1] == "/":
+            break
+        elif ch == "/" and index + 1 < len(line) and line[index + 1] == "*":
+            end = line.find("*/", index + 2)
+            if end == -1:
+                break
+            index = end + 2
+            continue
+        else:
+            out.append(ch)
+        index += 1
+    return "".join(out)
+
+
+def _ts_import_bindings(path: str, source: str) -> dict[str, tuple[str, str]]:
+    """Map local names to (module specifier, imported name) for named TS/JS imports.
+
+    Only value named imports count (``import { A, B as C } from "./x"``);
+    default imports, namespace imports, side-effect imports, dynamic
+    ``import(...)``, ``require(...)`` and ``import type`` are ignored.
+    A local name imported from two different modules is ambiguous and
+    dropped. Multi-line imports are joined until the ``from "..."``
+    part is complete.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+        return {}
+    bindings: dict[str, tuple[str, str]] = {}
+    ambiguous: set[str] = set()
+    lines = source.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = _strip_ts_comment(lines[index])
+        head = stripped.lstrip()
+        if (head.startswith("import") and not head.startswith("import(")
+                and not re.match(r"import\s+type\b", head)):
+            buf = stripped
+            while (not re.search(r"from\s*[\"'][^\"']+[\"']", buf)
+                   and index + 1 < len(lines)):
+                index += 1
+                buf += " " + _strip_ts_comment(lines[index])
+            for match in _TS_NAMED_IMPORT_RE.finditer(buf):
+                specifier = match.group(2)
+                for spec in match.group(1).split(","):
+                    spec = spec.strip()
+                    if not spec:
+                        continue
+                    spec_match = _TS_IMPORT_SPEC_RE.match(spec)
+                    if not spec_match:
+                        continue
+                    imported = spec_match.group(1)
+                    local = spec_match.group(2) or imported
+                    if local in ambiguous:
+                        continue
+                    binding = (specifier, imported)
+                    if local in bindings and bindings[local] != binding:
+                        del bindings[local]
+                        ambiguous.add(local)
+                    else:
+                        bindings[local] = binding
+        index += 1
+    return bindings
+
+
+def _ts_resolve_import(specifier: str, from_path: str,
+                       code_by_file: dict[str, str]) -> str | None:
+    """Resolve a relative TS/JS import specifier to a project file path.
+
+    Only relative specifiers (``./`` / ``../``) resolve, against the
+    importing file's directory, trying the usual extension and
+    ``index`` variants. The target must be a file in ``code_by_file``;
+    package imports, ``tsconfig`` path aliases and anything outside
+    the project fail closed.
+    """
+    if not specifier.startswith(("./", "../")):
+        return None
+    base = posixpath.normpath(posixpath.join(posixpath.dirname(from_path), specifier))
+    for candidate in [base + ext for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")]:
+        if candidate in code_by_file:
+            return candidate
+    for candidate in [base + "/index" + ext for ext in (".ts", ".tsx", ".js", ".jsx")]:
+        if candidate in code_by_file:
+            return candidate
+    return None
+
+
+def _ts_cross_file_instance_bindings(
+        code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], tuple[str, str]]]:
+    """Map files to cross-file (class, attribute) -> (target file, class) bindings.
+
+    The TS mirror of ``_python_imported_identity_helpers`` for instance
+    attributes: for each file, take the ``_ts_class_scan`` candidates
+    whose constructed class is not a top-level class of the same file
+    (those are the same-file T2 bindings) and, when the constructed
+    name is a named import resolving to a project file that defines
+    the imported name as a top-level class, record the cross-file
+    binding. The T2 disqualification rule applies first: an attribute
+    with a non-construction binding or two different constructed
+    classes is dropped here too.
+    """
+    result: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
+    for path, source in code_by_file.items():
+        if path.lower().endswith(".py"):
+            continue
+        _methods, _ranges, candidates, class_names = _ts_class_scan(path, source)
+        imports = _ts_import_bindings(path, source)
+        bindings: dict[tuple[str, str], tuple[str, str]] = {}
+        for (cls, attr), constructed in candidates.items():
+            if len(constructed) != 1:
+                continue
+            only = next(iter(constructed))
+            if only is None or only in class_names:
+                continue
+            binding = imports.get(only)
+            if binding is None:
+                continue
+            specifier, imported = binding
+            target = _ts_resolve_import(specifier, path, code_by_file)
+            if target is None or target == path:
+                continue
+            _m, _r, _c, target_classes = _ts_class_scan(target, code_by_file[target])
+            if imported in target_classes:
+                bindings[(cls, attr)] = (target, imported)
+        if bindings:
+            result[path] = bindings
+    return result
 
 
 def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
@@ -979,6 +1138,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if not file_path.lower().endswith(".py")
     }
+    ts_cross_instance_bindings = _ts_cross_file_instance_bindings(code_by_file)
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
             function_owners = _python_function_owners(path, source)
@@ -994,6 +1154,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_method_helpers = {}
             ts_class_ranges = {}
             ts_instance_bindings = {}
+            ts_cross_bindings = {}
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
@@ -1005,6 +1166,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
+            ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
         else:
             function_owners = {}
             return_helpers = {}
@@ -1015,6 +1177,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
+            ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -1202,7 +1365,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      ]}
                 elif (return_helpers or bindings or method_helpers
                         or instance_bindings or ts_method_helpers
-                        or ts_instance_bindings):
+                        or ts_instance_bindings or ts_cross_bindings):
                     # P4/P5: one hop through a same-file or from-imported
                     # helper, e.g. uid = get_uid(req). Only a bare call
                     # counts: no method call, no await, no attribute access
@@ -1242,6 +1405,16 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                     target = ts_instance_bindings.get((enclosing, parts[1]))
                                     if target is not None:
                                         helper = ts_method_helpers.get((target, parts[2]))
+                                    else:
+                                        # T3: the attribute's class lives in
+                                        # another file, brought in by a named
+                                        # import; the profile carries the
+                                        # target file's path.
+                                        cross = ts_cross_bindings.get((enclosing, parts[1]))
+                                        if cross is not None:
+                                            target_file, target_class = cross
+                                            helper = ts_same_file_methods.get(
+                                                target_file, {}).get((target_class, parts[2]))
                             elif len(parts) == 3 and parts[0] == "self":
                                 # P8: one hop through an instance attribute
                                 # bound in the enclosing class, e.g.

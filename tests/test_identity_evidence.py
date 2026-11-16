@@ -2055,11 +2055,159 @@ class TsInstanceAttributeReturnPropagationTests(unittest.TestCase):
         )
         self.assertEqual(len(self._direct_bindings(self._rows(nested_arrow))), 1)
 
-    def test_helper_class_in_another_file_does_not_bind(self):
+class TsCrossFileClassReturnPropagationTests(unittest.TestCase):
+    def _rows_files(self, files):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                (root / name).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners)
+
+    def _rows(self, source, filename="handlers.ts"):
+        return self._rows_files({filename: source})
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _HELPER = (
+        "export class AuthHelper {\n"
+        "  get_uid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    _HANDLER = (
+        'import { AuthHelper } from "./auth";\n'
+        "\n"
+        "export class PhotoHandler {\n"
+        "  constructor() {\n"
+        "    this.helper = new AuthHelper();\n"
+        "  }\n"
+        "  load(req: any) {\n"
+        "    const uid = this.helper.get_uid(req);\n"
+        '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+        "  }\n"
+        "}\n"
+    )
+
+    def test_imported_helper_binds(self):
+        # Moved from T2 (test_helper_class_in_another_file_does_not_bind):
+        # the same fixture now binds through the cross-file import.
+        rows = self._rows_files({"auth.ts": self._HELPER, "handlers.ts": self._HANDLER})
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:7")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_field_declared_imported_helper_binds(self):
         rows = self._rows_files({
             "auth.ts": self._HELPER,
             "handlers.ts": (
                 'import { AuthHelper } from "./auth";\n'
+                "\n"
+                "export class AlbumHandler {\n"
+                "  private helper = new AuthHelper();\n"
+                "  load(req: any) {\n"
+                "    const uid = this.helper.get_uid(req);\n"
+                '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+
+    def test_imported_helper_returning_request_identity_binds(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export class AuthHelper {\n"
+                "  get_owner(req: any) {\n"
+                "    return req.body.user_id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                'import { AuthHelper } from "./auth";\n'
+                "\n"
+                "export class PhotoHandler {\n"
+                "  constructor() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  }\n"
+                "  load(req: any) {\n"
+                "    const owner = this.helper.get_owner(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_owner")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+
+    def test_aliased_import_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._HELPER,
+            "handlers.ts": (
+                'import { AuthHelper as Helper } from "./auth";\n'
+                "\n"
+                "export class PhotoHandler {\n"
+                "  constructor() {\n"
+                "    this.helper = new Helper();\n"
+                "  }\n"
+                "  load(req: any) {\n"
+                "    const uid = this.helper.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+
+    def test_multiline_import_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._HELPER,
+            "handlers.ts": (
+                "import {\n"
+                "  AuthHelper,\n"
+                '} from "./auth";\n'
+                "\n"
+                "export class PhotoHandler {\n"
+                "  constructor() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  }\n"
+                "  load(req: any) {\n"
+                "    const uid = this.helper.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(len(self._direct_bindings(rows)), 1)
+
+    def test_imported_module_not_in_project_does_not_bind(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                'import { AuthHelper } from "./missing";\n'
+                "\n"
                 "export class PhotoHandler {\n"
                 "  constructor() {\n"
                 "    this.helper = new AuthHelper();\n"
@@ -2072,6 +2220,95 @@ class TsInstanceAttributeReturnPropagationTests(unittest.TestCase):
             ),
         })
         self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_imported_name_not_a_class_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export function AuthHelper(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "handlers.ts": self._HANDLER,
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_type_only_import_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._HELPER,
+            "handlers.ts": (
+                'import type { AuthHelper } from "./auth";\n'
+                "\n"
+                "export class PhotoHandler {\n"
+                "  constructor() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  }\n"
+                "  load(req: any) {\n"
+                "    const uid = this.helper.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_same_local_imported_from_two_modules_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._HELPER,
+            "other.ts": (
+                "export class AuthHelper {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.body.user_id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                'import { AuthHelper } from "./auth";\n'
+                'import { AuthHelper } from "./other";\n'
+                "\n"
+                "export class PhotoHandler {\n"
+                "  constructor() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  }\n"
+                "  load(req: any) {\n"
+                "    const uid = this.helper.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_same_file_class_wins_over_import(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export class AuthHelper {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.body.user_id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                'import { AuthHelper } from "./auth";\n'
+                "export class AuthHelper {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+                "export class PhotoHandler {\n"
+                "  constructor() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  }\n"
+                "  load(req: any) {\n"
+                "    const uid = this.helper.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
 
 
 if __name__ == "__main__":
