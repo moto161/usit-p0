@@ -704,6 +704,14 @@ _TS_TOPLEVEL_FN_RE = re.compile(
     r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*"
     r"([A-Za-z_$][\w$]*)\s*\("
 )
+_TS_TOPLEVEL_ARROW_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:async\s+)?(?:\((?:[^)]*)\)|[A-Za-z_$][\w$]*)\s*=>"
+)
+_TS_TOPLEVEL_FN_EXPR_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:async\s+)?function\s*(?:[A-Za-z_$][\w$]*)?\s*\("
+)
 _TS_EXTENDS_RE = re.compile(
     r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+"
     r"([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b"
@@ -1158,6 +1166,34 @@ def _ts_top_level_function_returns(path: str, source: str) -> dict[str, list[tup
                                   "depth": interior(stripped.index("{") + 1),
                                   "name": match.group(1), "returns": []})
                     fn_frame = stack[-1]
+                else:
+                    # T8: a top-level const bound to an arrow function or
+                    # a function expression counts as a top-level
+                    # function. An expression-bodied arrow returns its
+                    # body on the same line; a block-bodied arrow or a
+                    # function expression opens a frame like a
+                    # declaration. A `=>` with no same-line body, a
+                    # type-annotated const, or a parameter list the
+                    # regex cannot read fails closed.
+                    arrow = _TS_TOPLEVEL_ARROW_RE.match(stripped)
+                    fn_expr = None if arrow else _TS_TOPLEVEL_FN_EXPR_RE.match(stripped)
+                    if arrow:
+                        # The match ends right after `=>`.
+                        arrow_pos = arrow.end() - 2
+                        body = stripped[arrow_pos + 2:].strip().rstrip(";").strip()
+                        if body.startswith("{"):
+                            stack.append({"kind": "function",
+                                          "depth": interior(stripped.index("{", arrow_pos) + 1),
+                                          "name": arrow.group(1), "returns": []})
+                            fn_frame = stack[-1]
+                        elif body:
+                            functions.setdefault(arrow.group(1), []).append(
+                                (line_no, body))
+                    elif fn_expr and "{" in stripped:
+                        stack.append({"kind": "function",
+                                      "depth": interior(stripped.index("{") + 1),
+                                      "name": fn_expr.group(1), "returns": []})
+                        fn_frame = stack[-1]
             elif fn_frame is not None and "{" in stripped:
                 brace_depth = interior(stripped.index("{") + 1)
                 if brace_depth > fn_frame["depth"]:

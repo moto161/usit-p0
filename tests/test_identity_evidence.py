@@ -3439,15 +3439,180 @@ class TsNamespaceImportReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
         self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
 
-    def test_arrow_function_const_does_not_bind(self):
-        # Out of scope for T6 (only `function` declarations qualify):
-        # an arrow-function const is not a top-level function profile.
+    def test_arrow_function_const_binds(self):
+        # Boundary move (T8): out of scope for T6 (only `function`
+        # declarations qualified), but T8 gives a const-bound arrow
+        # function the same top-level profile, so it now binds.
         rows = self._rows(
             "export const get_uid = (req: any) => req.user.id;\n"
             "export function load(req: any) {\n"
             "  const uid = get_uid(req);\n"
             "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
             "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 4)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [1, 3, 4])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:2")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+
+class TsConstFunctionReturnPropagationTests(unittest.TestCase):
+    def _rows_files(self, files):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                (root / name).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners)
+
+    def _rows(self, source, filename="handlers.ts"):
+        return self._rows_files({filename: source})
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _LOAD = (
+        "export function load(req: any) {\n"
+        "  const uid = get_uid(req);\n"
+        '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+        "}\n"
+    )
+
+    def test_arrow_const_expression_body_binds(self):
+        rows = self._rows(
+            "export const get_uid = (req: any) => req.user.id;\n"
+            "\n"
+            + self._LOAD
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [1, 4, 5])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:3")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_arrow_const_block_body_binds(self):
+        rows = self._rows(
+            "export const get_uid = (req: any) => {\n"
+            "  return req.user.id;\n"
+            "};\n"
+            "\n"
+            + self._LOAD
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_function_expression_const_binds(self):
+        rows = self._rows(
+            "const get_uid = function(req: any) {\n"
+            "  return req.user.id;\n"
+            "};\n"
+            "\n"
+            + self._LOAD
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_async_arrow_const_binds(self):
+        rows = self._rows(
+            "export const get_uid = async (req: any) => req.user.id;\n"
+            "\n"
+            + self._LOAD
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_bare_param_arrow_const_binds(self):
+        rows = self._rows(
+            "const get_uid = req => req.user.id;\n"
+            "\n"
+            + self._LOAD
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_imported_arrow_const_binds(self):
+        rows = self._rows_files({
+            "auth.ts": "export const get_uid = (req: any) => req.user.id;\n",
+            "handlers.ts": (
+                'import { get_uid } from "./auth";\n'
+                "\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [1, 4, 5])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:3")
+
+    def test_namespace_imported_arrow_const_binds(self):
+        rows = self._rows_files({
+            "auth.ts": "export const get_uid = (req: any) => req.user.id;\n",
+            "handlers.ts": (
+                'import * as auth from "./auth";\n'
+                "\n"
+                "export function load(req: any) {\n"
+                "  const uid = auth.get_uid(req);\n"
+                '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_arrow_const_non_identity_body_does_not_bind(self):
+        rows = self._rows(
+            "export const get_uid = (req: any) => req.session.id;\n"
+            "\n"
+            + self._LOAD
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_arrow_const_block_mixed_returns_do_not_bind(self):
+        rows = self._rows(
+            "export const get_uid = (req: any) => {\n"
+            "  if (req.user) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  return req.session.id;\n"
+            "};\n"
+            "\n"
+            + self._LOAD
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_annotated_arrow_const_does_not_bind(self):
+        rows = self._rows(
+            "const get_uid: (req: any) => string = (req) => req.user.id;\n"
+            "\n"
+            + self._LOAD
         )
         self.assertEqual(self._direct_bindings(rows), [])
 
