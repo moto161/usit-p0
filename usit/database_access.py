@@ -30,7 +30,10 @@ only when the file imports ``select`` from SQLAlchemy (bare name or
 ``<module>.select``); ``session.execute(select(...))`` -- including a
 chained ``select(...).where(...)`` -- is resolved to the same SELECT
 record, with the inner ``select()`` call consumed so it is not counted
-twice.
+twice. ``join`` / ``outerjoin`` steps on a ``select()`` chain contribute
+their first argument's model when it is a bare mapped model name; a
+relationship-attribute or unmapped join target fails the whole chain
+closed to UNKNOWN.
 Django-style ``Model.objects.filter/get/exclude/all/create`` calls are
 typed the same way from the project's own model classes: a model whose
 nested ``Meta`` class directly assigns ``db_table = '<table>'`` maps to
@@ -789,16 +792,31 @@ def _select_call_models(node: ast.AST, bare_names: set[str], module_names: set[s
                         orm_tables: dict[str, str] | None) -> tuple[ast.Call, list[str] | None] | None:
     """Resolve a ``select()`` call (or a chain bottoming out at one).
 
-    Walks down attribute-call chains (``select(...).where(...)``) to the
-    ``select()`` call. Returns ``(select_node, models)``: ``models`` is
-    the sorted model list when every argument resolves to a mapped model
-    (a bare name, or a ``Model.<column>`` attribute whose receiver is a
-    mapped bare name), else None. Returns None when the node is not a
-    ``select()`` call at all.
+    Walks down attribute-call chains (``select(...).where(...)``,
+    ``select(...).join(...)``) to the ``select()`` call. ``join`` /
+    ``outerjoin`` steps on the way contribute their first argument when
+    it is a bare mapped model name; a non-model, relationship-attribute
+    (``Photo.albums``) or missing first argument fails the whole chain
+    closed. Returns ``(select_node, models)``: ``models`` is the sorted
+    union of the ``select()`` arguments' models and the join targets when
+    every argument resolves to a mapped model (a bare name, or a
+    ``Model.<column>`` attribute whose receiver is a mapped bare name),
+    else None. Returns None when the node is not a ``select()`` call at
+    all.
     """
     cur: ast.AST = node
+    join_models: list[str] = []
+    join_failed = False
     while (isinstance(cur, ast.Call) and isinstance(cur.func, ast.Attribute)
            and isinstance(cur.func.value, ast.Call)):
+        if cur.func.attr in ("join", "outerjoin"):
+            if cur.args and isinstance(cur.args[0], ast.Name):
+                if orm_tables and cur.args[0].id in orm_tables:
+                    join_models.append(cur.args[0].id)
+                else:
+                    join_failed = True
+            else:
+                join_failed = True
         cur = cur.func.value
     if not isinstance(cur, ast.Call) or not _is_direct_select_call(cur, bare_names, module_names):
         return None
@@ -815,7 +833,9 @@ def _select_call_models(node: ast.AST, bare_names: set[str], module_names: set[s
         if not orm_tables or model not in orm_tables:
             return (cur, None)
         models.append(model)
-    return (cur, sorted(set(models)))
+    if join_failed:
+        return (cur, None)
+    return (cur, sorted(set(models + join_models)))
 
 
 def _extract_python(source: str, orm_tables: dict[str, str] | None = None, django_tables: dict[str, str] | None = None) -> list[tuple[int, str, str | None, str, bool, list[str] | None, str | None]]:
@@ -841,6 +861,14 @@ def _extract_python(source: str, orm_tables: dict[str, str] | None = None, djang
                 if id(node) in consumed:
                     self.generic_visit(node)
                     return
+                # O4/O5: a bound select(Model, ...) call, or a chain
+                # bottoming out at one (select(...).where(...),
+                # select(...).join(...)). The outermost chain call
+                # reports once and consumes the inner select() call; an
+                # enclosing session.execute(...) reports first, so a
+                # chain whose select() call is already consumed is skipped.
+                chain_select_info = _select_call_models(
+                    node, select_bare, select_modules, orm_tables)
                 if isinstance(func, ast.Attribute) and func.attr in _DB_METHODS:
                     receiver = ast.unparse(func.value) if hasattr(ast, "unparse") else ""
                     orm_models: list[str] | None = None
@@ -871,17 +899,17 @@ def _extract_python(source: str, orm_tables: dict[str, str] | None = None, djang
                     parser = ("python-ast-literal-expression-dynamic" if dynamic
                               else "python-ast-literal-expression")
                     found.append((node.lineno, receiver + "." + func.attr, sql, parser, dynamic, orm_models, orm_kind))
-                elif _is_direct_select_call(node, select_bare, select_modules):
-                    # O4: a bound select(Model, ...) call on its own.
-                    _sel_node, sel_models = _select_call_models(
-                        node, select_bare, select_modules, orm_tables)
-                    callee = ast.unparse(func) if hasattr(ast, "unparse") else "select"
-                    if sel_models is not None:
-                        found.append((node.lineno, callee, None,
-                                      "python-ast-literal-expression", False, sel_models, "sqlalchemy"))
-                    else:
-                        found.append((node.lineno, callee, None,
-                                      "python-ast-literal-expression", False, None, None))
+                elif chain_select_info is not None:
+                    sel_node, sel_models = chain_select_info
+                    if id(sel_node) not in consumed:
+                        consumed.add(id(sel_node))
+                        callee = ast.unparse(sel_node.func) if hasattr(ast, "unparse") else "select"
+                        if sel_models is not None:
+                            found.append((node.lineno, callee, None,
+                                          "python-ast-literal-expression", False, sel_models, "sqlalchemy"))
+                        else:
+                            found.append((node.lineno, callee, None,
+                                          "python-ast-literal-expression", False, None, None))
                 elif isinstance(func, ast.Attribute) and func.attr in _DJANGO_TERMINAL_METHODS and isinstance(func.value, ast.Call):
                     # Chained .update()/.delete(): walk down to the base
                     # Model.objects.<read method> call and report the

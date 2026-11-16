@@ -1125,6 +1125,7 @@ class SqlAlchemySelectTests(unittest.TestCase):
     _MODELS = (
         "class Photo:\n    __tablename__ = 'photos'\n"
         "class Album:\n    __tablename__ = 'albums'\n"
+        "class Comment:\n    __tablename__ = 'comments'\n"
         "class Unmapped:\n    pass\n"
     )
 
@@ -1237,6 +1238,62 @@ class SqlAlchemySelectTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["operation"], "SELECT")
         self.assertEqual(rows[0]["tables"], ["photos"])
+
+    def test_join_expands_tables(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo).join(Album)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "select")
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+        self.assertEqual(rows[0]["orm_model"], ["Album", "Photo"])
+
+    def test_outerjoin_expands_tables(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo).outerjoin(Album)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+
+    def test_join_with_onclause_ignores_extra_arguments(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo).join(Album, Photo.album_id == Album.id)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+
+    def test_chained_joins_expand_all_tables(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo).join(Album).join(Comment)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["albums", "comments", "photos"])
+        self.assertEqual(rows[0]["orm_model"], ["Album", "Comment", "Photo"])
+
+    def test_join_unmapped_model_is_unknown(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo).join(Unmapped)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_join_relationship_attribute_is_unknown(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo).join(Photo.albums)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_execute_join_resolves_once(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load(session):\n    return session.execute(select(Photo).join(Album))\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callee"], "session.execute")
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+
+    def test_join_with_where_resolves_once(self):
+        rows = self._rows("from sqlalchemy import select\n\n\ndef load():\n    return select(Photo).join(Album).where(Album.id == 1)\n")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["albums", "photos"])
 
 
 if __name__ == "__main__":
