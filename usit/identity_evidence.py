@@ -7,8 +7,9 @@ call's first line. Local-variable propagation is straight-line within one
 scope, plus one single hop through a top-level helper whose every return
 is the same identity expression (``INTERPROCEDURAL_SINGLE_HOP_RETURN``);
 the helper may live in the same file, be brought in by a ``from`` import,
-or be reached through a module binding (``import X`` / ``from P import M``)
-as an attribute call. This is not a general taint engine and
+be reached through a module binding (``import X`` / ``from P import M``)
+as an attribute call, or be a method of the enclosing class reached
+through ``self`` / ``cls``. This is not a general taint engine and
 never proves runtime identity or authorization.
 """
 from __future__ import annotations
@@ -278,6 +279,49 @@ def _python_function_owners(path: str, source: str) -> dict[int, str]:
     return owners
 
 
+def _identity_return_profile(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, Any] | None:
+    """Single identity-return profile of one function, or None.
+
+    The function qualifies only when every ``return`` in its body (not
+    counting returns inside nested functions or classes) carries a value
+    whose ``ast.unparse`` text fully matches one identity pattern, and all
+    those values are the same kind and the same expression text. No return,
+    a bare return, a non-identity return, mixed kinds, or differing
+    expressions disqualify it.
+    """
+    returns: list[ast.Return] = []
+    stack = list(node.body)
+    while stack:
+        item = stack.pop()
+        if isinstance(item, ast.Return):
+            returns.append(item)
+        elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        else:
+            stack.extend(ast.iter_child_nodes(item))
+    if not returns:
+        return None
+    profile: dict[str, Any] | None = None
+    for ret in returns:
+        if ret.value is None:
+            return None
+        text = ast.unparse(ret.value)
+        if _TRUSTED.fullmatch(text):
+            kind = "trusted"
+        elif _REQUEST.fullmatch(text):
+            kind = "request"
+        else:
+            return None
+        if profile is None:
+            profile = {"kind": kind, "expression": text,
+                       "return_lines": [ret.lineno], "function_line": node.lineno}
+        elif profile["kind"] != kind or profile["expression"] != text:
+            return None
+        else:
+            profile["return_lines"].append(ret.lineno)
+    return profile
+
+
 def _python_identity_return_helpers(path: str, source: str) -> dict[str, dict[str, Any]]:
     """Map top-level Python helper names to their single identity return.
 
@@ -300,39 +344,7 @@ def _python_identity_return_helpers(path: str, source: str) -> dict[str, dict[st
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        returns: list[ast.Return] = []
-        stack = list(node.body)
-        while stack:
-            item = stack.pop()
-            if isinstance(item, ast.Return):
-                returns.append(item)
-            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue
-            else:
-                stack.extend(ast.iter_child_nodes(item))
-        if not returns:
-            continue
-        profile: dict[str, Any] | None = None
-        for ret in returns:
-            if ret.value is None:
-                profile = None
-                break
-            text = ast.unparse(ret.value)
-            if _TRUSTED.fullmatch(text):
-                kind = "trusted"
-            elif _REQUEST.fullmatch(text):
-                kind = "request"
-            else:
-                profile = None
-                break
-            if profile is None:
-                profile = {"kind": kind, "expression": text,
-                           "return_lines": [ret.lineno], "function_line": node.lineno}
-            elif profile["kind"] != kind or profile["expression"] != text:
-                profile = None
-                break
-            else:
-                profile["return_lines"].append(ret.lineno)
+        profile = _identity_return_profile(node)
         if profile is not None:
             candidates.setdefault(node.name, []).append(profile)
     helpers: dict[str, dict[str, Any]] = {}
@@ -343,6 +355,75 @@ def _python_identity_return_helpers(path: str, source: str) -> dict[str, dict[st
             helpers[name] = {**first, "return_lines": sorted(
                 {line for p in profiles for line in p["return_lines"]})}
     return helpers
+
+
+def _python_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Map (class, method) pairs to their single identity return.
+
+    Only methods directly defined in a top-level class qualify, under the
+    same return rule as top-level helpers (see ``_identity_return_profile``).
+    A (class, method) defined twice with different return profiles is
+    ambiguous and dropped. The profile carries the qualified ``Class.method``
+    name and the defining file, for propagation records. Non-Python files
+    and syntax-invalid Python deliberately produce no methods.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            profile = _identity_return_profile(method)
+            if profile is not None:
+                candidates.setdefault((node.name, method.name), []).append(profile)
+    methods: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, profiles in candidates.items():
+        first = profiles[0]
+        if all(p["kind"] == first["kind"] and p["expression"] == first["expression"]
+               for p in profiles):
+            methods[key] = {**first, "return_lines": sorted(
+                {line for p in profiles for line in p["return_lines"]}),
+                "path": path, "function": f"{key[0]}.{key[1]}"}
+    return methods
+
+
+def _python_class_method_ranges(path: str, source: str) -> dict[int, str]:
+    """Map line numbers to their enclosing top-level class name.
+
+    Only lines inside a method directly defined in a top-level class are
+    mapped. Lines inside a nested function or class definition within that
+    method are excluded: their ``self`` does not refer to the outer
+    instance. Non-Python files and syntax-invalid Python produce no ranges.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    ranges: dict[int, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            lines = set(range(method.lineno, method.end_lineno + 1))
+            for nested in ast.walk(method):
+                if nested is method:
+                    continue
+                if isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    lines -= set(range(nested.lineno, nested.end_lineno + 1))
+            for line in lines:
+                ranges[line] = node.name
+    return ranges
 
 
 def _python_module_index(code_by_file: dict[str, str]) -> dict[str, str]:
@@ -545,6 +626,11 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
+    same_file_methods = {
+        file_path: _python_identity_return_methods(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
     module_bindings = {
         file_path: _python_module_bindings(file_path, file_source, module_index)
         for file_path, file_source in code_by_file.items()
@@ -559,15 +645,21 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             for name, helper in same_file_helpers.get(path, {}).items():
                 return_helpers[name] = {**helper, "path": path, "function": name}
             bindings = module_bindings.get(path, {})
+            method_helpers = same_file_methods.get(path, {})
+            class_ranges = _python_class_method_ranges(path, source)
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
             return_helpers = {}
             bindings = {}
+            method_helpers = {}
+            class_ranges = {}
         else:
             function_owners = {}
             return_helpers = {}
             bindings = {}
+            method_helpers = {}
+            class_ranges = {}
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -753,7 +845,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      "propagation": aliases[rhs]["propagation"] + [
                                          {"path": path, "line": line_no, "variable": name}
                                      ]}
-                elif return_helpers or bindings:
+                elif return_helpers or bindings or method_helpers:
                     # P4/P5: one hop through a same-file or from-imported
                     # helper, e.g. uid = get_uid(req). Only a bare call
                     # counts: no method call, no await, no attribute access
@@ -768,6 +860,15 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                             helper = _resolve_module_attribute_helper(
                                 attr_match.group(1), bindings, module_index,
                                 same_file_helpers)
+                        if helper is None and attr_match:
+                            # P7: one hop through a method of the enclosing
+                            # class, e.g. uid = self.get_uid(req) or
+                            # uid = cls.get_uid(req).
+                            parts = attr_match.group(1).split(".")
+                            if len(parts) == 2 and parts[0] in ("self", "cls"):
+                                enclosing = class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    helper = method_helpers.get((enclosing, parts[1]))
                     if helper is not None:
                         aliases[name] = {
                             "kind": helper["kind"], "expression": helper["expression"],

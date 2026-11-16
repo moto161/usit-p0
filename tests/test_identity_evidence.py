@@ -1185,5 +1185,216 @@ class IdentityAttributeCallReturnPropagationTests(unittest.TestCase):
         self.assertEqual(self._direct_bindings(rows), [])
 
 
+class IdentitySelfMethodReturnPropagationTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    def test_self_method_returning_trusted_identity_binds(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.user.id\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["scope"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/photos.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["details"]["propagation"][1]["variable"], "uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:server/photos.py#list_photos:5")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+        self.assertEqual(binding["verification_status"], "NOT_VERIFIED")
+
+    def test_self_method_returning_request_identity_binds(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_owner(self, req):\n"
+                "        return req.body.user_id\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        owner = self.get_owner(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (owner,))\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_owner")
+
+    def test_self_method_with_two_identical_returns_binds(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_uid(self, req):\n"
+                "        if req:\n"
+                "            return req.user.id\n"
+                "        return req.user.id\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [4, 5, 8, 9])
+
+    def test_self_method_mixed_with_none_return_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_uid(self, req):\n"
+                "        if req:\n"
+                "            return req.user.id\n"
+                "        return None\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_self_method_mixed_kinds_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_uid(self, req):\n"
+                "        if req:\n"
+                "            return req.user.id\n"
+                "        return req.body.user_id\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_self_method_without_return_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_uid(self, req):\n"
+                "        pass\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_self_attribute_chain_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.user.id\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.helper.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_non_self_receiver_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.user.id\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = other.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_self_method_defined_in_another_class_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class AuthHelper:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.user.id\n"
+                "\n"
+                "class PhotoHandler:\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_cls_method_call_binds(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    @classmethod\n"
+                "    def get_uid(cls, req):\n"
+                "        return req.user.id\n"
+                "\n"
+                "    @classmethod\n"
+                "    def list_photos(cls, request):\n"
+                "        uid = cls.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [4, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+
+    def test_self_call_outside_any_class_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/photos.py": (
+                "class PhotoHandler:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.user.id\n"
+                "\n"
+                "\n"
+                "def load(self, request):\n"
+                "    uid = self.get_uid(request)\n"
+                '    cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_bare_name_helper_still_binds_after_profile_extraction(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "def get_uid(req):\n"
+                "    return req.user.id\n"
+                "\n"
+                "\n"
+                "def load(request):\n"
+                "    uid = get_uid(request)\n"
+                '    cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+
 if __name__ == "__main__":
     unittest.main()
