@@ -773,7 +773,8 @@ _TYPEORM_INLINE_CALL = re.compile(
 
 _PRISMA_METHODS = ("findMany", "findFirst", "findUnique", "findFirstOrThrow",
                    "findUniqueOrThrow", "count", "aggregate", "groupBy",
-                   "create", "createMany", "update", "updateMany",
+                   "create", "createMany", "createManyAndReturn", "update",
+                   "updateMany", "updateManyAndReturn",
                    "delete", "deleteMany", "upsert")
 # Prisma Client model methods by operation. upsert() is an insert-or-update:
 # its operation cannot be determined statically, so it maps to UNKNOWN
@@ -784,8 +785,8 @@ _PRISMA_OPERATION = {
     "findFirstOrThrow": "SELECT", "findUniqueOrThrow": "SELECT",
     "count": "SELECT", "aggregate": "SELECT", "groupBy": "SELECT",
     "upsert": "UNKNOWN",
-    "create": "INSERT", "createMany": "INSERT",
-    "update": "UPDATE", "updateMany": "UPDATE",
+    "create": "INSERT", "createMany": "INSERT", "createManyAndReturn": "INSERT",
+    "update": "UPDATE", "updateMany": "UPDATE", "updateManyAndReturn": "UPDATE",
     "delete": "DELETE", "deleteMany": "DELETE",
 }
 _PRISMA_MODEL = re.compile(

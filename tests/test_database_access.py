@@ -1718,6 +1718,32 @@ class PrismaClientTests(unittest.TestCase):
         self.assertEqual(rows[0]["operation"], "SELECT")
         self.assertEqual(rows[0]["tables"], ["photos"])
 
+    def test_create_many_and_return_resolves_insert(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photo.createManyAndReturn({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["orm_model"], ["Photo"])
+
+    def test_update_many_and_return_resolves_update(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photo.updateManyAndReturn({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UPDATE")
+        self.assertEqual(rows[0]["tables"], ["photos"])
+        self.assertEqual(rows[0]["orm_model"], ["Photo"])
+
 
 if __name__ == "__main__":
     unittest.main()
