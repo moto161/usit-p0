@@ -1225,32 +1225,35 @@ def typeorm_entity_tables(code_by_file: dict[str, str]) -> dict[str, str]:
 
 
 def prisma_model_tables(code_by_file: dict[str, str]) -> dict[str, str]:
-    """Map Prisma model names to tables from explicit ``@@map`` names.
+    """Map Prisma model names to tables from ``@@map`` names, else the model name.
 
     Pure regex scan of the project's own ``*.prisma`` files: a model block
     ``model <Name> { ... @@map("<table>") ... }`` maps the model name to
-    that table. The client field name is the model name with its first
-    letter lowercased (``Photo`` -> ``photo``), so call sites recover the
-    model name by uppercasing the field's first letter. A model without
-    ``@@map`` is not mapped. A table name must be a plain identifier;
-    anything else is ignored. A model name mapping to more than one
-    distinct table is ambiguous and dropped entirely. No target code is
-    imported or executed.
+    that table; a model without ``@@map`` maps to its own name, which is
+    Prisma's documented default table name. The client field name is the
+    model name with its first letter lowercased (``Photo`` -> ``photo``),
+    so call sites recover the model name by uppercasing the field's first
+    letter. An explicit table name must be a plain identifier; anything
+    else is ignored. A model name mapping to more than one distinct table
+    is ambiguous and dropped entirely. No target code is imported or
+    executed.
     """
     candidates: dict[str, set[str]] = {}
     for path, source in sorted(code_by_file.items()):
         if not path.lower().endswith(".prisma"):
             continue
         for model_match in _PRISMA_MODEL.finditer(source):
+            model_name = model_match.group(1)
             map_match = _PRISMA_MAP.search(model_match.group(2))
             if map_match is None:
+                candidates.setdefault(model_name, set()).add(model_name)
                 continue
             table = next((g for g in map_match.groups() if g is not None), None)
             if table is None:
                 continue
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", table):
                 continue
-            candidates.setdefault(model_match.group(1), set()).add(table)
+            candidates.setdefault(model_name, set()).add(table)
     return {name: next(iter(tables)) for name, tables in candidates.items()
             if len(tables) == 1}
 
@@ -1370,8 +1373,9 @@ def extract_database_accesses(code_by_file: dict[str, str]) -> list[dict[str, An
     ``.create`` yields INSERT, and a chained ``.update`` / ``.delete``
     yields UPDATE / DELETE; an unresolvable model leaves the call UNKNOWN.
     A Prisma ``<client>.<model>.<method>`` call resolved by the project's
-    own ``schema.prisma`` ``@@map`` table name yields one record the same
-    way, with the operation from the method (``findMany`` / ``findUnique``
+    own ``schema.prisma`` ``@@map`` table name (or, without ``@@map``, the
+    model name itself, Prisma's default table name) yields one record the
+    same way, with the operation from the method (``findMany`` / ``findUnique``
     / ``create`` / ``update`` / ``delete`` and kin; ``upsert`` is UNKNOWN);
     an unresolvable model leaves the call UNKNOWN.
     """

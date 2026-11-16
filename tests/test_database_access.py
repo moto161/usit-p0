@@ -1476,9 +1476,39 @@ class PrismaModelTableTests(unittest.TestCase):
         })
         self.assertEqual(tables, {"Photo": "photos"})
 
-    def test_model_without_map_does_not_map(self):
+    def test_model_without_map_defaults_to_its_name(self):
+        # Boundary moved in O8: O7 asserted {} here (no @@map meant
+        # unmapped); Prisma's default table name is the model itself.
         tables = prisma_model_tables({
             "prisma/schema.prisma": "model Tag {\n  id Int @id\n}\n",
+        })
+        self.assertEqual(tables, {"Tag": "Tag"})
+
+    def test_explicit_map_wins_over_default(self):
+        tables = prisma_model_tables({
+            "prisma/schema.prisma": (
+                "model Photo {\n"
+                "  id Int @id\n"
+                "\n"
+                "  @@map(\"photos\")\n"
+                "}\n"
+                "model Tag {\n"
+                "  id Int @id\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(tables, {"Photo": "photos", "Tag": "Tag"})
+
+    def test_multi_word_model_defaults_to_its_name(self):
+        tables = prisma_model_tables({
+            "prisma/schema.prisma": "model PhotoAlbum {\n  id Int @id\n}\n",
+        })
+        self.assertEqual(tables, {"PhotoAlbum": "PhotoAlbum"})
+
+    def test_same_model_name_with_map_and_default_is_dropped(self):
+        tables = prisma_model_tables({
+            "a/schema.prisma": "model Tag {\n  id Int @id\n\n  @@map(\"tags\")\n}\n",
+            "b/schema.prisma": "model Tag {\n  id Int @id\n}\n",
         })
         self.assertEqual(tables, {})
 
@@ -1520,9 +1550,9 @@ class PrismaClientTests(unittest.TestCase):
         "}\n"
     )
 
-    def _rows(self, service_source):
+    def _rows(self, service_source, schema=None):
         return extract_database_accesses({
-            "prisma/schema.prisma": self._SCHEMA,
+            "prisma/schema.prisma": schema if schema is not None else self._SCHEMA,
             "server/photos.service.ts": service_source,
         })
 
@@ -1606,6 +1636,29 @@ class PrismaClientTests(unittest.TestCase):
         self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
 
     def test_unmapped_model_is_unknown(self):
+        # Boundary moved in O8: a model without @@map now defaults to its
+        # own name, so "unmapped" now needs a non-identifier @@map, which
+        # is ignored and leaves the call UNKNOWN.
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.tag.findMany({});\n"
+            "}\n",
+            schema=(
+                "model Tag {\n"
+                "  id Int @id\n"
+                "\n"
+                "  @@map(\"my tags\")\n"
+                "}\n"
+            ),
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "UNKNOWN")
+        self.assertEqual(rows[0]["tables"], [])
+        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+
+    def test_default_table_find_many_resolves_select(self):
         rows = self._rows(
             "import { PrismaClient } from \"@prisma/client\";\n"
             "const prisma = new PrismaClient();\n"
@@ -1614,9 +1667,36 @@ class PrismaClientTests(unittest.TestCase):
             "}\n"
         )
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["operation"], "UNKNOWN")
-        self.assertEqual(rows[0]["tables"], [])
-        self.assertEqual(rows[0]["parse_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["Tag"])
+        self.assertEqual(rows[0]["parse_status"], "ORM_MODEL")
+        self.assertEqual(rows[0]["orm_model"], ["Tag"])
+
+    def test_default_table_create_resolves_insert(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.tag.create({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "INSERT")
+        self.assertEqual(rows[0]["tables"], ["Tag"])
+
+    def test_default_table_multi_word_resolves_select(self):
+        rows = self._rows(
+            "import { PrismaClient } from \"@prisma/client\";\n"
+            "const prisma = new PrismaClient();\n"
+            "export async function load() {\n"
+            "  return prisma.photoAlbum.findMany({});\n"
+            "}\n",
+            schema="model PhotoAlbum {\n  id Int @id\n}\n",
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["operation"], "SELECT")
+        self.assertEqual(rows[0]["tables"], ["PhotoAlbum"])
+        self.assertEqual(rows[0]["orm_model"], ["PhotoAlbum"])
 
     def test_unbound_receiver_produces_no_record(self):
         rows = self._rows(
