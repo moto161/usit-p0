@@ -428,6 +428,187 @@ def _python_class_method_ranges(path: str, source: str) -> dict[int, str]:
     return ranges
 
 
+_TS_CLASS_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)\b"
+)
+_TS_METHOD_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|async|readonly|declare|override|abstract)\s+)*"
+    r"([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\((?:[^(){}]|\([^()]*\))*\)\s*(?::\s*[^{]+?)?\s*\{"
+)
+_TS_RETURN_RE = re.compile(r"^\s*return\s+([^;]+?)\s*;?\s*$")
+_TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
+_TS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
+
+
+def _strip_ts_line(line: str) -> str:
+    """Remove same-line string literals and a trailing ``//`` comment.
+
+    Only for the brace/return scan below: braces inside strings and
+    comments must not move the scope stack. A backtick string without a
+    closing backtick on this line (a multi-line template literal) is
+    stripped from its first backtick to the end of the line.
+    """
+    line = _TS_STRING_RE.sub("", line)
+    if "`" in line:
+        line = line.split("`", 1)[0]
+    return line.split("//", 1)[0]
+
+
+def _ts_class_scan(path: str, source: str) -> tuple[
+        dict[tuple[str, str], list[tuple[int, str]]], dict[int, str]]:
+    """One brace-counting pass over a TS/JS file.
+
+    Returns ``(methods, ranges)``: ``methods`` maps ``(class, method)``
+    pairs directly defined in a top-level class to their direct
+    ``(line, expression)`` returns; ``ranges`` maps line numbers to
+    their enclosing top-level class name, for lines inside such a
+    method. Returns inside nested functions or classes are excluded
+    from both. A method header must open its body on the same line;
+    anything else fails closed (no method, no returns). Only the
+    direct returns are collected -- whether they qualify as identity
+    returns is decided by ``_ts_identity_return_methods``.
+    """
+    methods: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    ranges: dict[int, str] = {}
+    # Frames: kind "class" | "method" | "nested", interior brace depth,
+    # class name, method name. "nested" covers nested functions and
+    # nested classes, whose lines and returns never belong to the outer
+    # method.
+    stack: list[dict[str, Any]] = []
+    depth = 0
+    in_template = False
+    pending_nested = False
+    for line_no, raw in enumerate(source.splitlines(), 1):
+        # A multi-line template literal: skip detection and returns on
+        # its inner lines, but keep counting braces like the rest of
+        # this module does (an approximation, documented here).
+        if (raw.count("`") - raw.count("\\`")) % 2 == 1:
+            in_template = not in_template
+        stripped = "" if in_template else _strip_ts_line(raw)
+        while stack and stack[-1]["depth"] > depth:
+            stack.pop()
+        opens = stripped.count("{")
+        closes = stripped.count("}")
+        was_pending_nested = pending_nested
+        pending_nested = False
+
+        def interior(match_end: int) -> int:
+            prefix = stripped[:match_end]
+            return depth + prefix.count("{") - prefix.count("}")
+
+        if stripped:
+            class_frame = next((f for f in reversed(stack) if f["kind"] == "class"), None)
+            method_frame = next((f for f in reversed(stack) if f["kind"] == "method"), None)
+            nested = any(f["kind"] == "nested" for f in stack)
+            if class_frame is None and depth == 0:
+                match = _TS_CLASS_RE.match(stripped)
+                if match and "{" in stripped:
+                    stack.append({"kind": "class", "depth": interior(stripped.index("{") + 1),
+                                  "class": match.group(1), "method": None})
+                    class_frame = stack[-1]
+            elif method_frame is None and class_frame is not None and not nested:
+                match = _TS_METHOD_RE.match(stripped)
+                if match:
+                    name = match.group(1)
+                    is_static = "static" in re.findall(r"[A-Za-z_$][\w$]*", stripped[:match.start(1)])
+                    if name != "constructor" and not is_static:
+                        stack.append({"kind": "method",
+                                      "depth": interior(match.end()),
+                                      "class": class_frame["class"], "method": name,
+                                      "returns": []})
+                        method_frame = stack[-1]
+            if method_frame is not None and class_frame is not None and "{" in stripped:
+                # A nested function or class opens a nested frame only when
+                # its brace sits deeper than the method body: a brace in a
+                # parameter default (e.g. cb = () => {}) is at the method's
+                # own depth and must not shadow the whole method.
+                brace_depth = interior(stripped.index("{") + 1)
+                if brace_depth > method_frame["depth"]:
+                    if _TS_CLASS_RE.match(stripped) or _TS_NESTED_FN_RE.search(stripped):
+                        stack.append({"kind": "nested", "depth": brace_depth,
+                                      "class": None, "method": None})
+                        nested = True
+                    elif was_pending_nested:
+                        stack.append({"kind": "nested", "depth": brace_depth,
+                                      "class": None, "method": None})
+                        nested = True
+            if method_frame is not None and not nested:
+                ranges[line_no] = method_frame["class"]
+                ret = _TS_RETURN_RE.match(stripped)
+                if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
+                    method_frame["returns"].append((line_no, ret.group(1).strip()))
+            if method_frame is not None and not nested:
+                # An arrow or function header whose body brace lands on the
+                # next line (Allman style): remember it for exactly one line.
+                if (re.search(r"=>\s*$", stripped)
+                        or re.search(r"\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\([^;{]*\)\s*$", stripped)):
+                    pending_nested = True
+        depth += opens - closes
+        while stack and stack[-1]["depth"] > depth:
+            frame = stack.pop()
+            if frame["kind"] == "method" and frame["returns"]:
+                methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
+    while stack:
+        frame = stack.pop()
+        if frame["kind"] == "method" and frame["returns"]:
+            methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
+    return methods, ranges
+
+
+def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Map (class, method) pairs to their single identity return, for TS/JS.
+
+    The TS mirror of ``_python_identity_return_methods``: only methods
+    directly defined in a top-level class qualify, under the same return
+    rule as ``_identity_return_profile`` (every direct return fully
+    matches one identity pattern, all the same kind and the same
+    expression text). A (class, method) defined twice with different
+    return profiles is ambiguous and dropped. The profile carries the
+    qualified ``Class.method`` name and the defining file, for
+    propagation records.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+        return {}
+    methods, _ranges = _ts_class_scan(path, source)
+    helpers: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, returns in methods.items():
+        profile: dict[str, Any] | None = None
+        for line_no, text in returns:
+            if _TRUSTED.fullmatch(text):
+                kind = "trusted"
+            elif _REQUEST.fullmatch(text):
+                kind = "request"
+            else:
+                profile = None
+                break
+            if profile is None:
+                profile = {"kind": kind, "expression": text,
+                           "return_lines": [line_no]}
+            elif profile["kind"] != kind or profile["expression"] != text:
+                profile = None
+                break
+            else:
+                profile["return_lines"].append(line_no)
+        if profile is not None:
+            helpers[key] = {**profile, "path": path,
+                            "function": f"{key[0]}.{key[1]}"}
+    return helpers
+
+
+def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
+    """Map line numbers to their enclosing top-level class name, for TS/JS.
+
+    The TS mirror of ``_python_class_method_ranges``: only lines inside
+    a method directly defined in a top-level class are mapped. Lines
+    inside a nested function or class definition within that method are
+    excluded: their ``this`` does not refer to the outer instance.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+        return {}
+    _methods, ranges = _ts_class_scan(path, source)
+    return ranges
+
+
 def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
     """Map (class, attribute) pairs to the class constructed for them.
 
@@ -701,6 +882,16 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
+    ts_same_file_methods = {
+        file_path: _ts_identity_return_methods(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    ts_same_file_ranges = {
+        file_path: _ts_class_method_ranges(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
     for path, source in sorted(code_by_file.items()):
         if path.lower().endswith(".py"):
             function_owners = _python_function_owners(path, source)
@@ -713,6 +904,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             method_helpers = same_file_methods.get(path, {})
             class_ranges = _python_class_method_ranges(path, source)
             instance_bindings = same_file_instance_bindings.get(path, {})
+            ts_method_helpers = {}
+            ts_class_ranges = {}
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
             function_owners = supplied if isinstance(supplied, dict) else {}
@@ -721,6 +914,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             method_helpers = {}
             class_ranges = {}
             instance_bindings = {}
+            ts_method_helpers = ts_same_file_methods.get(path, {})
+            ts_class_ranges = ts_same_file_ranges.get(path, {})
         else:
             function_owners = {}
             return_helpers = {}
@@ -728,6 +923,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             method_helpers = {}
             class_ranges = {}
             instance_bindings = {}
+            ts_method_helpers = ts_same_file_methods.get(path, {})
+            ts_class_ranges = ts_same_file_ranges.get(path, {})
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
         previous_depth = 0
@@ -913,7 +1110,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      "propagation": aliases[rhs]["propagation"] + [
                                          {"path": path, "line": line_no, "variable": name}
                                      ]}
-                elif return_helpers or bindings or method_helpers or instance_bindings:
+                elif (return_helpers or bindings or method_helpers
+                        or instance_bindings or ts_method_helpers):
                     # P4/P5: one hop through a same-file or from-imported
                     # helper, e.g. uid = get_uid(req). Only a bare call
                     # counts: no method call, no await, no attribute access
@@ -937,6 +1135,13 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                 enclosing = class_ranges.get(line_no)
                                 if enclosing is not None:
                                     helper = method_helpers.get((enclosing, parts[1]))
+                            elif len(parts) == 2 and parts[0] == "this":
+                                # T1: one hop through a method of the
+                                # enclosing TS/JS class, e.g.
+                                # uid = this.get_uid(req).
+                                enclosing = ts_class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    helper = ts_method_helpers.get((enclosing, parts[1]))
                             elif len(parts) == 3 and parts[0] == "self":
                                 # P8: one hop through an instance attribute
                                 # bound in the enclosing class, e.g.

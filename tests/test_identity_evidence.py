@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from usit.database_access import extract_database_accesses
 from usit.identity_evidence import extract_identity_evidence
+from usit.js_ts_parser import analyze_js_ts_project, ts_function_owners
+from usit.scanner import discover_files
 
 
 class IdentityEvidenceTests(unittest.TestCase):
@@ -1642,6 +1646,210 @@ class IdentityInstanceAttributeReturnPropagationTests(unittest.TestCase):
             ),
         })
         self.assertEqual(self._direct_bindings(rows), [])
+
+
+class TsThisMethodReturnPropagationTests(unittest.TestCase):
+    def _rows(self, source, filename="auth.ts"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / filename).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence({filename: source}, owners)
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _SERVICE = (
+        "export class AuthService {\n"
+        "  get_uid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "  load(req: any) {\n"
+        "    const uid = this.get_uid(req);\n"
+        '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+        "  }\n"
+        "}\n"
+    )
+
+    def test_this_method_returning_trusted_identity_binds(self):
+        rows = self._rows(self._SERVICE)
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["scope"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthService.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["details"]["propagation"][1]["variable"], "uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:auth.ts#load:5")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+        self.assertEqual(binding["verification_status"], "NOT_VERIFIED")
+
+    def test_this_method_returning_request_identity_binds(self):
+        rows = self._rows(
+            "export class AuthService {\n"
+            "  get_owner(req: any) {\n"
+            "    return req.body.user_id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const owner = this.get_owner(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthService.get_owner")
+
+    def test_this_method_alias_feeds_two_sinks_in_one_method(self):
+        rows = self._rows(
+            "export class AuthService {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    const a = db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        bindings = self._direct_bindings(rows)
+        self.assertEqual([row["line"] for row in bindings], [7, 8])
+        self.assertEqual([item["line"] for item in bindings[0]["details"]["propagation"]], [3, 6, 7])
+        self.assertEqual([item["line"] for item in bindings[1]["details"]["propagation"]], [3, 6, 8])
+
+    def test_this_method_with_non_identity_return_does_not_bind(self):
+        rows = self._rows(
+            "export class AuthService {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.params.id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_this_method_with_mixed_returns_does_not_bind(self):
+        rows = self._rows(
+            "export class AuthService {\n"
+            "  get_uid(req: any) {\n"
+            "    if (req) {\n"
+            "      return req.user.id;\n"
+            "    }\n"
+            "    return req.body.user_id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_this_method_without_return_does_not_bind(self):
+        rows = self._rows(
+            "export class AuthService {\n"
+            "  get_uid(req: any) {\n"
+            "    console.log(req.user.id);\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_this_call_outside_any_class_does_not_bind(self):
+        rows = self._rows(
+            "export class AuthService {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export function load(req: any) {\n"
+            "  const uid = this.get_uid(req);\n"
+            '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_same_method_name_in_two_classes_resolves_to_own_class(self):
+        rows = self._rows(
+            "export class A {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+            "export class B {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.body.user_id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        trusted = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        requested = next(row for row in rows
+                         if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(trusted["details"]["propagation"][0]["function"], "A.get_uid")
+        self.assertEqual(requested["details"]["propagation"][0]["function"], "B.get_uid")
+
+    def test_identity_return_inside_nested_arrow_does_not_count(self):
+        # Sharp test: the nested arrow returns a DIFFERENT identity kind,
+        # so leaking it in would mix kinds and disqualify the method. The
+        # binding exists only when the nested return is excluded.
+        rows = self._rows(
+            "export class AuthService {\n"
+            "  get_uid(req: any) {\n"
+            "    const f = () => { return req.body.user_id; };\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+
+    def test_identity_return_inside_next_line_arrow_body_does_not_count(self):
+        rows = self._rows(
+            "export class AuthService {\n"
+            "  get_uid(req: any) {\n"
+            "    const f = () =>\n"
+            "    { return req.body.user_id; };\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
 
 
 if __name__ == "__main__":
