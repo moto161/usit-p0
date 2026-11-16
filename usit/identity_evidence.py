@@ -883,6 +883,143 @@ def _ts_class_scan(path: str, source: str) -> tuple[
     return methods, ranges, attr_candidates, class_names, defined
 
 
+_VUE_OPTIONS_CLASS = "__vue_options__"
+_TS_VUE_DEFAULT_EXPORT_RE = re.compile(
+    r"^\s*export\s+default\s+(?:defineComponent\s*\()?\s*\{"
+)
+_TS_VUE_METHODS_RE = re.compile(
+    r"^\s*[\"']?methods[\"']?\s*:\s*\{"
+)
+
+
+def _ts_vue_options_methods(path: str, source: str) -> tuple[
+        dict[tuple[str, str], list[tuple[int, str]]], dict[int, str],
+        set[tuple[str, str]]]:
+    """Scan a Vue Options API ``methods:`` block for identity returns.
+
+    Returns ``(methods, ranges, defined)`` in the same shapes as
+    ``_ts_class_scan``'s first, second and fifth values, keyed on the
+    synthetic class ``__vue_options__``: ``methods`` maps
+    ``(__vue_options__, method)`` to direct ``(line, expression)``
+    returns; ``ranges`` maps lines inside an options method to the
+    synthetic class; ``defined`` is the set of directly defined
+    options methods (for the shadowing check, which treats a
+    definition without an identity profile as shadowing).
+
+    Only ``.vue`` files, only the ``methods:`` property of the
+    default-export object (``export default {`` or
+    ``export default defineComponent({``); ``computed:`` / ``watch:``
+    / ``data()`` and non-default objects never qualify. A method
+    header must open its body on the same line; returns inside nested
+    functions or classes are excluded, exactly like the class scan.
+    A top-level class literally named ``__vue_options__`` in the same
+    file, or a second ``export default``, fails the whole scan closed.
+    """
+    methods: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    ranges: dict[int, str] = {}
+    defined: set[tuple[str, str]] = set()
+    if not path.lower().endswith(".vue"):
+        return methods, ranges, defined
+    _m, _r, _c, class_names, _d = _ts_class_scan(path, source)
+    if _VUE_OPTIONS_CLASS in class_names:
+        return methods, ranges, defined
+    # Frames: kind "default" | "methods" | "method" | "nested", interior
+    # brace depth, method name.
+    stack: list[dict[str, Any]] = []
+    depth = 0
+    in_template = False
+    pending_nested: str | None = None
+    default_seen = False
+    for line_no, raw in enumerate(source.splitlines(), 1):
+        if (raw.count("`") - raw.count("\\`")) % 2 == 1:
+            in_template = not in_template
+        stripped = "" if in_template else _strip_ts_line(raw)
+        while stack and stack[-1]["depth"] > depth:
+            stack.pop()
+        opens = stripped.count("{")
+        closes = stripped.count("}")
+        was_pending_nested = pending_nested
+        pending_nested = None
+
+        def interior(match_end: int) -> int:
+            prefix = stripped[:match_end]
+            return depth + prefix.count("{") - prefix.count("}")
+
+        if stripped:
+            default_frame = next((f for f in reversed(stack) if f["kind"] == "default"), None)
+            methods_frame = next((f for f in reversed(stack) if f["kind"] == "methods"), None)
+            method_frame = next((f for f in reversed(stack) if f["kind"] == "method"), None)
+            nested = any(f["kind"] == "nested" for f in stack)
+            if default_frame is None and depth == 0:
+                match = _TS_VUE_DEFAULT_EXPORT_RE.match(stripped)
+                if match:
+                    if default_seen:
+                        return {}, {}, set()
+                    default_seen = True
+                    stack.append({"kind": "default",
+                                  "depth": interior(stripped.index("{") + 1),
+                                  "method": None})
+                    default_frame = stack[-1]
+            elif (methods_frame is None and default_frame is not None
+                    and method_frame is None and not nested
+                    and depth == default_frame["depth"]):
+                match = _TS_VUE_METHODS_RE.match(stripped)
+                if match:
+                    stack.append({"kind": "methods",
+                                  "depth": interior(stripped.index("{") + 1),
+                                  "method": None})
+                    methods_frame = stack[-1]
+            elif method_frame is None and methods_frame is not None and not nested:
+                match = _TS_METHOD_RE.match(stripped)
+                if match:
+                    name = match.group(1)
+                    if name != "constructor":
+                        stack.append({"kind": "method",
+                                      "depth": interior(match.end()),
+                                      "method": name, "returns": []})
+                        method_frame = stack[-1]
+                        defined.add((_VUE_OPTIONS_CLASS, name))
+            if method_frame is not None and "{" in stripped:
+                # A nested function or class opens a nested frame only when
+                # its brace sits deeper than the method body.
+                brace_depth = interior(stripped.index("{") + 1)
+                if brace_depth > method_frame["depth"]:
+                    flavor: str | None = None
+                    if _TS_CLASS_RE.match(stripped):
+                        flavor = "class"
+                    elif _TS_NESTED_FN_RE.search(stripped):
+                        flavor = ("arrow" if "=>" in stripped[:stripped.index("{")]
+                                  else "function")
+                    elif was_pending_nested is not None:
+                        flavor = was_pending_nested
+                    if flavor is not None:
+                        stack.append({"kind": "nested", "depth": brace_depth,
+                                      "method": None, "flavor": flavor})
+                        nested = True
+            if method_frame is not None and not nested:
+                ranges[line_no] = _VUE_OPTIONS_CLASS
+                ret = _TS_RETURN_RE.match(stripped)
+                if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
+                    method_frame["returns"].append((line_no, ret.group(1).strip()))
+            if method_frame is not None and not nested:
+                # An arrow or function header whose body brace lands on the
+                # next line (Allman style): remember it for exactly one line.
+                if re.search(r"=>\s*$", stripped):
+                    pending_nested = "arrow"
+                elif re.search(r"\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\([^;{]*\)\s*$", stripped):
+                    pending_nested = "function"
+        depth += opens - closes
+        while stack and stack[-1]["depth"] > depth:
+            frame = stack.pop()
+            if frame["kind"] == "method" and frame["returns"]:
+                methods.setdefault((_VUE_OPTIONS_CLASS, frame["method"]), []).extend(frame["returns"])
+    while stack:
+        frame = stack.pop()
+        if frame["kind"] == "method" and frame["returns"]:
+            methods.setdefault((_VUE_OPTIONS_CLASS, frame["method"]), []).extend(frame["returns"])
+    return methods, ranges, defined
+
+
 def _ts_direct_identity_profiles(
         path: str, methods: dict[tuple[str, str], list[tuple[int, str]]]
         ) -> dict[tuple[str, str], dict[str, Any]]:
@@ -1821,6 +1958,24 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         if not file_path.lower().endswith(".py")
     }
     ts_base_classes = _ts_base_classes(effective_code_by_file)
+    # V3: Vue Options API `methods:` blocks scan as a synthetic class
+    # `__vue_options__`; merge their profiles, ranges and defined sets
+    # into the class-based maps so the T1 `this` branch resolves them.
+    # The defined merge is what makes a profile-less options method
+    # shadow (rather than walk a nonexistent extends chain).
+    ts_vue_options = {
+        file_path: _ts_vue_options_methods(file_path, file_source)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    for file_path, (opt_methods, opt_ranges, opt_defined) in ts_vue_options.items():
+        if opt_methods:
+            ts_same_file_methods.setdefault(file_path, {}).update(
+                _ts_direct_identity_profiles(file_path, opt_methods))
+        if opt_ranges:
+            ts_same_file_ranges.setdefault(file_path, {}).update(opt_ranges)
+        if opt_defined:
+            ts_defined_methods.setdefault(file_path, set()).update(opt_defined)
     for path, source in sorted(effective_code_by_file.items()):
         if path.lower().endswith(".py"):
             function_owners = _python_function_owners(path, source)

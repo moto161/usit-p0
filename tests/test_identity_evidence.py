@@ -3479,11 +3479,10 @@ class VueFunctionOwnershipTests(unittest.TestCase):
         )
         self.assertEqual(rows, [])
 
-    def test_options_api_methods_do_not_bind(self):
-        # Out of scope for V2 (only `function` declarations qualify; the
-        # Options API `methods:` object literal has no class profile): the
-        # adapter reports the methods and their owners, but no identity
-        # profile exists for them. A pseudo-class mechanism is V3.
+    def test_options_api_methods_bind(self):
+        # V3 (moved boundary, was "does not bind" in V2): Options API
+        # `methods:` scan as the synthetic class `__vue_options__`, so
+        # `this.get_uid(req)` binds like a class method.
         rows = self._rows(
             "<template>\n"
             "  <button @click=\"load\">Load</button>\n"
@@ -3502,6 +3501,237 @@ class VueFunctionOwnershipTests(unittest.TestCase):
             "};\n"
             "</script>\n"
         )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 12)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [8, 11, 12])
+        self.assertEqual(binding["details"]["propagation"][0]["function"],
+                         "__vue_options__.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "App.vue")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:App.vue#load:10")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_options_api_define_component_binds(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "import { defineComponent } from \"vue\";\n"
+            "export default defineComponent({\n"
+            "  methods: {\n"
+            "    get_uid(req: any) {\n"
+            "      return req.user.id;\n"
+            "    },\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "});\n"
+            "</script>\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 13)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [9, 12, 13])
+        self.assertEqual(binding["details"]["propagation"][0]["function"],
+                         "__vue_options__.get_uid")
+
+    def test_options_api_mixed_returns_do_not_bind(self):
+        # A second direct return that matches neither identity pattern
+        # disqualifies the method. (A string-literal return would not:
+        # `_strip_ts_line` removes string literals before the return
+        # scan, so such a return is invisible -- the class scan has
+        # the same behaviour, and V3 mirrors it.)
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "export default {\n"
+            "  methods: {\n"
+            "    get_uid(req: any) {\n"
+            "      if (req.guest) {\n"
+            "        return req.session.id;\n"
+            "      }\n"
+            "      return req.user.id;\n"
+            "    },\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_options_api_profileless_method_shadows(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "export default {\n"
+            "  methods: {\n"
+            "    get_uid(req: any) {\n"
+            "      return \"fixed\";\n"
+            "    },\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_methods_in_non_default_object_do_not_bind(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "const options = {\n"
+            "  methods: {\n"
+            "    get_uid(req: any) {\n"
+            "      return req.user.id;\n"
+            "    },\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "export default options;\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_options_api_and_class_coexist(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  methods: {\n"
+            "    get_uid(req: any) {\n"
+            "      return req.user.id;\n"
+            "    },\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 17)
+        self.assertEqual(binding["details"]["propagation"][0]["function"],
+                         "__vue_options__.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:App.vue#load:15")
+
+    def test_options_api_collision_with_same_named_class_closes(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "class __vue_options__ {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export default {\n"
+            "  methods: {\n"
+            "    get_uid(req: any) {\n"
+            "      return req.user.id;\n"
+            "    },\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_options_api_nested_arrow_return_does_not_bind(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "export default {\n"
+            "  methods: {\n"
+            "    get_uid(req: any) {\n"
+            "      const inner = () => {\n"
+            "        return req.user.id;\n"
+            "      };\n"
+            "      return inner();\n"
+            "    },\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_computed_methods_do_not_bind(self):
+        rows = self._rows(
+            "<template>\n"
+            "  <button @click=\"load\">Load</button>\n"
+            "</template>\n"
+            "<script lang=\"ts\">\n"
+            "export default {\n"
+            "  computed: {\n"
+            "    get_uid(req: any) {\n"
+            "      return req.user.id;\n"
+            "    },\n"
+            "  },\n"
+            "  methods: {\n"
+            "    load(req: any) {\n"
+            "      const uid = this.get_uid(req);\n"
+            "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "    },\n"
+            "  },\n"
+            "};\n"
+            "</script>\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_default_object_methods_in_ts_file_do_not_bind(self):
+        rows = self._rows_files({
+            "component.ts": (
+                "export default {\n"
+                "  methods: {\n"
+                "    get_uid(req: any) {\n"
+                "      return req.user.id;\n"
+                "    },\n"
+                "    load(req: any) {\n"
+                "      const uid = this.get_uid(req);\n"
+                "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "    },\n"
+                "  },\n"
+                "};\n"
+            ),
+        })
         self.assertEqual(self._direct_bindings(rows), [])
 
 
