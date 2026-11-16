@@ -852,30 +852,55 @@ function main(input) {
         symbol_id: "symbol:" + entry.rel + "#" + name + ":" + position.line };
     }
 
-    // R3-1: single-hop `const` URL bindings. A scope stack tracks `const`
-    // declarations (identifier -> initializer node) per function/block
+    // R3-1/R3-2: single-hop URL bindings. A scope stack tracks `const`
+    // and `let` declarations (identifier -> initializer/assigned node, or
+    // null for a `let` declared without an initializer) per function/block
     // scope; the module frame at the bottom stays visible file-wide, while
     // lookup stops at the nearest enclosing function frame, so closures
-    // never resolve. `let`/`var` are never recorded (reassignment would
-    // need alias invalidation). Lookup is source-ordered: a binding only
+    // never resolve. `var` is never recorded (hoisting breaks the
+    // straight-line reading). Lookup is source-ordered: a binding only
     // exists after its declaration has been visited.
-    const constUrlScopes = [{ isFunction: false, isModule: true, map: new Map() }];
-    function recordConstUrlBindings(statement) {
-      if (!(statement.declarationList.flags & ts.NodeFlags.Const)) return;
+    const urlBindingScopes = [{ isFunction: false, isModule: true, map: new Map(), dirty: new Map() }];
+    function recordUrlBinding(statement) {
+      const flags = statement.declarationList.flags;
+      const isConst = !!(flags & ts.NodeFlags.Const);
+      const isLet = !!(flags & ts.NodeFlags.Let);
+      if (!isConst && !isLet) return;
       for (const declaration of statement.declarationList.declarations) {
-        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-        constUrlScopes[constUrlScopes.length - 1].map.set(declaration.name.text, declaration.initializer);
+        if (!ts.isIdentifier(declaration.name)) continue;
+        if (isConst) {
+          if (declaration.initializer) {
+            urlBindingScopes[urlBindingScopes.length - 1].map.set(declaration.name.text, declaration.initializer);
+          }
+        } else {
+          urlBindingScopes[urlBindingScopes.length - 1].map.set(
+            declaration.name.text, declaration.initializer || null);
+        }
       }
     }
-    function lookupConstUrl(name) {
+    function lookupUrlBinding(name) {
       let seenFunction = false;
-      for (let i = constUrlScopes.length - 1; i >= 0; i--) {
-        const frame = constUrlScopes[i];
+      for (let i = urlBindingScopes.length - 1; i >= 0; i--) {
+        const frame = urlBindingScopes[i];
         if (!frame.isModule && seenFunction) continue;
-        if (frame.map.has(name)) return frame.map.get(name);
+        if (frame.map.has(name)) return { node: frame.map.get(name), frame };
         if (frame.isFunction) seenFunction = true;
       }
       return undefined;
+    }
+    // R3-2: a straight-line assignment rebinds the name in the current
+    // frame, or shadows it there when the binding lives in an outer frame
+    // (the shadow makes calls after the assignment in this scope see the
+    // new value; the dirty entry deletes the outer binding when this frame
+    // pops, so calls outside the scope stay unresolved -- the assignment
+    // may never have run). A null rhs marks the value unresolvable
+    // (compound assignment / ++ / --).
+    function assignUrlBinding(name, rhsNode) {
+      const found = lookupUrlBinding(name);
+      if (found === undefined) return;
+      const current = urlBindingScopes[urlBindingScopes.length - 1];
+      current.map.set(name, rhsNode);
+      if (found.frame !== current) current.dirty.set(name, found.frame);
     }
 
     function visit(node, testContext, callerOwner) {
@@ -883,7 +908,20 @@ function main(input) {
       // stable symbol yet, so calls inside them must not inherit the outer
       // named function's identity. Named declarations and assigned arrows
       // retain their own exact owner symbol.
-      if (ts.isVariableStatement(node)) recordConstUrlBindings(node);
+      if (ts.isVariableStatement(node)) recordUrlBinding(node);
+      // R3-2: straight-line assignments to a tracked URL name. A simple
+      // assignment rebinds to its right-hand side; compound assignment and
+      // ++/-- rebind to null (unresolvable).
+      if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left)
+          && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+          && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        assignUrlBinding(node.left.text,
+          node.operatorToken.kind === ts.SyntaxKind.EqualsToken ? node.right : null);
+      } else if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
+          && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)
+          && ts.isIdentifier(node.operand)) {
+        assignUrlBinding(node.operand.text, null);
+      }
       const currentOwner = isFunctionBoundary(node)
         ? declaredFunctionOwner(node)
         : (declaredFunctionOwner(node) || callerOwner || null);
@@ -942,12 +980,20 @@ function main(input) {
             if (isFetch || isAxios) {
               const args = node.arguments || [];
               const urlArg = args[0];
-              // R3-1: a bare-identifier URL resolves through its `const`
-              // binding (same scope or module scope); the original text
-              // stays in url_expression as evidence.
-              const effectiveUrlArg = urlArg && ts.isIdentifier(urlArg)
-                ? (lookupConstUrl(urlArg.text) || urlArg)
-                : urlArg;
+              // R3-1/R3-2: a bare-identifier URL resolves through its
+              // `const`/`let` binding (same scope or module scope); an
+              // assignment expression used as the argument resolves to its
+              // right-hand side. The original text stays in url_expression
+              // as evidence.
+              let effectiveUrlArg = urlArg;
+              if (urlArg && ts.isIdentifier(urlArg)) {
+                const bound = lookupUrlBinding(urlArg.text);
+                if (bound !== undefined && bound.node !== null) effectiveUrlArg = bound.node;
+              } else if (urlArg && ts.isBinaryExpression(urlArg)
+                  && urlArg.operatorToken.kind === ts.SyntaxKind.EqualsToken
+                  && ts.isIdentifier(urlArg.left)) {
+                effectiveUrlArg = urlArg.right;
+              }
               const literalUrl = effectiveUrlArg && (ts.isStringLiteralLike(effectiveUrlArg) || ts.isNoSubstitutionTemplateLiteral(effectiveUrlArg)) ? effectiveUrlArg.text : null;
               let httpMethod = isFetch ? "GET" : calleeText.split(".").pop().toUpperCase();
               if (isFetch && args[1] && ts.isObjectLiteralExpression(args[1])) {
@@ -994,10 +1040,13 @@ function main(input) {
       }
       const needsScopeFrame = isFunctionBoundary(node) || ts.isBlock(node) || ts.isCaseBlock(node);
       if (needsScopeFrame) {
-        constUrlScopes.push({ isFunction: isFunctionBoundary(node), isModule: false, map: new Map() });
+        urlBindingScopes.push({ isFunction: isFunctionBoundary(node), isModule: false, map: new Map(), dirty: new Map() });
       }
       ts.forEachChild(node, (child) => visit(child, childTestContext, currentOwner));
-      if (needsScopeFrame) constUrlScopes.pop();
+      if (needsScopeFrame) {
+        const popped = urlBindingScopes.pop();
+        for (const [name, targetFrame] of popped.dirty) targetFrame.map.delete(name);
+      }
     }
     for (const statement of sourceFile.statements) visit(statement, null, null);
     row.imports = imports;

@@ -586,10 +586,19 @@ class ConstBoundUrlTests(unittest.TestCase):
         self.assertIsNone(calls[0]["path"])
         self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
 
-    def test_let_bound_url_stays_dynamic(self):
+    # R3-2 moved the boundary: `let` now resolves when assigned on a
+    # straight-line path (R3-1 asserted it always stayed dynamic). This
+    # test keeps the DYNAMIC assertion at the new boundary: an assignment
+    # inside a branch leaves calls outside the branch unresolved.
+    def test_let_assigned_in_branch_stays_dynamic_outside(self):
         calls = self._calls(
-            "let url = '/api/photos';\n"
-            "function load() { return fetch(url); }\n"
+            "function load(flag) {\n"
+            "  let url = '/api/photos';\n"
+            "  if (flag) {\n"
+            "    url = '/api/other';\n"
+            "  }\n"
+            "  return fetch(url);\n"
+            "}\n"
         )
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["path"])
@@ -672,6 +681,148 @@ class ConstBoundUrlTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["path"])
         self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+
+class LetBoundUrlTests(unittest.TestCase):
+    def _calls(self, source, filename="api.js"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / filename).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = parsed["files"][filename]["api_client_calls"]
+            return sorted(calls, key=lambda item: item["line"])
+
+    def test_same_function_let_url_resolves(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  let url = '/api/photos';\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_let_declared_then_assigned_resolves(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  let url;\n"
+            "  url = '/api/photos';\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_let_reassigned_in_same_block_resolves_to_last_value(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  let url = '/api/photos';\n"
+            "  url = '/api/other';\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/other")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_let_reassigned_to_call_stays_dynamic(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  let url = '/api/photos';\n"
+            "  url = getUrl();\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_let_reassigned_to_identifier_stays_dynamic(self):
+        calls = self._calls(
+            "const other = '/api/other';\n"
+            "function load() {\n"
+            "  let url = '/api/photos';\n"
+            "  url = other;\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_let_assigned_in_branch_stays_dynamic_outside(self):
+        calls = self._calls(
+            "function load(flag) {\n"
+            "  let url = '/api/photos';\n"
+            "  if (flag) {\n"
+            "    url = '/api/other';\n"
+            "  }\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_let_assigned_in_branch_resolves_inside_branch(self):
+        calls = self._calls(
+            "function load(flag) {\n"
+            "  let url = '/api/photos';\n"
+            "  if (flag) {\n"
+            "    url = '/api/other';\n"
+            "    return fetch(url);\n"
+            "  }\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["path"], "/api/other")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+        self.assertIsNone(calls[1]["path"])
+        self.assertEqual(calls[1]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_outer_function_let_not_visible_in_closure(self):
+        calls = self._calls(
+            "function outer() {\n"
+            "  let url = '/api/photos';\n"
+            "  const inner = () => fetch(url);\n"
+            "  return inner;\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_module_let_url_resolves_in_function(self):
+        calls = self._calls(
+            "let url = '/api/photos';\n"
+            "function load() { return fetch(url); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_let_reassigned_to_template_resolves(self):
+        calls = self._calls(
+            "function load(id) {\n"
+            "  let url = '/api/photos';\n"
+            "  url = `/api/photos/${id}`;\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos/{?}")
+        self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_assignment_expression_as_url_argument_resolves(self):
+        calls = self._calls(
+            "function load() { return fetch(url = '/api/photos'); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
 
 
 if __name__ == "__main__":
