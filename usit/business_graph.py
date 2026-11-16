@@ -709,6 +709,8 @@ def project_business_graph(graph: Mapping[str, Any],
     database_access_linked = 0
     database_access_unowned = 0
     database_table_links = 0
+    database_table_link_no_documented_entity = 0
+    database_table_link_ambiguous_entity = 0
     entity_nodes_by_name: dict[str, list[dict[str, Any]]] = {}
     for item in nodes:
         if item.get("business_kind") == "entity":
@@ -766,6 +768,7 @@ def project_business_graph(graph: Mapping[str, Any],
             })
         database_access_linked += 1
         tables = details["tables"] if access_id in existing_ids else raw.get("tables", [])
+        link_outcomes: list[dict[str, Any]] = []
         for table in tables if isinstance(tables, list) else []:
             matches = entity_nodes_by_name.get(str(table).lower(), [])
             if len(matches) == 1:
@@ -778,6 +781,26 @@ def project_business_graph(graph: Mapping[str, Any],
                     "verification_status": "NOT_VERIFIED",
                 })
                 database_table_links += 1
+                link_outcomes.append({
+                    "table": table, "status": "LINKED",
+                    "entity_ids": [matches[0]["id"]],
+                })
+            elif not matches:
+                database_table_link_no_documented_entity += 1
+                link_outcomes.append({
+                    "table": table, "status": "NO_DOCUMENTED_ENTITY", "entity_ids": [],
+                })
+            else:
+                database_table_link_ambiguous_entity += 1
+                link_outcomes.append({
+                    "table": table, "status": "AMBIGUOUS_ENTITY",
+                    "entity_ids": sorted(str(item.get("id")) for item in matches
+                                         if isinstance(item.get("id"), str)),
+                })
+        # `details` is the same dict the access node references when this
+        # record created it, so the outcome lands on the node. A repeated
+        # record recomputes identical outcomes on its own throwaway dict.
+        details["documented_entity_link"] = link_outcomes
 
     # S2.9: project line-anchored identity/resource data-flow evidence.
     # A record is linked to a DB access on an exact same-file, same-line
@@ -1502,6 +1525,8 @@ def project_business_graph(graph: Mapping[str, Any],
         "database_access_records": database_access_linked,
         "database_access_unowned": database_access_unowned,
         "database_access_table_links": database_table_links,
+        "database_access_table_link_no_documented_entity": database_table_link_no_documented_entity,
+        "database_access_table_link_ambiguous_entity": database_table_link_ambiguous_entity,
         "identity_evidence_records": identity_linked,
         "identity_evidence_unlinked": identity_unlinked,
         "identity_evidence_owner_scope_links": identity_owner_scope_links,

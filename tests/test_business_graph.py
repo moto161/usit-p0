@@ -222,6 +222,40 @@ def _ts_owner_scope_endpoint_graph(identity_records):
     return project_business_graph(source, semantics), handler, load
 
 
+def _entity_link_graph(entities, accesses):
+    """Graph with repo/photos.py plus the docs files entities cite."""
+    source = graph()
+    for path in ("repo/photos.py", "docs/schema.md", "docs/other.md"):
+        source["nodes"].append({
+            "id": "file:" + path, "type": "file", "label": path,
+            "evidence": {"path": path},
+        })
+    semantics = {
+        "endpoints": [],
+        "entities": entities,
+        "database_accesses": accesses,
+        "authorization_checks": [],
+        "identity_evidence": [],
+    }
+    return project_business_graph(source, semantics)
+
+
+def _db_access(line, tables, parse_status="RESOLVED"):
+    return {"source": "repo/photos.py", "line": line, "callee": "cursor.execute",
+            "operation": "SELECT", "tables": tables, "columns": ["id"],
+            "parse_status": parse_status}
+
+
+def _db_access_nodes(result):
+    nodes = [n for n in result["nodes"] if n.get("business_kind") == "database_access"]
+    return sorted(nodes, key=lambda n: n["evidence"]["line"])
+
+
+def _entity_ids(result, label):
+    return sorted(n["id"] for n in result["nodes"]
+                  if n.get("business_kind") == "entity" and n.get("label") == label)
+
+
 class BusinessGraphProjectionTests(unittest.TestCase):
     def test_links_records_only_to_exact_source_files(self):
         semantics = {
@@ -634,6 +668,94 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         evidence = association["database_access_evidence"]
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0]["owner_symbol_id"], last_leaf)
+
+    def test_database_access_linked_table_records_entity_id(self):
+        result = _entity_link_graph(
+            [{"name": "albums", "source": "docs/schema.md", "fields": [{"name": "id"}]}],
+            [_db_access(9, ["albums"])],
+        )
+        nodes = _db_access_nodes(result)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["business_details"]["documented_entity_link"], [
+            {"table": "albums", "status": "LINKED",
+             "entity_ids": _entity_ids(result, "albums")},
+        ])
+        edges = [e for e in result["edges"]
+                 if e.get("method") == "database-access-to-documented-entity"]
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]["evidence"]["table"], "albums")
+        self.assertEqual(result["business_understanding"]["database_access_table_links"], 1)
+
+    def test_database_access_undocumented_table_records_no_entity(self):
+        result = _entity_link_graph(
+            [{"name": "albums", "source": "docs/schema.md", "fields": [{"name": "id"}]}],
+            [_db_access(10, ["tags"])],
+        )
+        nodes = _db_access_nodes(result)
+        self.assertEqual(nodes[0]["business_details"]["documented_entity_link"], [
+            {"table": "tags", "status": "NO_DOCUMENTED_ENTITY", "entity_ids": []},
+        ])
+        edges = [e for e in result["edges"]
+                 if e.get("method") == "database-access-to-documented-entity"]
+        self.assertEqual(edges, [])
+        summary = result["business_understanding"]
+        self.assertEqual(summary["database_access_table_links"], 0)
+        self.assertEqual(summary["database_access_table_link_no_documented_entity"], 1)
+        self.assertEqual(summary["database_access_table_link_ambiguous_entity"], 0)
+
+    def test_database_access_ambiguous_table_lists_candidates_without_linking(self):
+        result = _entity_link_graph(
+            [{"name": "photos", "source": "docs/schema.md", "fields": [{"name": "id"}]},
+             {"name": "photos", "source": "docs/other.md", "fields": [{"name": "id"}]}],
+            [_db_access(11, ["photos"])],
+        )
+        nodes = _db_access_nodes(result)
+        self.assertEqual(nodes[0]["business_details"]["documented_entity_link"], [
+            {"table": "photos", "status": "AMBIGUOUS_ENTITY",
+             "entity_ids": _entity_ids(result, "photos")},
+        ])
+        self.assertEqual(len(_entity_ids(result, "photos")), 2)
+        edges = [e for e in result["edges"]
+                 if e.get("method") == "database-access-to-documented-entity"]
+        self.assertEqual(edges, [])
+        summary = result["business_understanding"]
+        self.assertEqual(summary["database_access_table_links"], 0)
+        self.assertEqual(summary["database_access_table_link_no_documented_entity"], 0)
+        self.assertEqual(summary["database_access_table_link_ambiguous_entity"], 1)
+
+    def test_database_access_mixed_and_unparsed_tables_record_outcomes(self):
+        result = _entity_link_graph(
+            [{"name": "albums", "source": "docs/schema.md", "fields": [{"name": "id"}]},
+             {"name": "photos", "source": "docs/schema.md", "fields": [{"name": "id"}]},
+             {"name": "photos", "source": "docs/other.md", "fields": [{"name": "id"}]}],
+            [_db_access(9, ["albums"]),
+             _db_access(10, ["tags"]),
+             _db_access(11, ["photos"]),
+             _db_access(12, [], parse_status="UNKNOWN"),
+             _db_access(13, ["albums", "tags"])],
+        )
+        nodes = _db_access_nodes(result)
+        self.assertEqual(len(nodes), 5)
+        albums_id = _entity_ids(result, "albums")
+        photos_ids = _entity_ids(result, "photos")
+        self.assertEqual(nodes[0]["business_details"]["documented_entity_link"], [
+            {"table": "albums", "status": "LINKED", "entity_ids": albums_id},
+        ])
+        self.assertEqual(nodes[1]["business_details"]["documented_entity_link"], [
+            {"table": "tags", "status": "NO_DOCUMENTED_ENTITY", "entity_ids": []},
+        ])
+        self.assertEqual(nodes[2]["business_details"]["documented_entity_link"], [
+            {"table": "photos", "status": "AMBIGUOUS_ENTITY", "entity_ids": photos_ids},
+        ])
+        self.assertEqual(nodes[3]["business_details"]["documented_entity_link"], [])
+        self.assertEqual(nodes[4]["business_details"]["documented_entity_link"], [
+            {"table": "albums", "status": "LINKED", "entity_ids": albums_id},
+            {"table": "tags", "status": "NO_DOCUMENTED_ENTITY", "entity_ids": []},
+        ])
+        summary = result["business_understanding"]
+        self.assertEqual(summary["database_access_table_links"], 2)
+        self.assertEqual(summary["database_access_table_link_no_documented_entity"], 2)
+        self.assertEqual(summary["database_access_table_link_ambiguous_entity"], 1)
 
     def test_unreachable_database_access_is_not_attached(self):
         source = graph()
