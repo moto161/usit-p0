@@ -508,5 +508,171 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
                              "symbol:web/photo-card.component.ts#savePhoto:13")
 
 
+class ConstBoundUrlTests(unittest.TestCase):
+    def _calls(self, source, filename="api.js"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / filename).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = parsed["files"][filename]["api_client_calls"]
+            return sorted(calls, key=lambda item: item["line"])
+
+    def test_module_const_literal_url_resolves(self):
+        calls = self._calls(
+            "const LIST_URL = '/api/photos';\n"
+            "function load() { return fetch(LIST_URL); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+        self.assertEqual(calls[0]["url_expression"], "LIST_URL")
+
+    def test_module_const_template_url_resolves(self):
+        calls = self._calls(
+            "const ITEM_URL = `/api/photos/${1}`;\n"
+            "function load() { return fetch(ITEM_URL); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos/{?}")
+        self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_same_function_const_url_resolves(self):
+        calls = self._calls(
+            "function load() {\n"
+            "  const url = '/api/photos';\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_const_inside_block_resolves_within_block(self):
+        calls = self._calls(
+            "function load(flag) {\n"
+            "  if (flag) {\n"
+            "    const url = '/api/photos';\n"
+            "    return fetch(url);\n"
+            "  }\n"
+            "  return null;\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_const_inside_block_not_visible_outside(self):
+        calls = self._calls(
+            "function load(flag) {\n"
+            "  if (flag) {\n"
+            "    const url = '/api/photos';\n"
+            "    return fetch(url);\n"
+            "  }\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+        self.assertIsNone(calls[1]["path"])
+        self.assertEqual(calls[1]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_fetch_before_const_declaration_stays_dynamic(self):
+        calls = self._calls(
+            "function load() { return fetch(url); }\n"
+            "const url = '/api/photos';\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_let_bound_url_stays_dynamic(self):
+        calls = self._calls(
+            "let url = '/api/photos';\n"
+            "function load() { return fetch(url); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_const_bound_to_call_stays_dynamic(self):
+        calls = self._calls(
+            "const url = getUrl();\n"
+            "function load() { return fetch(url); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_const_bound_to_identifier_stays_dynamic(self):
+        calls = self._calls(
+            "const a = '/api/photos';\n"
+            "const b = a;\n"
+            "function load() { return fetch(b); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_const_literal_with_query_stays_dynamic(self):
+        calls = self._calls(
+            "const url = '/api/photos?page=1';\n"
+            "function load() { return fetch(url); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+    def test_inner_const_shadows_outer_const(self):
+        calls = self._calls(
+            "const url = '/api/photos';\n"
+            "function load(flag) {\n"
+            "  if (flag) {\n"
+            "    const url = '/api/other';\n"
+            "    return fetch(url);\n"
+            "  }\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["path"], "/api/other")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+        self.assertEqual(calls[1]["path"], "/api/photos")
+        self.assertEqual(calls[1]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_axios_get_with_const_url_resolves(self):
+        calls = self._calls(
+            "const LIST_URL = '/api/photos';\n"
+            "async function load() { return axios.get(LIST_URL); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["method"], "GET")
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_direct_literal_and_template_still_resolve(self):
+        calls = self._calls(
+            "function a() { return fetch('/api/photos'); }\n"
+            "function b(id) { return fetch(`/api/photos/${id}`); }\n"
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+        self.assertEqual(calls[1]["path"], "/api/photos/{?}")
+        self.assertEqual(calls[1]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_outer_function_const_not_visible_in_closure(self):
+        calls = self._calls(
+            "function outer() {\n"
+            "  const url = '/api/photos';\n"
+            "  const inner = () => fetch(url);\n"
+            "  return inner;\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+
+
 if __name__ == "__main__":
     unittest.main()

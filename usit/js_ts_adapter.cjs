@@ -167,6 +167,9 @@ function loc(sourceFile, node) {
 // placeholders (one per span, whatever the span expression is); "+" chains
 // of literals concatenate; anything else (a variable, a call, a Request /
 // URL object) yields null -- the skeleton is never guessed.
+// R3-1: a bare identifier is resolved by the caller through the const
+// scope stack before this function runs; this function itself never
+// follows a name.
 function resolveUrlSkeleton(node) {
   if (!node) return null;
   if (ts.isStringLiteralLike(node)) return node.text;
@@ -849,11 +852,38 @@ function main(input) {
         symbol_id: "symbol:" + entry.rel + "#" + name + ":" + position.line };
     }
 
+    // R3-1: single-hop `const` URL bindings. A scope stack tracks `const`
+    // declarations (identifier -> initializer node) per function/block
+    // scope; the module frame at the bottom stays visible file-wide, while
+    // lookup stops at the nearest enclosing function frame, so closures
+    // never resolve. `let`/`var` are never recorded (reassignment would
+    // need alias invalidation). Lookup is source-ordered: a binding only
+    // exists after its declaration has been visited.
+    const constUrlScopes = [{ isFunction: false, isModule: true, map: new Map() }];
+    function recordConstUrlBindings(statement) {
+      if (!(statement.declarationList.flags & ts.NodeFlags.Const)) return;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+        constUrlScopes[constUrlScopes.length - 1].map.set(declaration.name.text, declaration.initializer);
+      }
+    }
+    function lookupConstUrl(name) {
+      let seenFunction = false;
+      for (let i = constUrlScopes.length - 1; i >= 0; i--) {
+        const frame = constUrlScopes[i];
+        if (!frame.isModule && seenFunction) continue;
+        if (frame.map.has(name)) return frame.map.get(name);
+        if (frame.isFunction) seenFunction = true;
+      }
+      return undefined;
+    }
+
     function visit(node, testContext, callerOwner) {
       // Anonymous callbacks/lambdas are real scope boundaries. They have no
       // stable symbol yet, so calls inside them must not inherit the outer
       // named function's identity. Named declarations and assigned arrows
       // retain their own exact owner symbol.
+      if (ts.isVariableStatement(node)) recordConstUrlBindings(node);
       const currentOwner = isFunctionBoundary(node)
         ? declaredFunctionOwner(node)
         : (declaredFunctionOwner(node) || callerOwner || null);
@@ -912,7 +942,13 @@ function main(input) {
             if (isFetch || isAxios) {
               const args = node.arguments || [];
               const urlArg = args[0];
-              const literalUrl = urlArg && (ts.isStringLiteralLike(urlArg) || ts.isNoSubstitutionTemplateLiteral(urlArg)) ? urlArg.text : null;
+              // R3-1: a bare-identifier URL resolves through its `const`
+              // binding (same scope or module scope); the original text
+              // stays in url_expression as evidence.
+              const effectiveUrlArg = urlArg && ts.isIdentifier(urlArg)
+                ? (lookupConstUrl(urlArg.text) || urlArg)
+                : urlArg;
+              const literalUrl = effectiveUrlArg && (ts.isStringLiteralLike(effectiveUrlArg) || ts.isNoSubstitutionTemplateLiteral(effectiveUrlArg)) ? effectiveUrlArg.text : null;
               let httpMethod = isFetch ? "GET" : calleeText.split(".").pop().toUpperCase();
               if (isFetch && args[1] && ts.isObjectLiteralExpression(args[1])) {
                 for (const property of args[1].properties) {
@@ -935,7 +971,7 @@ function main(input) {
                   apiResolution = httpMethod ? "LITERAL_METHOD_PATH" : "DYNAMIC_OR_UNSUPPORTED_URL";
                 }
               } else {
-                const skeleton = urlArg ? resolveUrlSkeleton(urlArg) : null;
+                const skeleton = effectiveUrlArg ? resolveUrlSkeleton(effectiveUrlArg) : null;
                 skeletonPath = skeleton !== null ? extractSkeletonPath(skeleton) : null;
                 if (skeletonPath !== null && httpMethod) {
                   apiResolution = skeletonPath.includes("{?}")
@@ -956,7 +992,12 @@ function main(input) {
           }
         }
       }
+      const needsScopeFrame = isFunctionBoundary(node) || ts.isBlock(node) || ts.isCaseBlock(node);
+      if (needsScopeFrame) {
+        constUrlScopes.push({ isFunction: isFunctionBoundary(node), isModule: false, map: new Map() });
+      }
       ts.forEachChild(node, (child) => visit(child, childTestContext, currentOwner));
+      if (needsScopeFrame) constUrlScopes.pop();
     }
     for (const statement of sourceFile.statements) visit(statement, null, null);
     row.imports = imports;
