@@ -3510,12 +3510,38 @@ class TsConfigPathsImportTests(unittest.TestCase):
 
 
 class TsNamespaceImportReturnPropagationTests(unittest.TestCase):
-    def _rows_files(self, files):
+    def _rows_files(self, files, ts_config=None):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             for name, source in files.items():
-                (root / name).write_text(source, encoding="utf-8")
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+            if ts_config is not None:
+                (root / "tsconfig.json").write_text(ts_config, encoding="utf-8")
             parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners, ts_config=ts_config)
+
+    def _rows_files_memory(self, files):
+        # Memory mode, exactly like the scanner: a `.vue` file joins
+        # through its line-padded `<script>` text (disk mode skips
+        # `.vue` files and reports no symbols for them).
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+            js_ts_source = {}
+            for name, source in files.items():
+                if name.endswith(".vue"):
+                    script = vue_script_for_adapter(source)
+                    if script is not None:
+                        js_ts_source[name] = script
+                elif Path(name).suffix.lower() in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+                    js_ts_source[name] = source
+            parsed = analyze_js_ts_project(root, [], js_ts_source=js_ts_source)
             owners = ts_function_owners(parsed)
             return extract_identity_evidence(files, owners)
 
@@ -3530,6 +3556,15 @@ class TsNamespaceImportReturnPropagationTests(unittest.TestCase):
     _AUTH = (
         "export function get_uid(req: any) {\n"
         "  return req.user.id;\n"
+        "}\n"
+    )
+
+    _LOAD = (
+        'import get_uid from "./auth";\n'
+        "\n"
+        "export function load(req: any) {\n"
+        "  const uid = get_uid(req);\n"
+        '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
         "}\n"
     )
 
@@ -3710,6 +3745,202 @@ class TsNamespaceImportReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
         self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:2")
         self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+    def test_default_imported_function_binds(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export default function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "handlers.ts": self._LOAD,
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 4, 5])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:3")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_default_imported_function_alias_binds(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export default function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                'import uid_of from "./auth";\n'
+                "export function load(req: any) {\n"
+                "  const uid = uid_of(req);\n"
+                '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_default_imported_async_function_binds(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export default async function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "handlers.ts": self._LOAD,
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_default_and_named_imports_coexist(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export default function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+                "export function other(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                'import get_uid, { other } from "./auth";\n'
+                "export function load(req: any) {\n"
+                "  const uid = get_uid(req);\n"
+                "  const alt = other(req);\n"
+                '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
+            ),
+        })
+        bindings = self._direct_bindings(rows)
+        self.assertEqual(len(bindings), 1)
+        # The default part binds; the named part also resolves, but
+        # only the uid sink is asserted here (the alt alias is unused).
+        self.assertEqual(bindings[0]["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(bindings[0]["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_default_imported_function_via_tsconfig_paths_binds(self):
+        rows = self._rows_files({
+            "src/auth.ts": (
+                "export default function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "src/handlers.ts": (
+                'import get_uid from "@/auth";\n'
+                "\n"
+                "export function load(req: any) {\n"
+                "  const uid = get_uid(req);\n"
+                '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
+            ),
+        }, ts_config='{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}\n')
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_default_imported_function_in_vue_binds(self):
+        rows = self._rows_files_memory({
+            "auth.ts": (
+                "export default function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "App.vue": (
+                "<template><div /></template>\n"
+                "<script lang=\"ts\">\n"
+                'import get_uid from "./auth";\n'
+                "export default {\n"
+                "  methods: {\n"
+                "    load(req) {\n"
+                "      const uid = get_uid(req);\n"
+                "      return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+                "</script>\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 8)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 7, 8])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:App.vue#load:6")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_default_imported_function_shadowed_by_local_binds_local(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export default function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                'import get_uid from "./auth";\n'
+                "\n"
+                "export function get_uid(req: any) {\n"
+                "  return req.user.id;\n"
+                "}\n"
+                "export function load(req: any) {\n"
+                "  const uid = get_uid(req);\n"
+                '  return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_reexported_identifier_default_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "const get_uid = (req: any) => req.user.id;\n"
+                "export default get_uid;\n"
+            ),
+            "handlers.ts": self._LOAD,
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_anonymous_default_arrow_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": "export default (req: any) => req.user.id;\n",
+            "handlers.ts": self._LOAD,
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_default_imported_class_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export default class AuthHelper {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                'import AuthHelper from "./auth";\n'
+                "\n"
+                "export class PhotoHandler {\n"
+                "  constructor() {\n"
+                "    this.helper = new AuthHelper();\n"
+                "  }\n"
+                "  load(req: any) {\n"
+                "    const uid = this.helper.get_uid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
 
 
 class TsConstFunctionReturnPropagationTests(unittest.TestCase):

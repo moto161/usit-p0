@@ -717,6 +717,51 @@ _TS_IMPORT_SPEC_RE = re.compile(
 _TS_NAMESPACE_IMPORT_RE = re.compile(
     r"import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*[\"']([^\"']+)[\"']"
 )
+_TS_DEFAULT_IMPORT_RE = re.compile(
+    r"^\s*import\s+([A-Za-z_$][\w$]*)\s+from\s*[\"']([^\"']+)[\"']")
+_TS_MIXED_IMPORT_RE = re.compile(
+    r"^\s*import\s+([A-Za-z_$][\w$]*)\s*,\s*\{([^}]*)\}\s*from\s*[\"']([^\"']+)[\"']")
+_TS_DEFAULT_EXPORT_FN_RE = re.compile(
+    r"^\s*export\s+default\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")
+
+
+def _ts_default_import_bindings(path: str, source: str) -> dict[str, str]:
+    """Map local names to specifiers for default imports (T10).
+
+    Only the bare `import <name> from "<spec>"` form, plus the
+    default part of a mixed `import <name>, { ... } from "<spec>"`.
+    Named imports (`import { ... }`), namespace imports
+    (`import * as ...`) and side-effect imports (`import "<spec>"`)
+    do not match; `import type` is skipped.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return {}
+    bindings: dict[str, str] = {}
+    for line in source.splitlines():
+        match = _TS_DEFAULT_IMPORT_RE.match(line)
+        if match and match.group(1) != "type":
+            bindings.setdefault(match.group(1), match.group(2))
+        mixed = _TS_MIXED_IMPORT_RE.match(line)
+        if mixed and mixed.group(1) != "type":
+            bindings.setdefault(mixed.group(1), mixed.group(3))
+    return bindings
+
+
+def _ts_default_export_function(path: str, source: str) -> str | None:
+    """Name of the default-exported function of a TS/JS file, if any (T10).
+
+    Only `export default [async] function <name>` qualifies. An
+    `export default <expr>`, a re-exported identifier
+    (`export default get_uid;`) and an anonymous default export have
+    no such function and return None.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return None
+    for line in source.splitlines():
+        match = _TS_DEFAULT_EXPORT_FN_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
 _TS_TOPLEVEL_FN_RE = re.compile(
     r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*"
     r"([A-Za-z_$][\w$]*)\s*\("
@@ -1436,7 +1481,8 @@ def _strip_ts_comment(line: str) -> str:
 def _ts_import_bindings(path: str, source: str) -> dict[str, tuple[str, str]]:
     """Map local names to (module specifier, imported name) for named TS/JS imports.
 
-    Only value named imports count (``import { A, B as C } from "./x"``);
+    Only value named imports count (``import { A, B as C } from "./x"``
+    and the named part of a mixed ``import d, { A } from "./x"``);
     default imports, namespace imports, side-effect imports, dynamic
     ``import(...)``, ``require(...)`` and ``import type`` are ignored.
     A local name imported from two different modules is ambiguous and
@@ -1462,6 +1508,25 @@ def _ts_import_bindings(path: str, source: str) -> dict[str, tuple[str, str]]:
             for match in _TS_NAMED_IMPORT_RE.finditer(buf):
                 specifier = match.group(2)
                 for spec in match.group(1).split(","):
+                    spec = spec.strip()
+                    if not spec:
+                        continue
+                    spec_match = _TS_IMPORT_SPEC_RE.match(spec)
+                    if not spec_match:
+                        continue
+                    imported = spec_match.group(1)
+                    local = spec_match.group(2) or imported
+                    if local in ambiguous:
+                        continue
+                    binding = (specifier, imported)
+                    if local in bindings and bindings[local] != binding:
+                        del bindings[local]
+                        ambiguous.add(local)
+                    else:
+                        bindings[local] = binding
+            for match in _TS_MIXED_IMPORT_RE.finditer(buf):
+                specifier = match.group(3)
+                for spec in match.group(2).split(","):
                     spec = spec.strip()
                     if not spec:
                         continue
@@ -1556,10 +1621,12 @@ def _ts_named_function_bindings(
     The TS mirror of ``_python_imported_identity_helpers`` for functions:
     only ``import { name [as alias] } from \"./x\"`` (or a ``tsconfig``
     path alias, T7) whose target file directly defines a qualifying
-    top-level function under the original name. A local name shadowed
-    by a top-level function defined in the importing file itself is
-    skipped (the local definition wins). Re-exports (the target file
-    itself importing the name) are not followed.
+    top-level function under the original name. A default import
+    (T10) binds the local name to the target file's default-exported
+    function. A local name shadowed by a top-level function defined in
+    the importing file itself is skipped (the local definition wins).
+    Re-exports (the target file itself importing the name) are not
+    followed.
     """
     result: dict[str, dict[str, dict[str, Any]]] = {}
     for path, source in code_by_file.items():
@@ -1574,6 +1641,18 @@ def _ts_named_function_bindings(
             if target is None or target == path:
                 continue
             profile = top_level_profiles.get(target, {}).get(imported)
+            if profile is not None:
+                bindings[local] = profile
+        for local, specifier in _ts_default_import_bindings(path, source).items():
+            if local in local_names or local in bindings:
+                continue
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+            if target is None or target == path:
+                continue
+            default_fn = _ts_default_export_function(target, code_by_file[target])
+            if default_fn is None:
+                continue
+            profile = top_level_profiles.get(target, {}).get(default_fn)
             if profile is not None:
                 bindings[local] = profile
         if bindings:
