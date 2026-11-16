@@ -1318,11 +1318,46 @@ class TypeOrmEntityTableTests(unittest.TestCase):
         })
         self.assertEqual(tables, {"Photo": "photos"})
 
-    def test_bare_entity_decorator_does_not_map(self):
+    def test_bare_entity_decorator_defaults_to_class_name(self):
+        # O10 moved the boundary: a bare @Entity() now maps to the class
+        # name itself, which is TypeORM's documented default table name.
+        # It used to map to nothing.
         tables = typeorm_entity_tables({
             "server/photo.entity.ts": "@Entity()\nexport class Photo {\n}\n",
         })
+        self.assertEqual(tables, {"Photo": "Photo"})
+
+    def test_bare_and_explicit_names_conflict_is_dropped(self):
+        tables = typeorm_entity_tables({
+            "a/photo.entity.ts": "@Entity()\nexport class Photo {\n}\n",
+            "b/photo.entity.ts": "@Entity(\"images\")\nexport class Photo {\n}\n",
+        })
         self.assertEqual(tables, {})
+
+    def test_bare_entity_in_two_files_maps_once(self):
+        tables = typeorm_entity_tables({
+            "a/photo.entity.ts": "@Entity()\nexport class Photo {\n}\n",
+            "b/photo.entity.ts": "@Entity()\nexport class Photo {\n}\n",
+        })
+        self.assertEqual(tables, {"Photo": "Photo"})
+
+    def test_options_without_name_defaults_to_class_name(self):
+        tables = typeorm_entity_tables({
+            "server/pet.entity.ts": (
+                "@Entity({ schema: \"lesson3\" })\n"
+                "export class Pet {\n}\n"
+            ),
+        })
+        self.assertEqual(tables, {"Pet": "Pet"})
+
+    def test_options_name_beats_schema(self):
+        tables = typeorm_entity_tables({
+            "server/pet.entity.ts": (
+                "@Entity({ name: \"pets\", schema: \"lesson3\" })\n"
+                "export class Pet {\n}\n"
+            ),
+        })
+        self.assertEqual(tables, {"Pet": "pets"})
 
     def test_same_entity_name_with_different_tables_is_dropped(self):
         tables = typeorm_entity_tables({
@@ -1345,11 +1380,53 @@ class TypeOrmRepositoryTests(unittest.TestCase):
         "export class Photo {\n}\n"
     )
 
+    _BARE_ENTITY = (
+        "import { Entity } from \"typeorm\";\n\n"
+        "@Entity()\n"
+        "export class Photo {\n}\n"
+    )
+
     def _rows(self, service_source):
         return extract_database_accesses({
             "server/photo.entity.ts": self._ENTITY,
             "server/photos.service.ts": service_source,
         })
+
+    def _rows_bare(self, service_source):
+        return extract_database_accesses({
+            "server/photo.entity.ts": self._BARE_ENTITY,
+            "server/photos.service.ts": service_source,
+        })
+
+    def test_bare_entity_bound_find_resolves_select_with_class_name_table(self):
+        rows = self._rows_bare(
+            "import { getRepository } from \"typeorm\";\n"
+            "const repo = getRepository(Photo);\n"
+            "export async function load() {\n"
+            "  return repo.find({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["operation"], "SELECT")
+        self.assertEqual(row["tables"], ["Photo"])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
+
+    def test_bare_entity_bound_insert_resolves_insert_with_class_name_table(self):
+        rows = self._rows_bare(
+            "import { getRepository } from \"typeorm\";\n"
+            "const repo = getRepository(Photo);\n"
+            "export async function save() {\n"
+            "  return repo.insert({});\n"
+            "}\n"
+        )
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["operation"], "INSERT")
+        self.assertEqual(row["tables"], ["Photo"])
+        self.assertEqual(row["parse_status"], "ORM_MODEL")
+        self.assertEqual(row["orm_model"], ["Photo"])
 
     def test_bound_find_resolves_select(self):
         rows = self._rows(

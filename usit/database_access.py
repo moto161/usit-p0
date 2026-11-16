@@ -758,6 +758,7 @@ _TYPEORM_ENTITY = re.compile(
     r"@Entity\(\s*(?:"
     r"\{[^}]*?name\s*:\s*(?:\"([^\"]+)\"|'([^']+)')\s*[^}]*\}"
     r"|\"([^\"]+)\"|'([^']+)'"
+    r"|\{[^}]*\}"
     r")?\s*\)"
 )
 _TYPEORM_GET_REPOSITORY = re.compile(
@@ -1201,26 +1202,34 @@ def typeorm_entity_tables(code_by_file: dict[str, str]) -> dict[str, str]:
     Pure regex scan of the project's own TS/JS files: a class preceded by
     ``@Entity("photos")``, ``@Entity('photos')`` or
     ``@Entity({ name: "photos" })`` maps its class name to that table.
-    A bare ``@Entity()`` (default table name) is not mapped. A table name
-    must be a plain identifier; anything else is ignored. A class name
-    mapping to more than one distinct table is ambiguous and dropped
-    entirely. No target code is imported or executed.
+    A bare ``@Entity()`` -- or an options object without a ``name`` key,
+    such as ``@Entity({ schema: "lesson3" })`` -- maps to the class name
+    itself, which is TypeORM's documented default table name ("If not
+    specified, then table name is generated from entity class name").
+    A table name must be a plain identifier; anything else is ignored.
+    A class name mapping to more than one distinct table is ambiguous
+    and dropped entirely. No target code is imported or executed.
     """
     candidates: dict[str, set[str]] = {}
     for path, source in sorted(code_by_file.items()):
         if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
             continue
         for match in _TYPEORM_ENTITY.finditer(source):
-            table = next((g for g in match.groups() if g is not None), None)
-            if table is None:
-                continue
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", table):
-                continue
             class_match = re.search(r"\bclass\s+([A-Za-z_$][\w$]*)",
                                     source[match.end():match.end() + 500])
             if class_match is None:
                 continue
-            candidates.setdefault(class_match.group(1), set()).add(table)
+            class_name = class_match.group(1)
+            table = next((g for g in match.groups() if g is not None), None)
+            if table is None:
+                # No explicit name: TypeORM defaults the table name to
+                # the entity class name. It joins the same candidate
+                # set, so an explicit name elsewhere for the same class
+                # still triggers the ambiguity drop.
+                table = class_name
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", table):
+                continue
+            candidates.setdefault(class_name, set()).add(table)
     return {name: next(iter(tables)) for name, tables in candidates.items()
             if len(tables) == 1}
 
