@@ -542,9 +542,12 @@ class PythonCrossModuleResolverTests(unittest.TestCase):
         self.assertEqual(api_call_edges[0].get("route_path"), "/api/photos")
 
     def test_jsx_handler_dynamic_fetch_url_remains_unknown_and_unlinked(self):
+        # R3-3 moved the boundary: fetch('/api/photos/' + id) now resolves
+        # to a TEMPLATE_METHOD_PATH skeleton, so the fixture moved to a
+        # whole-argument call, which stays dynamic.
         (self.root / "PhotoPage.tsx").write_text(
             "export function PhotoPage() { return <button onClick={loadPhotos}>Load</button>; }\n"
-            "export function loadPhotos(id: string) { return fetch('/api/photos/' + id); }\n",
+            "export function loadPhotos() { return fetch(getUrl()); }\n",
             encoding="utf-8")
         out = self.root.parent / "jsx-dynamic-api-output"
         scan_project(str(self.root), str(out), force=True)

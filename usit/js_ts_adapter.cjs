@@ -164,9 +164,11 @@ function loc(sourceFile, node) {
 
 // F2: resolve a URL argument to its static skeleton, or null when the URL
 // is not a literal expression. Template substitutions become "{?}"
-// placeholders (one per span, whatever the span expression is); "+" chains
-// of literals concatenate; anything else (a variable, a call, a Request /
-// URL object) yields null -- the skeleton is never guessed.
+// placeholders (one per span, whatever the span expression is); "+"
+// chains of literals concatenate; anything else (a variable, a call, a
+// Request / URL object) yields null -- the skeleton is never guessed.
+// R3-3: inside a "+" chain, an unresolvable operand also becomes "{?}"
+// (see the branch above); a bare non-literal argument still yields null.
 // R3-1: a bare identifier is resolved by the caller through the const
 // scope stack before this function runs; this function itself never
 // follows a name.
@@ -180,9 +182,14 @@ function resolveUrlSkeleton(node) {
   }
   if (ts.isParenthesizedExpression(node)) return resolveUrlSkeleton(node.expression);
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    const left = resolveUrlSkeleton(node.left);
-    const right = resolveUrlSkeleton(node.right);
-    if (left === null || right === null) return null;
+    // R3-3: an unresolvable operand becomes a "{?}" placeholder (one
+    // segment), the same approximation template interpolations already
+    // get -- see the false-positive analysis in
+    // USIT_RING3_PLUS_CHAIN_R3_3_DESIGN.md §2 (the graph matcher only
+    // lets a whole "{?}" segment match a route parameter segment, and a
+    // leading "{?}/" is stripped exactly like a ${BASE} prefix).
+    const left = resolveUrlSkeleton(node.left) ?? "{?}";
+    const right = resolveUrlSkeleton(node.right) ?? "{?}";
     return left + right;
   }
   return null;

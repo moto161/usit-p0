@@ -161,7 +161,11 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
             self.assertEqual(calls[0]["path"], "/api/photos/{?}")
             self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
 
-    def test_plus_chain_url_literals(self):
+    # R3-3 moved the boundary: a "+" chain with an unresolvable operand
+    # now resolves that operand to a "{?}" placeholder (F2 template
+    # interpolation already got the same approximation). The second call
+    # below used to stay DYNAMIC; it now resolves to a template skeleton.
+    def test_plus_chain_url_with_value_operand_resolves(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "api.js").write_text(
@@ -175,8 +179,8 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0]["path"], "/api/photos")
             self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
-            self.assertIsNone(calls[1]["path"])
-            self.assertEqual(calls[1]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
+            self.assertEqual(calls[1]["path"], "/api/photos/{?}")
+            self.assertEqual(calls[1]["resolution_status"], "TEMPLATE_METHOD_PATH")
 
     def test_variable_url_stays_dynamic(self):
         with tempfile.TemporaryDirectory() as td:
@@ -823,6 +827,87 @@ class LetBoundUrlTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["path"], "/api/photos")
         self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+
+class PlusChainUrlTests(unittest.TestCase):
+    def _calls(self, source, filename="api.js"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / filename).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            calls = parsed["files"][filename]["api_client_calls"]
+            return sorted(calls, key=lambda item: item["line"])
+
+    def test_plus_chain_with_trailing_value_resolves(self):
+        calls = self._calls(
+            "function load(id) { return fetch('/api/photos/' + id); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos/{?}")
+        self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_plus_chain_with_middle_value_resolves(self):
+        calls = self._calls(
+            "function load(uid) { return fetch('/api/users/' + uid + '/posts'); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/users/{?}/posts")
+        self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_plus_chain_with_leading_value_resolves_to_path(self):
+        # Same approximation as template literals: a leading ${BASE} prefix
+        # is stripped, so a leading unknown operand leaves the literal path.
+        calls = self._calls(
+            "function load(base) { return fetch(base + '/photos'); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_plus_chain_mid_segment_placeholder_resolves(self):
+        # Adapter-level only: "/api{?}" has a placeholder inside a segment,
+        # which the graph matcher never links to a route.
+        calls = self._calls(
+            "function load(path) { return fetch('/api' + path); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api{?}")
+        self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_plus_chain_through_const_binding_resolves(self):
+        calls = self._calls(
+            "function load(id) {\n"
+            "  const url = '/api/photos/' + id;\n"
+            "  return fetch(url);\n"
+            "}\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos/{?}")
+        self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_plus_chain_with_query_suffix_resolves(self):
+        calls = self._calls(
+            "function load(id) { return fetch('/api/photos/' + id + '?page=1'); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos/{?}")
+        self.assertEqual(calls[0]["resolution_status"], "TEMPLATE_METHOD_PATH")
+
+    def test_plus_chain_of_literals_still_resolves(self):
+        calls = self._calls(
+            "function load() { return fetch('/api/' + 'photos'); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/api/photos")
+        self.assertEqual(calls[0]["resolution_status"], "LITERAL_METHOD_PATH")
+
+    def test_call_result_url_stays_dynamic(self):
+        calls = self._calls(
+            "function load() { return fetch(getUrl()); }\n"
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["path"])
+        self.assertEqual(calls[0]["resolution_status"], "DYNAMIC_OR_UNSUPPORTED_URL")
 
 
 if __name__ == "__main__":
