@@ -264,6 +264,11 @@ def _build_endpoint_execution_paths(nodes: list[dict[str, Any]]) -> list[dict[st
              "path": item.get("path"), "line": item.get("line"),
              "operation": item.get("operation"), "tables": item.get("tables", []),
              "columns": item.get("columns", []),
+             # R7-2: per-table link outcomes (LINKED / NO_DOCUMENTED_ENTITY /
+             # AMBIGUOUS_ENTITY), carried so the function view can surface
+             # tables with no documented entity instead of only linked ones.
+             "documented_entity_link": item.get("documented_entity_link")
+             if isinstance(item.get("documented_entity_link"), list) else [],
              "verification_status": item.get("verification_status") or "NOT_VERIFIED"}
             for item in database if isinstance(item, Mapping)
         ]
@@ -1021,6 +1026,10 @@ def project_business_graph(graph: Mapping[str, Any],
                                 "operation": details.get("operation"),
                                 "tables": details.get("tables", []),
                                 "columns": details.get("columns", []),
+                                # R7-2: the per-table link outcomes (R7-1)
+                                # travel with the access so the function view
+                                # can show unlinked tables, not just edges.
+                                "documented_entity_link": details.get("documented_entity_link", []),
                                 "confidence": "STATIC_INFERENCE",
                                 "verification_status": "NOT_VERIFIED"})
         related.sort(key=lambda item: (item["path"] or "", item["line"] or 0, item["database_access_id"]))
@@ -1459,11 +1468,50 @@ def project_business_graph(graph: Mapping[str, Any],
             str(item.get("source_file") or ""), int(item.get("event_line") or 0),
             str(item.get("api_call_file") or ""), int(item.get("api_call_line") or 0)))
         entity_links = []
+        unlinked_tables = []
+        has_linked_outcome = False
+        has_unlinked_outcome = False
         for access in flow.get("database_accesses", []):
             if isinstance(access, Mapping):
                 entity_links.extend(entity_links_by_access.get(str(access.get("database_access_id")), []))
+                # R7-2: surface tables with no documented entity (or an
+                # ambiguous one) in the view. Linked tables already appear
+                # in documented_entity_links above; only non-LINKED
+                # outcomes are listed here, with their candidate entity
+                # ids, and no edge is built for them.
+                for outcome in access.get("documented_entity_link", []):
+                    if not isinstance(outcome, Mapping):
+                        continue
+                    if outcome.get("status") == "LINKED":
+                        has_linked_outcome = True
+                    else:
+                        has_unlinked_outcome = True
+                        entity_ids = outcome.get("entity_ids")
+                        unlinked_tables.append({
+                            "table": outcome.get("table"),
+                            "status": outcome.get("status"),
+                            "entity_ids": sorted(entity_ids)
+                            if isinstance(entity_ids, list) else [],
+                            "database_access_id": access.get("database_access_id"),
+                            "path": access.get("path"),
+                            "line": access.get("line"),
+                        })
+        unlinked_tables.sort(key=lambda item: (
+            str(item.get("path") or ""), int(item.get("line") or 0),
+            str(item.get("table") or ""), str(item.get("status") or "")))
         unique_entities = {(item.get("entity_node_id"), json.dumps(item.get("evidence", {}), sort_keys=True)): item for item in entity_links}
         entity_links = [unique_entities[k] for k in sorted(unique_entities, key=lambda x: (str(x[0]), x[1]))]
+        if not flow.get("database_accesses"):
+            entity_linkage = "NO_DATABASE_ACCESS"
+        elif has_linked_outcome and has_unlinked_outcome:
+            entity_linkage = "PARTIALLY_LINKED"
+        elif has_linked_outcome:
+            entity_linkage = "LINKED"
+        elif has_unlinked_outcome:
+            entity_linkage = "NOT_LINKED"
+        else:
+            # Accesses exist but no table was recorded at all.
+            entity_linkage = "NOT_LINKED_OR_UNKNOWN"
         stages = flow.get("stage_status") if isinstance(flow.get("stage_status"), Mapping) else {}
         identity = {"endpoint_id": endpoint_id, "method": flow.get("method"), "endpoint": flow.get("endpoint"), "source": flow.get("source")}
         business_function_views.append({
@@ -1473,10 +1521,12 @@ def project_business_graph(graph: Mapping[str, Any],
             "source": flow.get("source"), "frontend_entrypoints": frontend,
             "frontend_entrypoint_count": len(frontend), "handler": flow.get("handler"),
             "call_chain": flow.get("call_chain", []), "database_accesses": flow.get("database_accesses", []),
-            "documented_entity_links": entity_links, "authorization": flow.get("authorization"),
+            "documented_entity_links": entity_links,
+            "unlinked_database_tables": unlinked_tables,
+            "authorization": flow.get("authorization"),
             "identity_resource_flow": flow.get("identity_resource_flow", []), "stage_status": dict(stages),
             "coverage": {"frontend_static_linkage": "LINKED" if frontend else "NOT_LINKED",
-                         "database_entity_linkage": "LINKED" if entity_links else "NOT_LINKED_OR_UNKNOWN",
+                         "database_entity_linkage": entity_linkage,
                          "test_design": "NOT_ASSESSED_BY_GRAPH", "test_execution": "NOT_MEASURED"},
             "unlinked_requirements": ["PRD feature ↔ endpoint mapping: NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION",
                                       "Runtime page reachability and event execution: UNKNOWN",

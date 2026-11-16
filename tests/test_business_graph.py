@@ -256,6 +256,59 @@ def _entity_ids(result, label):
                   if n.get("business_kind") == "entity" and n.get("label") == label)
 
 
+def _view_access(tables, line=22, parse_status="RESOLVED"):
+    return {"source": "server/repos/photo_repo.py", "line": line,
+            "callee": "db.execute", "operation": "SELECT", "tables": tables,
+            "columns": ["id", "owner_id"], "parse_status": parse_status,
+            "parser": "python-ast-single-line"}
+
+
+def _view_graph(entities, accesses):
+    """Endpoint + handler + repository fixture for function-view tests."""
+    source = graph()
+    source["nodes"].extend([
+        {"id": "file:server/repos/photo_repo.py", "type": "file",
+         "label": "server/repos/photo_repo.py",
+         "evidence": {"path": "server/repos/photo_repo.py"}},
+        {"id": "file:docs/schema.md", "type": "file", "label": "docs/schema.md",
+         "evidence": {"path": "docs/schema.md"}},
+        {"id": "file:docs/other.md", "type": "file", "label": "docs/other.md",
+         "evidence": {"path": "docs/other.md"}},
+        {"id": "external:db.execute", "type": "external", "label": "execute",
+         "evidence": {"note": "external database client"}},
+    ])
+    handler = "symbol:server/routes/photos.js#listPhotos:10"
+    repository = "symbol:server/repos/photo_repo.py#load:4"
+    source["nodes"].extend([
+        {"id": handler, "type": "function", "label": "listPhotos",
+         "evidence": {"path": "server/routes/photos.js", "line": 10}},
+        {"id": repository, "type": "function", "label": "load",
+         "evidence": {"path": "server/repos/photo_repo.py", "line": 4}},
+    ])
+    source["edges"].extend([
+        {"source": "file:server/routes/photos.js", "target": repository,
+         "type": "calls", "caller_symbol_id": handler, "resolution_status": "RESOLVED",
+         "evidence": {"path": "server/routes/photos.js", "line": 15}},
+        {"source": "file:server/repos/photo_repo.py", "target": "external:db.execute",
+         "type": "calls", "caller_symbol_id": repository, "resolution_status": "EXTERNAL",
+         "evidence": {"path": "server/repos/photo_repo.py", "line": 22}},
+    ])
+    semantics = {
+        "entities": entities,
+        "endpoints": [{"method": "GET", "path": "/photos",
+                       "source": "server/routes/photos.js:5", "line": 5,
+                       "handler_reference": "listPhotos"}],
+        "database_accesses": accesses,
+    }
+    return project_business_graph(source, semantics)
+
+
+def _function_view(result):
+    views = result["business_understanding"]["business_function_views"]
+    assert len(views) == 1
+    return views[0]
+
+
 class BusinessGraphProjectionTests(unittest.TestCase):
     def test_links_records_only_to_exact_source_files(self):
         semantics = {
@@ -1300,6 +1353,86 @@ class BusinessGraphProjectionTests(unittest.TestCase):
         self.assertEqual(view["coverage"]["frontend_static_linkage"], "NOT_LINKED")
         self.assertEqual(understanding["documented_feature_linkage"][0]["linkage_status"],
                          "NOT_LINKED_NO_EXPLICIT_FEATURE_ENDPOINT_RELATION")
+
+    def test_function_view_lists_undocumented_table(self):
+        result = _view_graph(
+            [{"name": "photos", "source": "docs/schema.md",
+              "fields": [{"name": "id"}, {"name": "owner_id"}]}],
+            [_view_access(["tags"])],
+        )
+        view = _function_view(result)
+        access_id = view["database_accesses"][0]["database_access_id"]
+        self.assertEqual(view["documented_entity_links"], [])
+        self.assertEqual(view["unlinked_database_tables"], [
+            {"table": "tags", "status": "NO_DOCUMENTED_ENTITY", "entity_ids": [],
+             "database_access_id": access_id,
+             "path": "server/repos/photo_repo.py", "line": 22},
+        ])
+        self.assertEqual(view["coverage"]["database_entity_linkage"], "NOT_LINKED")
+
+    def test_function_view_lists_ambiguous_table_without_linking(self):
+        result = _view_graph(
+            [{"name": "photos", "source": "docs/schema.md", "fields": [{"name": "id"}]},
+             {"name": "photos", "source": "docs/other.md", "fields": [{"name": "id"}]}],
+            [_view_access(["photos"])],
+        )
+        view = _function_view(result)
+        self.assertEqual(view["documented_entity_links"], [])
+        self.assertEqual(len(view["unlinked_database_tables"]), 1)
+        unlinked = view["unlinked_database_tables"][0]
+        self.assertEqual(unlinked["table"], "photos")
+        self.assertEqual(unlinked["status"], "AMBIGUOUS_ENTITY")
+        self.assertEqual(unlinked["entity_ids"], _entity_ids(result, "photos"))
+        self.assertEqual([e for e in result["edges"]
+                          if e.get("method") == "database-access-to-documented-entity"], [])
+        self.assertEqual(view["coverage"]["database_entity_linkage"], "NOT_LINKED")
+
+    def test_function_view_mixed_tables_are_partially_linked(self):
+        result = _view_graph(
+            [{"name": "photos", "source": "docs/schema.md",
+              "fields": [{"name": "id"}, {"name": "owner_id"}]}],
+            [_view_access(["photos", "tags"])],
+        )
+        view = _function_view(result)
+        self.assertEqual(len(view["documented_entity_links"]), 1)
+        self.assertEqual(view["documented_entity_links"][0]["entity_name"], "photos")
+        self.assertEqual(len(view["unlinked_database_tables"]), 1)
+        self.assertEqual(view["unlinked_database_tables"][0]["table"], "tags")
+        self.assertEqual(view["unlinked_database_tables"][0]["status"], "NO_DOCUMENTED_ENTITY")
+        self.assertEqual(view["coverage"]["database_entity_linkage"], "PARTIALLY_LINKED")
+
+    def test_function_view_fully_linked_table_reports_linked(self):
+        result = _view_graph(
+            [{"name": "photos", "source": "docs/schema.md",
+              "fields": [{"name": "id"}, {"name": "owner_id"}]}],
+            [_view_access(["photos"])],
+        )
+        view = _function_view(result)
+        self.assertEqual(len(view["documented_entity_links"]), 1)
+        self.assertEqual(view["unlinked_database_tables"], [])
+        self.assertEqual(view["coverage"]["database_entity_linkage"], "LINKED")
+
+    def test_function_view_without_database_access_reports_no_access(self):
+        result = _view_graph(
+            [{"name": "photos", "source": "docs/schema.md",
+              "fields": [{"name": "id"}, {"name": "owner_id"}]}],
+            [],
+        )
+        view = _function_view(result)
+        self.assertEqual(view["database_accesses"], [])
+        self.assertEqual(view["unlinked_database_tables"], [])
+        self.assertEqual(view["coverage"]["database_entity_linkage"], "NO_DATABASE_ACCESS")
+
+    def test_function_view_access_without_tables_keeps_unknown(self):
+        result = _view_graph(
+            [{"name": "photos", "source": "docs/schema.md",
+              "fields": [{"name": "id"}, {"name": "owner_id"}]}],
+            [_view_access([], parse_status="UNKNOWN")],
+        )
+        view = _function_view(result)
+        self.assertEqual(len(view["database_accesses"]), 1)
+        self.assertEqual(view["unlinked_database_tables"], [])
+        self.assertEqual(view["coverage"]["database_entity_linkage"], "NOT_LINKED_OR_UNKNOWN")
 
 
     def test_propagates_python_identity_source_to_exact_resolved_call_parameter(self):
