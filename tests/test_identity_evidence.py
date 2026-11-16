@@ -3053,5 +3053,200 @@ class IdentityInheritedMethodReturnPropagationTests(unittest.TestCase):
                          "BaseAuth.get_uid")
 
 
+class TsNamespaceImportReturnPropagationTests(unittest.TestCase):
+    def _rows_files(self, files):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                (root / name).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners)
+
+    def _rows(self, source, filename="handlers.ts"):
+        return self._rows_files({filename: source})
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _AUTH = (
+        "export function get_uid(req: any) {\n"
+        "  return req.user.id;\n"
+        "}\n"
+    )
+
+    def test_same_file_top_level_function_binds(self):
+        rows = self._rows(
+            "export function get_uid(req: any) {\n"
+            "  return req.user.id;\n"
+            "}\n"
+            "export function load(req: any) {\n"
+            "  const uid = get_uid(req);\n"
+            "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 6)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 5, 6])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:4")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_same_file_top_level_function_request_identity_binds(self):
+        rows = self._rows(
+            "export function get_uid(req: any) {\n"
+            "  return req.body.user_id;\n"
+            "}\n"
+            "export function load(req: any) {\n"
+            "  const uid = get_uid(req);\n"
+            "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding"
+                       and row["line"] == 6)
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+
+    def test_top_level_function_mixed_returns_does_not_bind(self):
+        rows = self._rows(
+            "export function get_uid(req: any) {\n"
+            "  if (req.user) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  return req.body.user_id;\n"
+            "}\n"
+            "export function load(req: any) {\n"
+            "  const uid = get_uid(req);\n"
+            "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_namespace_import_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": (
+                "import * as auth from \"./auth\";\n"
+                "export function load(req: any) {\n"
+                "  const uid = auth.get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 4)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 3, 4])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:2")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_namespace_import_alias_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": (
+                "import * as a from \"./auth\";\n"
+                "export function load(req: any) {\n"
+                "  const uid = a.get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 4)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_namespace_import_non_identity_function_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export function get_uid(req: any) {\n"
+                "  return null;\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                "import * as auth from \"./auth\";\n"
+                "export function load(req: any) {\n"
+                "  const uid = auth.get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_namespace_import_package_name_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": (
+                "import * as auth from \"@scope/auth\";\n"
+                "export function load(req: any) {\n"
+                "  const uid = auth.get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_named_import_top_level_function_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": (
+                "import { get_uid } from \"./auth\";\n"
+                "export function load(req: any) {\n"
+                "  const uid = get_uid(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 4)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 3, 4])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_named_import_alias_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": (
+                "import { get_uid as uid_of } from \"./auth\";\n"
+                "export function load(req: any) {\n"
+                "  const uid = uid_of(req);\n"
+                "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 4)
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "get_uid")
+
+    def test_arrow_function_const_does_not_bind(self):
+        # Out of scope for T6 (only `function` declarations qualify):
+        # an arrow-function const is not a top-level function profile.
+        rows = self._rows(
+            "export const get_uid = (req: any) => req.user.id;\n"
+            "export function load(req: any) {\n"
+            "  const uid = get_uid(req);\n"
+            "  return db.query(\"SELECT * FROM photos WHERE owner_id = ?\", [uid]);\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
 if __name__ == "__main__":
     unittest.main()

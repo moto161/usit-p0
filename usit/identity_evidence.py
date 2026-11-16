@@ -696,6 +696,13 @@ _TS_NAMED_IMPORT_RE = re.compile(
 _TS_IMPORT_SPEC_RE = re.compile(
     r"^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$"
 )
+_TS_NAMESPACE_IMPORT_RE = re.compile(
+    r"import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*[\"']([^\"']+)[\"']"
+)
+_TS_TOPLEVEL_FN_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*"
+    r"([A-Za-z_$][\w$]*)\s*\("
+)
 _TS_EXTENDS_RE = re.compile(
     r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+"
     r"([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b"
@@ -911,6 +918,128 @@ def _ts_direct_identity_profiles(
     return helpers
 
 
+def _ts_top_level_function_returns(path: str, source: str) -> dict[str, list[tuple[int, str]]]:
+    """Map top-level function names to their direct returns, for TS/JS.
+
+    Only depth-0 ``function`` declarations count (``export`` / ``default`` /
+    ``async`` / ``*`` prefixes allowed; an anonymous default export or a
+    declaration without a body does not). The header must open its body on
+    the same line (Allman style fails closed, like ``_ts_class_scan``).
+    Returns inside nested functions or classes are excluded; returns
+    inside plain blocks (``if``/``for``) count, as for class methods.
+    Arrow-function consts, function expressions and object methods are
+    out of scope. A function defined twice merges its returns.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+        return {}
+    functions: dict[str, list[tuple[int, str]]] = {}
+    # Frames: kind "function" | "nested", interior brace depth, name,
+    # returns. "nested" covers nested functions and nested classes, whose
+    # lines and returns never belong to the outer function.
+    stack: list[dict[str, Any]] = []
+    depth = 0
+    in_template = False
+    pending_nested: str | None = None
+    for line_no, raw in enumerate(source.splitlines(), 1):
+        if (raw.count("`") - raw.count("\\`")) % 2 == 1:
+            in_template = not in_template
+        stripped = "" if in_template else _strip_ts_line(raw)
+        while stack and stack[-1]["depth"] > depth:
+            frame = stack.pop()
+            if frame["kind"] == "function" and frame["returns"]:
+                functions.setdefault(frame["name"], []).extend(frame["returns"])
+        opens = stripped.count("{")
+        closes = stripped.count("}")
+        was_pending_nested = pending_nested
+        pending_nested = None
+
+        def interior(match_end: int) -> int:
+            prefix = stripped[:match_end]
+            return depth + prefix.count("{") - prefix.count("}")
+
+        if stripped:
+            fn_frame = next((f for f in reversed(stack) if f["kind"] == "function"), None)
+            nested = any(f["kind"] == "nested" for f in stack)
+            if fn_frame is None and depth == 0:
+                match = _TS_TOPLEVEL_FN_RE.match(stripped)
+                if match and "{" in stripped:
+                    stack.append({"kind": "function",
+                                  "depth": interior(stripped.index("{") + 1),
+                                  "name": match.group(1), "returns": []})
+                    fn_frame = stack[-1]
+            elif fn_frame is not None and "{" in stripped:
+                brace_depth = interior(stripped.index("{") + 1)
+                if brace_depth > fn_frame["depth"]:
+                    flavor: str | None = None
+                    if _TS_CLASS_RE.match(stripped):
+                        flavor = "class"
+                    elif _TS_NESTED_FN_RE.search(stripped):
+                        flavor = ("arrow" if "=>" in stripped[:stripped.index("{")]
+                                  else "function")
+                    elif was_pending_nested is not None:
+                        flavor = was_pending_nested
+                    if flavor is not None:
+                        stack.append({"kind": "nested", "depth": brace_depth,
+                                      "name": None, "returns": []})
+                        nested = True
+            if fn_frame is not None and not nested:
+                ret = _TS_RETURN_RE.match(stripped)
+                if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
+                    fn_frame["returns"].append((line_no, ret.group(1).strip()))
+                if re.search(r"=>\s*$", stripped):
+                    pending_nested = "arrow"
+                elif re.search(r"\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\([^;{]*\)\s*$", stripped):
+                    pending_nested = "function"
+        depth += opens - closes
+        while stack and stack[-1]["depth"] > depth:
+            frame = stack.pop()
+            if frame["kind"] == "function" and frame["returns"]:
+                functions.setdefault(frame["name"], []).extend(frame["returns"])
+    while stack:
+        frame = stack.pop()
+        if frame["kind"] == "function" and frame["returns"]:
+            functions.setdefault(frame["name"], []).extend(frame["returns"])
+    return functions
+
+
+def _ts_top_level_function_profiles(path: str, source: str) -> dict[str, dict[str, Any]]:
+    """Map top-level function names to their single identity return, for TS/JS.
+
+    The TS mirror of ``_python_identity_return_helpers``: a top-level
+    function qualifies only when every direct return fully matches one
+    identity pattern, all the same kind and the same expression text. A
+    function defined twice with different return profiles is ambiguous
+    and dropped. The profile carries the bare function name and the
+    defining file, for propagation records.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+        return {}
+    returns_map = _ts_top_level_function_returns(path, source)
+    helpers: dict[str, dict[str, Any]] = {}
+    for name, returns in returns_map.items():
+        profile: dict[str, Any] | None = None
+        for line_no, text in returns:
+            if _TRUSTED.fullmatch(text):
+                kind = "trusted"
+            elif _REQUEST.fullmatch(text):
+                kind = "request"
+            else:
+                profile = None
+                break
+            if profile is None:
+                profile = {"kind": kind, "expression": text,
+                           "return_lines": [line_no]}
+            elif profile["kind"] != kind or profile["expression"] != text:
+                profile = None
+                break
+            else:
+                profile["return_lines"].append(line_no)
+        if profile is not None:
+            helpers[name] = {**profile, "path": path,
+                             "function": name, "delegation": []}
+    return helpers
+
+
 def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
     """Map (class, method) pairs to their single identity return, for TS/JS.
 
@@ -1110,6 +1239,103 @@ def _ts_import_bindings(path: str, source: str) -> dict[str, tuple[str, str]]:
                         bindings[local] = binding
         index += 1
     return bindings
+
+
+def _ts_namespace_imports(path: str, source: str) -> dict[str, str]:
+    """Map local names to module specifiers for namespace TS/JS imports.
+
+    Only ``import * as ns from \"./x\"`` counts; default imports,
+    named imports, side-effect imports, dynamic ``import(...)``,
+    ``require(...)`` and ``import type`` are ignored. A local name
+    imported from two different modules is ambiguous and dropped.
+    Multi-line imports are joined until the ``from \"...\"`` part is
+    complete, like ``_ts_import_bindings``.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+        return {}
+    bindings: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    lines = source.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = _strip_ts_comment(lines[index])
+        head = stripped.lstrip()
+        if (head.startswith("import") and not head.startswith("import(")
+                and not re.match(r"import\s+type\b", head)):
+            buf = stripped
+            while (not re.search(r"from\s*[\"'][^\"']+[\"']", buf)
+                   and index + 1 < len(lines)):
+                index += 1
+                buf += " " + _strip_ts_comment(lines[index])
+            for match in _TS_NAMESPACE_IMPORT_RE.finditer(buf):
+                local, specifier = match.group(1), match.group(2)
+                if local in ambiguous:
+                    continue
+                if local in bindings and bindings[local] != specifier:
+                    del bindings[local]
+                    ambiguous.add(local)
+                else:
+                    bindings[local] = specifier
+        index += 1
+    return bindings
+
+
+def _ts_namespace_import_bindings(
+        code_by_file: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Map files to {namespace local: target file} for namespace imports.
+
+    Only relative specifiers resolving to a project file count; package
+    imports, ``tsconfig`` path aliases and anything outside the project
+    fail closed. The target file's top-level function profiles decide
+    whether a ``ns.<fn>(...)`` call binds -- this map alone binds
+    nothing.
+    """
+    result: dict[str, dict[str, str]] = {}
+    for path, source in code_by_file.items():
+        if path.lower().endswith(".py"):
+            continue
+        bindings: dict[str, str] = {}
+        for local, specifier in _ts_namespace_imports(path, source).items():
+            target = _ts_resolve_import(specifier, path, code_by_file)
+            if target is not None and target != path:
+                bindings[local] = target
+        if bindings:
+            result[path] = bindings
+    return result
+
+
+def _ts_named_function_bindings(
+        code_by_file: dict[str, str],
+        top_level_profiles: dict[str, dict[str, dict[str, Any]]]
+        ) -> dict[str, dict[str, dict[str, Any]]]:
+    """Map files to {local name: profile} for named-imported top-level functions.
+
+    The TS mirror of ``_python_imported_identity_helpers`` for functions:
+    only ``import { name [as alias] } from \"./x\"`` whose target file
+    directly defines a qualifying top-level function under the original
+    name. A local name shadowed by a top-level function defined in the
+    importing file itself is skipped (the local definition wins).
+    Re-exports (the target file itself importing the name) are not
+    followed.
+    """
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    for path, source in code_by_file.items():
+        if path.lower().endswith(".py"):
+            continue
+        local_names = set(_ts_top_level_function_returns(path, source))
+        bindings: dict[str, dict[str, Any]] = {}
+        for local, (specifier, imported) in _ts_import_bindings(path, source).items():
+            if local in local_names or local in bindings:
+                continue
+            target = _ts_resolve_import(specifier, path, code_by_file)
+            if target is None or target == path:
+                continue
+            profile = top_level_profiles.get(target, {}).get(imported)
+            if profile is not None:
+                bindings[local] = profile
+        if bindings:
+            result[path] = bindings
+    return result
 
 
 def _ts_resolve_import(specifier: str, from_path: str,
@@ -1554,6 +1780,13 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         if file_path.lower().endswith(".py")
     }
     ts_same_file_methods = _ts_all_identity_return_methods(code_by_file)
+    ts_same_file_functions = {
+        file_path: _ts_top_level_function_profiles(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    ts_named_function_bindings = _ts_named_function_bindings(code_by_file, ts_same_file_functions)
+    ts_namespace_import_bindings = _ts_namespace_import_bindings(code_by_file)
     ts_same_file_ranges = {
         file_path: _ts_class_method_ranges(file_path, file_source)
         for file_path, file_source in code_by_file.items()
@@ -1588,6 +1821,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_instance_bindings = {}
             ts_cross_bindings = {}
             ts_has_base = False
+            ts_file_functions = {}
+            ts_file_named_functions = {}
+            ts_file_namespaces = {}
             py_has_base = path in py_base_classes
         elif function_owners_by_file is not None:
             supplied = function_owners_by_file.get(path)
@@ -1602,6 +1838,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_instance_bindings = ts_same_file_instance.get(path, {})
             ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
             ts_has_base = path in ts_base_classes
+            ts_file_functions = ts_same_file_functions.get(path, {})
+            ts_file_named_functions = ts_named_function_bindings.get(path, {})
+            ts_file_namespaces = ts_namespace_import_bindings.get(path, {})
             py_has_base = False
         else:
             function_owners = {}
@@ -1615,6 +1854,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_instance_bindings = ts_same_file_instance.get(path, {})
             ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
             ts_has_base = path in ts_base_classes
+            ts_file_functions = ts_same_file_functions.get(path, {})
+            ts_file_named_functions = ts_named_function_bindings.get(path, {})
+            ts_file_namespaces = ts_namespace_import_bindings.get(path, {})
             py_has_base = False
         aliases: dict[str, dict[str, Any]] = {}
         brace_depth = 0
@@ -1804,13 +2046,22 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                 elif (return_helpers or bindings or method_helpers
                         or instance_bindings or ts_method_helpers
                         or ts_instance_bindings or ts_cross_bindings
-                        or ts_has_base or py_has_base):
+                        or ts_has_base or py_has_base
+                        or ts_file_functions or ts_file_named_functions
+                        or ts_file_namespaces):
                     # P4/P5: one hop through a same-file or from-imported
                     # helper, e.g. uid = get_uid(req). Only a bare call
                     # counts: no method call, no await, no attribute access
                     # after the call.
                     call_match = bare_call.fullmatch(rhs)
                     helper = return_helpers.get(call_match.group(1)) if call_match else None
+                    if helper is None and call_match:
+                        # T6: a top-level TS/JS function, same file first,
+                        # then a named import (the P5 mirror for TS
+                        # functions).
+                        helper = ts_file_functions.get(call_match.group(1))
+                        if helper is None:
+                            helper = ts_file_named_functions.get(call_match.group(1))
                     if helper is None:
                         # P6: one hop through a module binding, e.g.
                         # uid = server.utils.get_uid(req).
@@ -1857,6 +2108,15 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                         path, enclosing, parts[1],
                                         ts_same_file_methods, ts_defined_methods,
                                         ts_base_classes, skip_self=True)
+                            elif len(parts) == 2:
+                                # T6: one hop through a namespace import,
+                                # e.g. import * as auth from "./auth";
+                                # uid = auth.get_uid(req). The helper is a
+                                # top-level function of the target file.
+                                target_file = ts_file_namespaces.get(parts[0])
+                                if target_file is not None:
+                                    helper = ts_same_file_functions.get(
+                                        target_file, {}).get(parts[1])
                             elif len(parts) == 3 and parts[0] == "this":
                                 # T2: one hop through an instance attribute
                                 # bound in the enclosing TS/JS class, e.g.
