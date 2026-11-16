@@ -723,6 +723,8 @@ _TS_MIXED_IMPORT_RE = re.compile(
     r"^\s*import\s+([A-Za-z_$][\w$]*)\s*,\s*\{([^}]*)\}\s*from\s*[\"']([^\"']+)[\"']")
 _TS_DEFAULT_EXPORT_FN_RE = re.compile(
     r"^\s*export\s+default\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")
+_TS_DEFAULT_EXPORT_CLASS_RE = re.compile(
+    r"^\s*export\s+default\s+(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)")
 
 
 def _ts_default_import_bindings(path: str, source: str) -> dict[str, str]:
@@ -759,6 +761,23 @@ def _ts_default_export_function(path: str, source: str) -> str | None:
         return None
     for line in source.splitlines():
         match = _TS_DEFAULT_EXPORT_FN_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _ts_default_export_class(path: str, source: str) -> str | None:
+    """Name of the default-exported class of a TS/JS file, if any (T11).
+
+    Only `export default [abstract] class <name>` qualifies. An
+    anonymous default class (`export default class { ... }`) and a
+    re-exported identifier (`export default AuthHelper;`) have no such
+    class and return None.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return None
+    for line in source.splitlines():
+        match = _TS_DEFAULT_EXPORT_CLASS_RE.match(line)
         if match:
             return match.group(1)
     return None
@@ -1829,12 +1848,12 @@ def _ts_cross_file_instance_bindings(
     attributes: for each file, take the ``_ts_class_scan`` candidates
     whose constructed class is not a top-level class of the same file
     (those are the same-file T2 bindings) and, when the constructed
-    name is a named import resolving to a project file that defines
-    the imported name as a top-level class, record the cross-file
-    binding. The import may be relative or a ``tsconfig`` path alias
-    (T7). The T2 disqualification rule applies first: an attribute
-    with a non-construction binding or two different constructed
-    classes is dropped here too.
+    name is a named import (or a default import, T11) resolving to a
+    project file that defines the imported name as a top-level class,
+    record the cross-file binding. The import may be relative or a
+    ``tsconfig`` path alias (T7). The T2 disqualification rule applies
+    first: an attribute with a non-construction binding or two
+    different constructed classes is dropped here too.
     """
     result: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
     for path, source in code_by_file.items():
@@ -1855,6 +1874,7 @@ def _ts_cross_file_instance_bindings(
             only = next(iter(constructed))
             if only is None or only in class_names:
                 continue
+            default_import = False
             if "." in only:
                 # T9: a namespaced construction, `new ns.Class(...)`,
                 # resolves through the namespace import, not a named
@@ -1866,12 +1886,24 @@ def _ts_cross_file_instance_bindings(
                     continue
             else:
                 binding = imports.get(only)
-                if binding is None:
-                    continue
-                specifier, imported = binding
+                if binding is not None:
+                    specifier, imported = binding
+                else:
+                    # T11: a default import, `import Helper from
+                    # "./auth"`, binds to the target file's
+                    # default-exported class; the class name is read
+                    # from the target file below.
+                    specifier = _ts_default_import_bindings(path, source).get(only)
+                    if specifier is None:
+                        continue
+                    default_import = True
             target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is None or target == path:
                 continue
+            if default_import:
+                imported = _ts_default_export_class(target, code_by_file[target])
+                if imported is None:
+                    continue
             _m, _r, _c, target_classes, _d = _ts_class_scan(target, code_by_file[target])
             if imported in target_classes:
                 bindings[(cls, attr)] = (target, imported)
