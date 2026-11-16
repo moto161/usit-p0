@@ -455,6 +455,7 @@ _TS_EXTENDS_RE = re.compile(
     r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+"
     r"([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b"
 )
+_TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
 
@@ -627,21 +628,17 @@ def _ts_class_scan(path: str, source: str) -> tuple[
     return methods, ranges, attr_candidates, class_names, defined
 
 
-def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
-    """Map (class, method) pairs to their single identity return, for TS/JS.
+def _ts_direct_identity_profiles(
+        path: str, methods: dict[tuple[str, str], list[tuple[int, str]]]
+        ) -> dict[tuple[str, str], dict[str, Any]]:
+    """Direct identity profiles for one file's (class, method) -> returns map.
 
-    The TS mirror of ``_python_identity_return_methods``: only methods
-    directly defined in a top-level class qualify, under the same return
-    rule as ``_identity_return_profile`` (every direct return fully
-    matches one identity pattern, all the same kind and the same
-    expression text). A (class, method) defined twice with different
-    return profiles is ambiguous and dropped. The profile carries the
-    qualified ``Class.method`` name and the defining file, for
-    propagation records.
+    A method qualifies only when every direct return fully matches one
+    identity pattern, all the same kind and the same expression text.
+    The profile carries the qualified ``Class.method`` name, the
+    defining file and an empty ``delegation`` list (direct profiles
+    delegate to nothing).
     """
-    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
-        return {}
-    methods, _ranges, _candidates, _names, _defined = _ts_class_scan(path, source)
     helpers: dict[tuple[str, str], dict[str, Any]] = {}
     for key, returns in methods.items():
         profile: dict[str, Any] | None = None
@@ -663,8 +660,106 @@ def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str],
                 profile["return_lines"].append(line_no)
         if profile is not None:
             helpers[key] = {**profile, "path": path,
-                            "function": f"{key[0]}.{key[1]}"}
+                            "function": f"{key[0]}.{key[1]}", "delegation": []}
     return helpers
+
+
+def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Map (class, method) pairs to their single identity return, for TS/JS.
+
+    The TS mirror of ``_python_identity_return_methods``: only methods
+    directly defined in a top-level class qualify, under the same return
+    rule as ``_identity_return_profile`` (every direct return fully
+    matches one identity pattern, all the same kind and the same
+    expression text). A (class, method) defined twice with different
+    return profiles is ambiguous and dropped. The profile carries the
+    qualified ``Class.method`` name and the defining file, for
+    propagation records. This is the direct-only version; methods
+    delegating through ``super`` need the project-wide
+    ``_ts_all_identity_return_methods``.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs")):
+        return {}
+    methods, _ranges, _candidates, _names, _defined = _ts_class_scan(path, source)
+    return _ts_direct_identity_profiles(path, methods)
+
+
+def _ts_all_identity_return_methods(
+        code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
+    """Project-wide TS identity return profiles, including super delegation.
+
+    Direct profiles first, then up to 8 fixpoint rounds resolving
+    methods whose every direct return is an identity expression or a
+    ``super.<method>(...)`` call to an already-profiled base method
+    (T4 chain walk, ``skip_self=True``). All returns must agree on
+    kind, expression and delegation steps: a direct return mixed with
+    a super-delegated return, or super calls to different targets,
+    disqualifies the method. A delegating profile carries
+    ``delegation``: the target profile's return evidence items (its
+    own delegation first, then its return lines), each
+    ``{path, line, function, returns}``.
+    """
+    scans = {
+        path: _ts_class_scan(path, source)
+        for path, source in code_by_file.items()
+        if not path.lower().endswith(".py")
+    }
+    bases = _ts_base_classes(code_by_file)
+    defined = {path: scan[4] for path, scan in scans.items()}
+    profiles = {
+        path: _ts_direct_identity_profiles(path, scan[0])
+        for path, scan in scans.items()
+    }
+    for _round in range(8):
+        changed = False
+        for path, scan in scans.items():
+            for key, returns in scan[0].items():
+                if key in profiles[path]:
+                    continue
+                profile: dict[str, Any] | None = None
+                delegation: list[dict[str, Any]] | None = None
+                for line_no, text in returns:
+                    step: list[dict[str, Any]] | None = None
+                    if _TRUSTED.fullmatch(text):
+                        kind, expr = "trusted", text
+                    elif _REQUEST.fullmatch(text):
+                        kind, expr = "request", text
+                    else:
+                        match = _TS_SUPER_CALL_RE.match(text)
+                        if not match:
+                            profile = None
+                            break
+                        target = _ts_method_profile(
+                            path, key[0], match.group(1), profiles, defined, bases,
+                            skip_self=True)
+                        if target is None:
+                            profile = None
+                            break
+                        kind, expr = target["kind"], target["expression"]
+                        step = target.get("delegation", []) + [
+                            {"path": target["path"], "line": return_line,
+                             "function": target["function"],
+                             "returns": target["expression"]}
+                            for return_line in target["return_lines"]]
+                    if profile is None:
+                        profile = {"kind": kind, "expression": expr,
+                                   "return_lines": [line_no]}
+                        delegation = step if step is not None else []
+                    elif (profile["kind"] != kind or profile["expression"] != expr
+                          or delegation != (step if step is not None else [])):
+                        profile = None
+                        break
+                    else:
+                        profile["return_lines"].append(line_no)
+                if profile is not None:
+                    profiles[path][key] = {
+                        **profile, "path": path,
+                        "function": f"{key[0]}.{key[1]}",
+                        "delegation": delegation if delegation is not None else []}
+                    changed = True
+        if not changed:
+            break
+    return profiles
 
 
 def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
@@ -1208,11 +1303,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
-    ts_same_file_methods = {
-        file_path: _ts_identity_return_methods(file_path, file_source)
-        for file_path, file_source in code_by_file.items()
-        if not file_path.lower().endswith(".py")
-    }
+    ts_same_file_methods = _ts_all_identity_return_methods(code_by_file)
     ts_same_file_ranges = {
         file_path: _ts_class_method_ranges(file_path, file_source)
         for file_path, file_source in code_by_file.items()
@@ -1546,12 +1637,14 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                         aliases[name] = {
                             "kind": helper["kind"], "expression": helper["expression"],
                             "line": line_no, "via_return": True,
-                            "propagation": [
-                                {"path": helper["path"], "line": return_line,
-                                 "function": helper["function"],
-                                 "returns": helper["expression"]}
-                                for return_line in helper["return_lines"]
-                            ] + [{"path": path, "line": line_no, "variable": name}],
+                            "propagation": (
+                                helper.get("delegation", []) +
+                                [{"path": helper["path"], "line": return_line,
+                                  "function": helper["function"],
+                                  "returns": helper["expression"]}
+                                 for return_line in helper["return_lines"]]
+                                + [{"path": path, "line": line_no, "variable": name}]
+                            ),
                         }
                     else:
                         aliases.pop(name, None)

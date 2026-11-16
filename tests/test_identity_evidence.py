@@ -2450,22 +2450,10 @@ class TsInheritedMethodReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["line"], 10)
         self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 9, 10])
         self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
-        # T5 scope, not a regression: an override delegating through
-        # super (two hops) stays unbound in T4.
-        delegating = self._rows(
-            self._BASE
-            + "\n"
-            + "export class AlbumHandler extends BaseAuth {\n"
-            "  get_uid(req: any) {\n"
-            "    return super.get_uid(req);\n"
-            "  }\n"
-            "  load(req: any) {\n"
-            "    const uid = this.get_uid(req);\n"
-            '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid]);\n'
-            "  }\n"
-            "}\n"
-        )
-        self.assertEqual(self._direct_bindings(delegating), [])
+        # NOTE: the override-delegating-through-super fixture that used
+        # to assert no binding here moved to T5 (TsSuperDelegation-
+        # ReturnPropagationTests.test_super_delegation_binds), where the
+        # same fixture now binds.
 
     def test_grandparent_method_binds(self):
         rows = self._rows(
@@ -2549,6 +2537,268 @@ class TsInheritedMethodReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["line"], 16)
         self.assertEqual([item["line"] for item in binding["details"]["propagation"]], [3, 15, 16])
         self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+
+class TsSuperDelegationReturnPropagationTests(unittest.TestCase):
+    def _rows_files(self, files):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                (root / name).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners)
+
+    def _rows(self, source, filename="handlers.ts"):
+        return self._rows_files({filename: source})
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _BASE = (
+        "export class BaseAuth {\n"
+        "  get_uid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    _DELEGATING = (
+        "export class AlbumHandler extends BaseAuth {\n"
+        "  get_uid(req: any) {\n"
+        "    return super.get_uid(req);\n"
+        "  }\n"
+        "  load(req: any) {\n"
+        "    const uid = this.get_uid(req);\n"
+        '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid]);\n'
+        "  }\n"
+        "}\n"
+    )
+
+    def test_super_delegation_binds(self):
+        # Moved from T4 (second fixture of test_super_call_as_alias_binds):
+        # the same fixture now binds through the delegation chain.
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class PhotoHandler extends BaseAuth {\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+            + "\n"
+            + self._DELEGATING
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding"
+                       and row["line"] == 20)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 16, 19, 20])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "AlbumHandler.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:18")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_delegation_to_imported_base_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._BASE,
+            "handlers.ts": (
+                'import { BaseAuth } from "./auth";\n'
+                "\n"
+                + self._DELEGATING
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "AlbumHandler.get_uid")
+
+    def test_delegation_of_request_identity_binds(self):
+        rows = self._rows(
+            "export class BaseAuth {\n"
+            "  get_owner(req: any) {\n"
+            "    return req.body.user_id;\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            "export class AlbumHandler extends BaseAuth {\n"
+            "  get_owner(req: any) {\n"
+            "    return super.get_owner(req);\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const owner = this.get_owner(req);\n"
+            '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [owner]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_owner")
+
+    def test_delegation_to_non_identity_does_not_bind(self):
+        rows = self._rows(
+            "export class BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    return null;\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            + self._DELEGATING
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_delegation_with_mismatched_expression_does_not_bind(self):
+        rows = self._rows(
+            "export class BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.body.user_id;\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            "export class AlbumHandler extends BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    if (req.flag) {\n"
+            "      return super.get_uid(req);\n"
+            "    }\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_direct_and_delegated_returns_do_not_bind(self):
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class AlbumHandler extends BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    if (req.flag) {\n"
+            "      return super.get_uid(req);\n"
+            "    }\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_delegation_to_two_different_targets_does_not_bind(self):
+        rows = self._rows(
+            "export class BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "  get_other(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            "export class AlbumHandler extends BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    if (req.flag) {\n"
+            "      return super.get_uid(req);\n"
+            "    }\n"
+            "    return super.get_other(req);\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_two_level_delegation_binds(self):
+        rows = self._rows(
+            "export class A {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            "export class B extends A {\n"
+            "  get_uid(req: any) {\n"
+            "    return super.get_uid(req);\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            "export class C extends B {\n"
+            "  get_uid(req: any) {\n"
+            "    return super.get_uid(req);\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 19)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 9, 15, 18, 19])
+        self.assertEqual([item["function"] for item in binding["details"]["propagation"][:3]],
+                         ["A.get_uid", "B.get_uid", "C.get_uid"])
+
+    def test_cyclic_delegation_terminates_without_binding(self):
+        rows = self._rows(
+            "export class A extends B {\n"
+            "  get_uid(req: any) {\n"
+            "    return super.get_uid(req);\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+            "export class B extends A {\n"
+            "  get_uid(req: any) {\n"
+            "    return super.get_uid(req);\n"
+            "  }\n"
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_helper_method_delegating_to_base_binds(self):
+        rows = self._rows(
+            self._BASE
+            + "\n"
+            + "export class SubHandler extends BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    return super.get_uid(req);\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            + "export class PhotoHandler {\n"
+            "  constructor() {\n"
+            "    this.helper = new SubHandler();\n"
+            "  }\n"
+            "  load(req: any) {\n"
+            "    const uid = this.helper.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 19)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 9, 18, 19])
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "SubHandler.get_uid")
 
 
 if __name__ == "__main__":
