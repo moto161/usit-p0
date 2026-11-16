@@ -691,6 +691,23 @@ _TS_THIS_ASSIGN_RE = re.compile(
     r"^\s*this\.([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+?)\s*;?\s*$"
 )
 _TS_NEW_RE = re.compile(r"^new\s+([A-Za-z_$][\w$]*)\s*(?:\(|;|$)")
+_TS_NS_NEW_RE = re.compile(
+    r"^new\s+([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*(?:\(|;|$)")
+
+def _ts_constructed_class(rhs: str) -> str | None:
+    """Class constructed by a `new` right-hand side, if any (T9).
+
+    A bare `new <Class>(...)` yields the class name; a two-segment
+    `new <ns>.<Class>(...)` yields the dotted name `"ns.Class"`.
+    Anything else yields None (the attribute is disqualified).
+    """
+    constructed = _TS_NEW_RE.match(rhs)
+    if constructed:
+        return constructed.group(1)
+    namespaced = _TS_NS_NEW_RE.match(rhs)
+    if namespaced:
+        return f"{namespaced.group(1)}.{namespaced.group(2)}"
+    return None
 _TS_NAMED_IMPORT_RE = re.compile(
     r"import\s*\{([^}]*)\}\s*from\s*[\"']([^\"']+)[\"']"
 )
@@ -851,10 +868,9 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                 # attribute, exactly like the Python rule.
                 assign = _TS_THIS_ASSIGN_RE.match(stripped)
                 if assign:
-                    constructed = _TS_NEW_RE.match(assign.group(2))
                     attr_candidates.setdefault(
                         (method_frame["class"], assign.group(1)), set()).add(
-                        constructed.group(1) if constructed else None)
+                        _ts_constructed_class(assign.group(2)))
             if (class_frame is not None and method_frame is None and not nested
                     and depth == class_frame["depth"]):
                 # T2: a class field declaration with an initializer, e.g.
@@ -868,10 +884,9 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                     is_static = "static" in re.findall(
                         r"[A-Za-z_$][\w$]*", stripped[:field.start(1)])
                     if not is_static:
-                        constructed = _TS_NEW_RE.match(field.group(2))
                         attr_candidates.setdefault(
                             (class_frame["class"], field.group(1)), set()).add(
-                            constructed.group(1) if constructed else None)
+                            _ts_constructed_class(field.group(2)))
             if method_frame is not None and not nested:
                 # An arrow or function header whose body brace lands on the
                 # next line (Allman style): remember it for exactly one line.
@@ -1058,10 +1073,9 @@ def _ts_vue_options_methods(path: str, source: str) -> tuple[
                 # disqualifies the attribute, exactly like the class rule.
                 assign = _TS_THIS_ASSIGN_RE.match(stripped)
                 if assign:
-                    constructed = _TS_NEW_RE.match(assign.group(2))
                     attr_candidates.setdefault(
                         (_VUE_OPTIONS_CLASS, assign.group(1)), set()).add(
-                        constructed.group(1) if constructed else None)
+                        _ts_constructed_class(assign.group(2)))
             if method_frame is not None and not nested:
                 # An arrow or function header whose body brace lands on the
                 # next line (Allman style): remember it for exactly one line.
@@ -1762,10 +1776,20 @@ def _ts_cross_file_instance_bindings(
             only = next(iter(constructed))
             if only is None or only in class_names:
                 continue
-            binding = imports.get(only)
-            if binding is None:
-                continue
-            specifier, imported = binding
+            if "." in only:
+                # T9: a namespaced construction, `new ns.Class(...)`,
+                # resolves through the namespace import, not a named
+                # import; the class must be a top-level class of the
+                # namespace's target file.
+                namespace, imported = only.split(".", 1)
+                specifier = _ts_namespace_imports(path, source).get(namespace)
+                if specifier is None:
+                    continue
+            else:
+                binding = imports.get(only)
+                if binding is None:
+                    continue
+                specifier, imported = binding
             target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is None or target == path:
                 continue
