@@ -467,20 +467,22 @@ def _python_top_level_class_names(source: str) -> set[str]:
 
 
 def _python_base_classes(
-        code_by_file: dict[str, str]) -> dict[str, dict[str, tuple[str, str]]]:
-    """Map files to {class: (base file, base class)} for Python extends clauses.
+        code_by_file: dict[str, str]) -> dict[str, dict[str, list[tuple[str, str]]]]:
+    """Map files to {class: [direct bases in declaration order]} for Python extends clauses.
 
-    Only single inheritance with a bare-identifier base counts
-    (``class X(Base)``): the base resolves to a top-level class of the
-    same file first, else through a ``from <module> import Base`` to a
-    project file defining it (same import rules as
-    ``_python_imported_identity_helpers``; re-exports not followed).
-    Multiple inheritance, expression bases (``class X(mixin(Base))``)
-    and attribute bases (``class X(auth.Base)``) leave the class
-    without a base (fail closed). Only top-level classes are recorded.
+    Only bare-identifier bases count (``class X(Base, Mixin)``): each
+    base resolves to a top-level class of the same file first, else
+    through a ``from <module> import Base`` to a project file defining
+    it (same import rules as ``_python_imported_identity_helpers``;
+    re-exports not followed). All declared bases must resolve: a
+    class with any unresolvable base gets no entry (fail closed -- an
+    incomplete hierarchy has no trustworthy MRO). Expression bases
+    (``class X(mixin(Base))``) and attribute bases
+    (``class X(auth.Base)``) leave the class without a base (fail
+    closed). Only top-level classes are recorded.
     """
     module_index = _python_module_index(code_by_file)
-    result: dict[str, dict[str, tuple[str, str]]] = {}
+    result: dict[str, dict[str, list[tuple[str, str]]]] = {}
     for path, source in code_by_file.items():
         if not path.lower().endswith(".py"):
             continue
@@ -490,73 +492,139 @@ def _python_base_classes(
             continue
         class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
         caller_package = _package_for_module(_module_for_path(path), path)
-        bases: dict[str, tuple[str, str]] = {}
+        bases: dict[str, list[tuple[str, str]]] = {}
         for node in tree.body:
             if not isinstance(node, ast.ClassDef):
                 continue
-            if len(node.bases) != 1 or not isinstance(node.bases[0], ast.Name):
+            if not node.bases or not all(isinstance(base, ast.Name) for base in node.bases):
                 continue
-            base = node.bases[0].id
-            if base in class_names:
-                bases[node.name] = (path, base)
-                continue
-            target_path: str | None = None
-            for import_node in tree.body:
-                if not isinstance(import_node, ast.ImportFrom) or import_node.module is None:
+            resolved: list[tuple[str, str]] = []
+            for base_node in node.bases:
+                base = base_node.id
+                if base in class_names:
+                    resolved.append((path, base))
                     continue
-                if import_node.level and import_node.level > 0:
-                    absolute = _relative_module(caller_package, import_node.level,
-                                                import_node.module)
-                else:
-                    absolute = import_node.module
-                if absolute is None:
-                    continue
-                candidate = module_index.get(absolute)
-                if candidate is None:
-                    continue
-                if any(alias.name == base and (alias.asname or alias.name) == base
-                       for alias in import_node.names):
-                    target_path = candidate
+                target_path: str | None = None
+                for import_node in tree.body:
+                    if not isinstance(import_node, ast.ImportFrom) or import_node.module is None:
+                        continue
+                    if import_node.level and import_node.level > 0:
+                        absolute = _relative_module(caller_package, import_node.level,
+                                                    import_node.module)
+                    else:
+                        absolute = import_node.module
+                    if absolute is None:
+                        continue
+                    candidate = module_index.get(absolute)
+                    if candidate is None:
+                        continue
+                    if any(alias.name == base and (alias.asname or alias.name) == base
+                           for alias in import_node.names):
+                        target_path = candidate
+                        break
+                if target_path is None:
                     break
-            if target_path is None:
-                continue
-            if base in _python_top_level_class_names(code_by_file[target_path]):
-                bases[node.name] = (target_path, base)
+                if base in _python_top_level_class_names(code_by_file[target_path]):
+                    resolved.append((target_path, base))
+                else:
+                    break
+            if len(resolved) == len(node.bases):
+                bases[node.name] = resolved
         if bases:
             result[path] = bases
     return result
 
 
+def _python_class_mro(
+        start: tuple[str, str],
+        bases: dict[str, dict[str, list[tuple[str, str]]]]) -> list[tuple[str, str]] | None:
+    """C3 linearization of a class hierarchy, excluding the class itself.
+
+    ``bases`` maps ``(file, class)`` to its direct bases in declaration
+    order. Returns the ancestors in Python method-resolution order, or
+    None when the hierarchy is cyclic or inconsistent (fail closed).
+    """
+    memo: dict[tuple[str, str], list[tuple[str, str]] | None] = {}
+    visiting: set[tuple[str, str]] = set()
+
+    def linearize(key: tuple[str, str]) -> list[tuple[str, str]] | None:
+        if key in memo:
+            return memo[key]
+        if key in visiting:
+            return None
+        visiting.add(key)
+        direct = bases.get(key[0], {}).get(key[1], [])
+        seqs: list[list[tuple[str, str]]] = []
+        for base in direct:
+            tail = linearize(base)
+            if tail is None:
+                visiting.discard(key)
+                memo[key] = None
+                return None
+            seqs.append([base] + tail)
+        seqs.append(list(direct))
+        merged: list[tuple[str, str]] = []
+        while True:
+            seqs = [seq for seq in seqs if seq]
+            if not seqs:
+                break
+            head: tuple[str, str] | None = None
+            for seq in seqs:
+                candidate = seq[0]
+                if not any(candidate in other[1:] for other in seqs):
+                    head = candidate
+                    break
+            if head is None:
+                visiting.discard(key)
+                memo[key] = None
+                return None
+            merged.append(head)
+            for seq in seqs:
+                if seq[0] == head:
+                    seq.pop(0)
+        visiting.discard(key)
+        memo[key] = merged
+        return merged
+
+    return linearize(start)
+
+
 def _python_method_profile(file: str, cls: str, method: str,
                            profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
                            defined: dict[str, set[tuple[str, str]]],
-                           bases: dict[str, dict[str, tuple[str, str]]],
-                           skip_self: bool = False) -> dict[str, Any] | None:
-    """Resolve a method to its single identity return profile, walking the extends chain.
+                           bases: dict[str, dict[str, list[tuple[str, str]]]],
+                           skip_self: bool = False,
+                           after: str | None = None) -> dict[str, Any] | None:
+    """Resolve a method to its single identity return profile, walking the MRO.
 
     The Python mirror of ``_ts_method_profile``: the class itself first
     (unless ``skip_self``, for ``super()`` calls, which skip the current
     class): defined but without an identity profile means shadowed --
-    return None and do not walk up. Not defined: walk up the extends
-    chain (at most 8 levels, cycle-safe); each ancestor either defines
-    the method (profile or shadowed None) or not (continue). A profile
-    carries the defining file's path.
+    return None and do not walk up. Not defined: walk the C3 MRO tail
+    (at most 8 ancestors); the first ancestor defining the method wins
+    (profile or shadowed None). ``after`` names the class a two-argument
+    ``super(X, self)`` starts after: X itself means the normal
+    ``super()`` start; an ancestor means start after it; a name not in
+    the hierarchy, or ambiguous across files, fails closed.
     """
     if not skip_self and (cls, method) in defined.get(file, set()):
         return profiles.get(file, {}).get((cls, method))
-    seen: set[tuple[str, str]] = set()
-    current_file, current_class = file, cls
-    for _ in range(8):
-        base = bases.get(current_file, {}).get(current_class)
-        if base is None:
+    mro = _python_class_mro((file, cls), bases)
+    if mro is None:
+        return None
+    if after is not None:
+        candidates = [(file, cls)] + mro
+        matches = [key for key in candidates if key[1] == after]
+        if len(matches) != 1:
             return None
-        base_file, base_class = base
-        if (base_file, base_class) in seen:
-            return None
-        seen.add((base_file, base_class))
+        start = matches[0]
+        if start == (file, cls):
+            pass
+        else:
+            mro = mro[mro.index(start) + 1:]
+    for base_file, base_class in mro[:8]:
         if (base_class, method) in defined.get(base_file, set()):
             return profiles.get(base_file, {}).get((base_class, method))
-        current_file, current_class = base_file, base_class
     return None
 
 
@@ -566,9 +634,10 @@ def _python_all_identity_return_methods(
 
     Direct profiles first, then up to 8 fixpoint rounds resolving
     methods whose every direct return is an identity expression or a
-    ``super().<method>(...)`` call to an already-profiled base method
-    (P9 chain walk, ``skip_self=True``; only zero-argument ``super()``
-    counts). All returns must agree on kind, expression and delegation
+    ``super().<method>(...)`` / ``super(X, self).<method>(...)`` call
+    to an already-profiled base method (P9 chain walk, ``skip_self=True``;
+    P10 resolves the target over the C3 MRO, with ``super(X, self)``
+    starting after X). All returns must agree on kind, expression and delegation
     steps: a direct return mixed with a super-delegated return, or
     super calls to different targets, disqualifies the method. A
     delegating profile carries ``delegation``: the target profile's
@@ -609,8 +678,8 @@ def _python_all_identity_return_methods(
                             profile = None
                             break
                         target = _python_method_profile(
-                            path, key[0], match.group(1), profiles, defined, bases,
-                            skip_self=True)
+                            path, key[0], match.group(3), profiles, defined, bases,
+                            skip_self=True, after=match.group(2))
                         if target is None:
                             profile = None
                             break
@@ -798,8 +867,8 @@ _TS_EXTENDS_RE = re.compile(
     r"([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b"
 )
 _TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
-_PY_SUPER_CALL_RE = re.compile(r"^super\(\)\.([A-Za-z_]\w*)\s*\(")
-_PY_SUPER_CALL_RHS = re.compile(r"super\(\)\.([A-Za-z_]\w*)\s*\(.*\)$")
+_PY_SUPER_CALL_RE = re.compile(r"^super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(")
+_PY_SUPER_CALL_RHS = re.compile(r"super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(.*\)$")
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_CLASS_FIELD_ARROW_RE = re.compile(
     r"^\s*(?:(?:public|private|protected|readonly|declare|override|abstract)\s+)*"
@@ -2752,16 +2821,21 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                             py_base_classes)
                     if helper is None:
                         # P9: one hop through the direct base class, e.g.
-                        # uid = super().get_uid(req). (attr_call cannot
-                        # match this: its dotted prefix contains "()".)
+                        # uid = super().get_uid(req). P10: also the
+                        # two-argument form, e.g.
+                        # uid = super(PhotoHandler, self).get_uid(req),
+                        # which starts the MRO walk after the named class.
+                        # (attr_call cannot match this: its dotted prefix
+                        # contains "()".)
                         super_match = _PY_SUPER_CALL_RHS.fullmatch(rhs)
                         if super_match:
                             enclosing = class_ranges.get(line_no)
                             if enclosing is not None:
                                 helper = _python_method_profile(
-                                    path, enclosing, super_match.group(1),
+                                    path, enclosing, super_match.group(3),
                                     same_file_methods, py_defined_methods,
-                                    py_base_classes, skip_self=True)
+                                    py_base_classes, skip_self=True,
+                                    after=super_match.group(2))
                     if helper is not None:
                         aliases[name] = {
                             "kind": helper["kind"], "expression": helper["expression"],

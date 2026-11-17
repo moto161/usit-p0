@@ -3498,7 +3498,7 @@ class IdentityInheritedMethodReturnPropagationTests(unittest.TestCase):
         })
         self.assertEqual(self._direct_bindings(rows), [])
 
-    def test_expression_attribute_or_multiple_base_does_not_bind(self):
+    def test_expression_or_attribute_base_does_not_bind(self):
         mixin = extract_identity_evidence({
             "handlers.py": (
                 self._BASE
@@ -3521,20 +3521,10 @@ class IdentityInheritedMethodReturnPropagationTests(unittest.TestCase):
             )
         })
         self.assertEqual(self._direct_bindings(attribute), [])
-        multiple = extract_identity_evidence({
-            "handlers.py": (
-                self._BASE
-                + "\n\n"
-                + "class Other:\n"
-                "    pass\n"
-                "\n\n"
-                "class PhotoHandler(BaseAuth, Other):\n"
-                "    def load(self, req):\n"
-                "        uid = self.get_uid(req)\n"
-                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
-            )
-        })
-        self.assertEqual(self._direct_bindings(multiple), [])
+        # Boundary move (P10): the multiple-inheritance fixture that used
+        # to assert no binding here moved to P10
+        # (IdentityMultipleInheritanceReturnPropagationTests), where the
+        # same fixture now binds via the C3 MRO.
 
     def test_super_delegation_binds(self):
         rows = extract_identity_evidence({
@@ -3590,6 +3580,225 @@ class IdentityInheritedMethodReturnPropagationTests(unittest.TestCase):
                          [3, 15, 16])
         self.assertEqual(helper_binding["details"]["propagation"][0]["function"],
                          "BaseAuth.get_uid")
+
+
+class IdentityMultipleInheritanceReturnPropagationTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _BASE = (
+        "class BaseAuth:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.user.id\n"
+    )
+
+    _MIXIN = (
+        "class AuditMixin:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.session.id\n"
+    )
+
+    _LOAD = (
+        "    def load(self, req):\n"
+        "        uid = self.get_uid(req)\n"
+        '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+    )
+
+    def test_multiple_inheritance_first_base_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + self._MIXIN
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth, AuditMixin):\n"
+                + self._LOAD
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 14)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 13, 14])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.py#load:12")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_multiple_inheritance_second_base_binds_when_first_lacks_method(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                "class AuditMixin:\n"
+                "    pass\n"
+                "\n\n"
+                + self._BASE
+                + "\n\n"
+                + "class PhotoHandler(AuditMixin, BaseAuth):\n"
+                + self._LOAD
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_multiple_inheritance_first_base_shadows_second(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._MIXIN
+                + "\n\n"
+                + self._BASE
+                + "\n\n"
+                + "class PhotoHandler(AuditMixin, BaseAuth):\n"
+                + self._LOAD
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_diamond_mro_prefers_second_branch_over_shared_base(self):
+        # C3 MRO of D is D, A, B, BaseAuth: B defines get_uid (non-identity)
+        # and wins over BaseAuth. A naive depth-first walk would reach
+        # BaseAuth first and bind -- this test discriminates C3 from DFS.
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class A(BaseAuth):\n"
+                "    pass\n"
+                "\n\n"
+                + "class B(BaseAuth):\n"
+                "    def get_uid(self, req):\n"
+                "        return req.session.id\n"
+                + "\n\n"
+                + "class D(A, B):\n"
+                + self._LOAD
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_diamond_mro_falls_through_to_shared_base(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class A(BaseAuth):\n"
+                "    pass\n"
+                "\n\n"
+                + "class B(BaseAuth):\n"
+                "    pass\n"
+                "\n\n"
+                + "class D(A, B):\n"
+                + self._LOAD
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_super_two_arg_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth):\n"
+                "    def load(self, req):\n"
+                "        uid = super(PhotoHandler, self).get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_super_two_arg_skips_named_base(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                "class BaseAuth:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.session.id\n"
+                "\n\n"
+                "class AuditMixin:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.user.id\n"
+                "\n\n"
+                + "class PhotoHandler(BaseAuth, AuditMixin):\n"
+                "    def load(self, req):\n"
+                "        uid = super(BaseAuth, self).get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        # super(BaseAuth, self) skips BaseAuth; AuditMixin defines an
+        # identity get_uid, so the binding comes from the mixin.
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuditMixin.get_uid")
+
+    def test_super_two_arg_unknown_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth):\n"
+                "    def load(self, req):\n"
+                "        uid = super(Unknown, self).get_uid(req)\n"
+                '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_super_two_arg_delegation_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + self._MIXIN
+                + "\n\n"
+                + "class AlbumHandler(BaseAuth, AuditMixin):\n"
+                "    def get_uid(self, req):\n"
+                "        return super(AlbumHandler, self).get_uid(req)\n"
+                "\n"
+                "    def load(self, req):\n"
+                "        uid = self.get_uid(req)\n"
+                '        return db.query("SELECT * FROM albums WHERE owner_id = ?", [uid])\n'
+            )
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 13, 16, 17])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "AlbumHandler.get_uid")
+
+    def test_multiple_inheritance_unresolvable_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth, ExternalMixin):\n"
+                + self._LOAD
+            )
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_cross_file_multiple_inheritance_binds(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._BASE,
+            "handlers.py": (
+                "from auth import BaseAuth\n"
+                "\n\n"
+                + self._MIXIN
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth, AuditMixin):\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
 
 
 class TsConfigPathsImportTests(unittest.TestCase):
