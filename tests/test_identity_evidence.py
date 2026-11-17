@@ -4362,10 +4362,11 @@ class TsClassFieldArrowReturnPropagationTests(unittest.TestCase):
                          [3, 11, 12])
         self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
         self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
-        # The adapter does not report field arrows as method symbols,
-        # so a sink inside a field-arrow body has no owner symbol.
-        self.assertIsNone(binding["owner_symbol_id"])
-        self.assertEqual(binding["owner_resolution_status"], "UNKNOWN")
+        # Boundary move (T13): the adapter now reports field arrows as
+        # method symbols, so a sink inside a field-arrow body has a
+        # resolved owner instead of UNKNOWN.
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load2:10")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
 
     def test_static_field_arrow_does_not_bind(self):
         rows = self._rows(

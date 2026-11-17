@@ -512,6 +512,138 @@ class JsTsAdapterRegressionTests(unittest.TestCase):
                              "symbol:web/photo-card.component.ts#savePhoto:13")
 
 
+class ClassFieldArrowSymbolTests(unittest.TestCase):
+    def _parsed(self, source, filename="handlers.ts"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / filename).write_text(source, encoding="utf-8")
+            return analyze_js_ts_project(root, discover_files(root))
+
+    def test_expression_body_field_arrow_is_method_symbol(self):
+        parsed = self._parsed(
+            "export class PhotoHandler {\n"
+            "  get_uid = (req: any) => req.user.id;\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        by_id = {item["symbol_id"]: item
+                 for item in parsed["files"]["handlers.ts"]["symbols"]}
+        symbol = by_id["symbol:handlers.ts#PhotoHandler.get_uid:2"]
+        self.assertEqual(symbol["name"], "get_uid")
+        self.assertEqual(symbol["kind"], "method")
+        self.assertEqual((symbol["line"], symbol["end_line"]), (2, 2))
+        self.assertEqual(symbol["qualified_name"], "PhotoHandler.get_uid")
+
+    def test_block_body_field_arrow_owns_its_lines(self):
+        parsed = self._parsed(
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export class PhotoHandler {\n"
+            "  constructor() {\n"
+            "    this.helper = new AuthHelper();\n"
+            "  }\n"
+            "  load2 = (req: any) => {\n"
+            "    const uid = this.helper.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  };\n"
+            "}\n"
+        )
+        by_id = {item["symbol_id"]: item
+                 for item in parsed["files"]["handlers.ts"]["symbols"]}
+        symbol = by_id["symbol:handlers.ts#PhotoHandler.load2:10"]
+        self.assertEqual(symbol["kind"], "method")
+        self.assertEqual((symbol["line"], symbol["end_line"]), (10, 13))
+        owners = ts_function_owners(parsed)["handlers.ts"]
+        self.assertEqual(owners[12], "symbol:handlers.ts#load2:10")
+        self.assertEqual(owners[10], "symbol:handlers.ts#load2:10")
+
+    def test_static_field_arrow_is_reported(self):
+        parsed = self._parsed(
+            "export class PhotoHandler {\n"
+            "  static get_uid = (req: any) => req.user.id;\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        by_id = {item["symbol_id"]: item
+                 for item in parsed["files"]["handlers.ts"]["symbols"]}
+        symbol = by_id["symbol:handlers.ts#PhotoHandler.get_uid:2"]
+        self.assertEqual(symbol["kind"], "method")
+
+    def test_function_expression_field_is_method_symbol(self):
+        parsed = self._parsed(
+            "export class PhotoHandler {\n"
+            "  get_uid = function (req: any) { return req.user.id; };\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        by_id = {item["symbol_id"]: item
+                 for item in parsed["files"]["handlers.ts"]["symbols"]}
+        symbol = by_id["symbol:handlers.ts#PhotoHandler.get_uid:2"]
+        self.assertEqual(symbol["kind"], "method")
+        self.assertEqual((symbol["line"], symbol["end_line"]), (2, 2))
+
+    def test_nested_class_field_arrow_is_qualified(self):
+        parsed = self._parsed(
+            "export class Outer {\n"
+            "  helper = new Inner();\n"
+            "  load(req: any) {\n"
+            "    return this.helper.get_uid(req);\n"
+            "  }\n"
+            "}\n"
+            "class Inner {\n"
+            "  get_uid = (req: any) => req.user.id;\n"
+            "}\n"
+        )
+        by_id = {item["symbol_id"]: item
+                 for item in parsed["files"]["handlers.ts"]["symbols"]}
+        symbol = by_id["symbol:handlers.ts#Inner.get_uid:8"]
+        self.assertEqual(symbol["kind"], "method")
+        self.assertEqual(symbol["qualified_name"], "Inner.get_uid")
+
+    def test_non_function_field_is_not_reported(self):
+        parsed = self._parsed(
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export class PhotoHandler {\n"
+            "  helper = new AuthHelper();\n"
+            "  load(req: any) {\n"
+            "    const uid = this.helper.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        names = [item["name"] for item in parsed["files"]["handlers.ts"]["symbols"]]
+        self.assertNotIn("helper", names)
+
+    def test_declare_field_is_not_reported(self):
+        parsed = self._parsed(
+            "export class PhotoHandler {\n"
+            "  declare get_uid: (req: any) => string;\n"
+            "  load(req: any) {\n"
+            "    const uid = this.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  }\n"
+            "}\n"
+        )
+        names = [item["name"] for item in parsed["files"]["handlers.ts"]["symbols"]]
+        self.assertNotIn("get_uid", names)
+
+
 class ConstBoundUrlTests(unittest.TestCase):
     def _calls(self, source, filename="api.js"):
         with tempfile.TemporaryDirectory() as td:

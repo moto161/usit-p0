@@ -1180,6 +1180,7 @@ function main(input) {
       if (ts.isFunctionDeclaration(node) && node.name) { name = node.name.text; kind = "function"; }
       else if (ts.isClassDeclaration(node) && node.name) { name = node.name.text; kind = "class"; }
       else if (ts.isMethodDeclaration(node) && node.name) { name = node.name.getText(sourceFile); kind = "method"; }
+      else if (ts.isPropertyDeclaration(node) && node.name && node.initializer && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) { name = node.name.getText(sourceFile); kind = "method"; }
       else if (ts.isInterfaceDeclaration(node)) { name = node.name.text; kind = "interface"; }
       else if (ts.isTypeAliasDeclaration(node)) { name = node.name.text; kind = "type"; }
       else if (ts.isEnumDeclaration(node)) { name = node.name.text; kind = "enum"; }
