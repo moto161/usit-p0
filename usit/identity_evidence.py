@@ -801,6 +801,10 @@ _TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
 _PY_SUPER_CALL_RE = re.compile(r"^super\(\)\.([A-Za-z_]\w*)\s*\(")
 _PY_SUPER_CALL_RHS = re.compile(r"super\(\)\.([A-Za-z_]\w*)\s*\(.*\)$")
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
+_TS_CLASS_FIELD_ARROW_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|readonly|declare|override|abstract)\s+)*"
+    r"([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:\((?:[^)]*)\)|[A-Za-z_$][\w$]*)\s*=>"
+)
 _TS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
 
 
@@ -937,20 +941,53 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                         _ts_constructed_class(assign.group(2)))
             if (class_frame is not None and method_frame is None and not nested
                     and depth == class_frame["depth"]):
-                # T2: a class field declaration with an initializer, e.g.
-                # private helper = new AuthHelper();. The depth guard keeps
-                # body lines of a method whose header the scanner failed to
-                # recognize from being read as field declarations. A static
-                # field is not an instance attribute. A non-new initializer
-                # records None and disqualifies the attribute.
-                field = _TS_FIELD_RE.match(stripped)
-                if field:
+                # T12: a class field arrow function, e.g.
+                # get_uid = (req) => req.user.id; or
+                # get_uid = (req) => { return req.user.id; };. An
+                # expression body records its same-line body as the
+                # return directly; a block body opens a method frame
+                # whose returns are collected like a normal method's.
+                # A `=>` at end of line (multi-line expression body)
+                # fails closed. A static field arrow never matches the
+                # regex (`static` is not a listed modifier, so it is
+                # read as the name and the `=` check fails).
+                arrow = _TS_CLASS_FIELD_ARROW_RE.match(stripped)
+                if arrow:
+                    name = arrow.group(1)
                     is_static = "static" in re.findall(
-                        r"[A-Za-z_$][\w$]*", stripped[:field.start(1)])
+                        r"[A-Za-z_$][\w$]*", stripped[:arrow.start(1)])
                     if not is_static:
-                        attr_candidates.setdefault(
-                            (class_frame["class"], field.group(1)), set()).add(
-                            _ts_constructed_class(field.group(2)))
+                        rest = stripped[arrow.end():]
+                        if rest.lstrip().startswith("{"):
+                            stack.append({"kind": "method",
+                                          "depth": interior(stripped.index("{", arrow.end()) + 1),
+                                          "class": class_frame["class"], "method": name,
+                                          "constructor": False, "returns": []})
+                            method_frame = stack[-1]
+                            defined.add((class_frame["class"], name))
+                        else:
+                            expr = rest.strip()
+                            if expr.endswith(";"):
+                                expr = expr[:-1].strip()
+                            if expr:
+                                methods.setdefault((class_frame["class"], name), []).append(
+                                    (line_no, expr))
+                                defined.add((class_frame["class"], name))
+                else:
+                    # T2: a class field declaration with an initializer, e.g.
+                    # private helper = new AuthHelper();. The depth guard keeps
+                    # body lines of a method whose header the scanner failed to
+                    # recognize from being read as field declarations. A static
+                    # field is not an instance attribute. A non-new initializer
+                    # records None and disqualifies the attribute.
+                    field = _TS_FIELD_RE.match(stripped)
+                    if field:
+                        is_static = "static" in re.findall(
+                            r"[A-Za-z_$][\w$]*", stripped[:field.start(1)])
+                        if not is_static:
+                            attr_candidates.setdefault(
+                                (class_frame["class"], field.group(1)), set()).add(
+                                _ts_constructed_class(field.group(2)))
             if method_frame is not None and not nested:
                 # An arrow or function header whose body brace lands on the
                 # next line (Allman style): remember it for exactly one line.

@@ -4240,6 +4240,181 @@ class TsNamespaceImportReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
 
 
+class TsClassFieldArrowReturnPropagationTests(unittest.TestCase):
+    def _rows(self, source, filename="handlers.ts"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / filename).write_text(source, encoding="utf-8")
+            parsed = analyze_js_ts_project(root, discover_files(root))
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence({filename: source}, owners)
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _LOAD = (
+        "  load(req: any) {\n"
+        "    const uid = this.get_uid(req);\n"
+        '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+        "  }\n"
+    )
+
+    def test_expression_body_binds(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  get_uid = (req: any) => req.user.id;\n"
+            + self._LOAD +
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 5)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [2, 4, 5])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:3")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_block_body_binds(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  get_uid = (req: any) => {\n"
+            "    return req.user.id;\n"
+            "  };\n"
+            + self._LOAD +
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+
+    def test_async_field_arrow_binds(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  get_uid = async (req: any) => req.user.id;\n"
+            + self._LOAD +
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+
+    def test_bare_param_field_arrow_binds(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  get_uid = req => req.user.id;\n"
+            + self._LOAD +
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+
+    def test_private_field_arrow_binds(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  private get_uid = (req: any) => req.user.id;\n"
+            + self._LOAD +
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+
+    def test_readonly_field_arrow_binds(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  readonly get_uid = (req: any) => req.user.id;\n"
+            + self._LOAD +
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "PhotoHandler.get_uid")
+
+    def test_field_arrow_body_calling_helper_binds(self):
+        rows = self._rows(
+            "class AuthHelper {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export class PhotoHandler {\n"
+            "  constructor() {\n"
+            "    this.helper = new AuthHelper();\n"
+            "  }\n"
+            "  load2 = (req: any) => {\n"
+            "    const uid = this.helper.get_uid(req);\n"
+            '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            "  };\n"
+            "}\n"
+        )
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 12)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 11, 12])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+        # The adapter does not report field arrows as method symbols,
+        # so a sink inside a field-arrow body has no owner symbol.
+        self.assertIsNone(binding["owner_symbol_id"])
+        self.assertEqual(binding["owner_resolution_status"], "UNKNOWN")
+
+    def test_static_field_arrow_does_not_bind(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  static get_uid = (req: any) => req.user.id;\n"
+            + self._LOAD +
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_multiline_expression_body_does_not_bind(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  get_uid = (req: any) =>\n"
+            "    req.user.id;\n"
+            + self._LOAD +
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_field_arrow_block_mixed_returns_do_not_bind(self):
+        rows = self._rows(
+            "export class PhotoHandler {\n"
+            "  get_uid = (req: any) => {\n"
+            "    if (req.user) {\n"
+            "      return req.user.id;\n"
+            "    }\n"
+            "    return req.session.id;\n"
+            "  };\n"
+            + self._LOAD +
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_field_arrow_shadows_base_method(self):
+        rows = self._rows(
+            "export class BaseAuth {\n"
+            "  get_uid(req: any) {\n"
+            "    return req.user.id;\n"
+            "  }\n"
+            "}\n"
+            "export class PhotoHandler extends BaseAuth {\n"
+            "  get_uid = (req: any) => req.session.id;\n"
+            + self._LOAD +
+            "}\n"
+        )
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
 class TsConstFunctionReturnPropagationTests(unittest.TestCase):
     def _rows_files(self, files):
         with tempfile.TemporaryDirectory() as td:
