@@ -4012,6 +4012,139 @@ class IdentityAttributeBaseReturnPropagationTests(unittest.TestCase):
         self.assertEqual(self._direct_bindings(rows), [])
 
 
+class IdentityExpressionBaseFailClosedTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _BASE = (
+        "class BaseAuth:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.user.id\n"
+    )
+
+    _MIXIN = (
+        "class AuditMixin:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.session.id\n"
+    )
+
+    _LOAD = (
+        "    def load(self, req):\n"
+        "        uid = self.get_uid(req)\n"
+        '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+    )
+
+    def test_call_expression_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(mixin(BaseAuth)):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_called_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth()):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_subscript_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth[T]):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_conditional_expression_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + self._MIXIN
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth if True else AuditMixin):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_attribute_call_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._BASE,
+            "handlers.py": (
+                "import auth\n"
+                "\n\n"
+                "class PhotoHandler(auth.BaseAuth()):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_binary_op_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + self._MIXIN
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth + AuditMixin):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_expression_base_poisons_whole_class(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + self._MIXIN
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth, mixin(AuditMixin)):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_lambda_call_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler((lambda: BaseAuth)()):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_bare_base_control_still_binds(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                self._BASE
+                + "\n\n"
+                + "class PhotoHandler(BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+
 class TsConfigPathsImportTests(unittest.TestCase):
     def _rows_files(self, files, ts_config=None):
         with tempfile.TemporaryDirectory() as td:
