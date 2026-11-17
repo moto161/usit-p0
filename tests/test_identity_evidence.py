@@ -3801,6 +3801,217 @@ class IdentityMultipleInheritanceReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
 
 
+class IdentityAttributeBaseReturnPropagationTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _BASE = (
+        "class BaseAuth:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.user.id\n"
+    )
+
+    _MIXIN = (
+        "class AuditMixin:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.session.id\n"
+    )
+
+    _LOAD = (
+        "    def load(self, req):\n"
+        "        uid = self.get_uid(req)\n"
+        '        return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid])\n'
+    )
+
+    def test_plain_module_import_attribute_base_binds(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._BASE,
+            "handlers.py": (
+                "import auth\n"
+                "\n\n"
+                "class PhotoHandler(auth.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_aliased_module_import_attribute_base_binds(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._BASE,
+            "handlers.py": (
+                "import auth as a\n"
+                "\n\n"
+                "class PhotoHandler(a.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_relative_module_import_attribute_base_binds(self):
+        rows = extract_identity_evidence({
+            "pkg/__init__.py": "",
+            "pkg/auth.py": self._BASE,
+            "pkg/handlers.py": (
+                "from . import auth\n"
+                "\n\n"
+                "class PhotoHandler(auth.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "pkg/auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_from_package_import_attribute_base_binds(self):
+        rows = extract_identity_evidence({
+            "pkg/__init__.py": "",
+            "pkg/auth.py": self._BASE,
+            "pkg/handlers.py": (
+                "from pkg import auth\n"
+                "\n\n"
+                "class PhotoHandler(auth.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "pkg/auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_attribute_base_without_module_import_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._BASE,
+            "handlers.py": (
+                "from auth import BaseAuth\n"
+                "\n\n"
+                "class PhotoHandler(auth.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_attribute_base_not_a_class_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "auth.py": "NOT_A_CLASS = 1\n",
+            "handlers.py": (
+                "import auth\n"
+                "\n\n"
+                "class PhotoHandler(auth.NotAClass):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_attribute_base_missing_module_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "handlers.py": (
+                "import auth\n"
+                "\n\n"
+                "class PhotoHandler(auth.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_three_segment_attribute_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "pkg/__init__.py": "",
+            "pkg/auth.py": self._BASE,
+            "pkg/handlers.py": (
+                "import pkg.auth\n"
+                "\n\n"
+                "class PhotoHandler(pkg.auth.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_attribute_base_mixed_with_bare_base_binds(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._BASE,
+            "handlers.py": (
+                "import auth\n"
+                "\n\n"
+                + self._MIXIN
+                + "\n\n"
+                "class PhotoHandler(auth.BaseAuth, AuditMixin):\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 12)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 11, 12])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+
+    def test_attribute_base_first_base_shadows_second(self):
+        rows = extract_identity_evidence({
+            "auth.py": (
+                "class AuditMixin:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.session.id\n"
+                "\n\n"
+                + self._BASE
+            ),
+            "handlers.py": (
+                "import auth\n"
+                "\n\n"
+                "class PhotoHandler(auth.AuditMixin, auth.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_attribute_base_chain_binds_through_parent(self):
+        rows = extract_identity_evidence({
+            "auth.py": (
+                self._BASE
+                + "\n\n"
+                + "class ExtendedAuth(BaseAuth):\n"
+                "    pass\n"
+            ),
+            "handlers.py": (
+                "import auth\n"
+                "\n\n"
+                "class PhotoHandler(auth.ExtendedAuth):\n"
+                + self._LOAD
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.py")
+
+    def test_shadowed_module_name_attribute_base_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._BASE,
+            "handlers.py": (
+                "import auth\n"
+                "\n\n"
+                "class auth:\n"
+                "    pass\n"
+                "\n\n"
+                "class PhotoHandler(auth.BaseAuth):\n"
+                + self._LOAD
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
 class TsConfigPathsImportTests(unittest.TestCase):
     def _rows_files(self, files, ts_config=None):
         with tempfile.TemporaryDirectory() as td:

@@ -470,15 +470,16 @@ def _python_base_classes(
         code_by_file: dict[str, str]) -> dict[str, dict[str, list[tuple[str, str]]]]:
     """Map files to {class: [direct bases in declaration order]} for Python extends clauses.
 
-    Only bare-identifier bases count (``class X(Base, Mixin)``): each
-    base resolves to a top-level class of the same file first, else
-    through a ``from <module> import Base`` to a project file defining
-    it (same import rules as ``_python_imported_identity_helpers``;
-    re-exports not followed). All declared bases must resolve: a
+    Only bare-identifier bases (``class X(Base, Mixin)``) and two-segment
+    attribute bases (``class X(auth.Base)``) count: each base resolves
+    to a top-level class of the same file first, else through a
+    ``from <module> import Base`` (bare names) or through a module import
+    binding (attribute bases; same import rules as
+    ``_python_module_bindings``). All declared bases must resolve: a
     class with any unresolvable base gets no entry (fail closed -- an
     incomplete hierarchy has no trustworthy MRO). Expression bases
-    (``class X(mixin(Base))``) and attribute bases
-    (``class X(auth.Base)``) leave the class without a base (fail
+    (``class X(mixin(Base))``) and three-or-more-segment attribute bases
+    (``class X(pkg.auth.Base)``) leave the class without a base (fail
     closed). Only top-level classes are recorded.
     """
     module_index = _python_module_index(code_by_file)
@@ -492,14 +493,32 @@ def _python_base_classes(
             continue
         class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
         caller_package = _package_for_module(_module_for_path(path), path)
+        module_bindings = _python_module_bindings(path, source, module_index)
         bases: dict[str, list[tuple[str, str]]] = {}
         for node in tree.body:
             if not isinstance(node, ast.ClassDef):
                 continue
-            if not node.bases or not all(isinstance(base, ast.Name) for base in node.bases):
+            if not node.bases or not all(
+                    isinstance(base, ast.Name)
+                    or (isinstance(base, ast.Attribute)
+                        and isinstance(base.value, ast.Name))
+                    for base in node.bases):
                 continue
             resolved: list[tuple[str, str]] = []
             for base_node in node.bases:
+                if isinstance(base_node, ast.Attribute):
+                    module = module_bindings.get(base_node.value.id)
+                    if module is None:
+                        break
+                    target_path = module_index.get(module)
+                    if target_path is None:
+                        break
+                    if base_node.attr in _python_top_level_class_names(
+                            code_by_file[target_path]):
+                        resolved.append((target_path, base_node.attr))
+                    else:
+                        break
+                    continue
                 base = base_node.id
                 if base in class_names:
                     resolved.append((path, base))
