@@ -2211,7 +2211,9 @@ def _python_instance_attribute_candidates(
     is a top-level class of the same file, else the class a same-file
     factory function constructs (see
     ``_python_factory_return_classes``); any other assignment shape, or
-    a call of an unknown name, records ``None``. The raw names are kept
+    a call of an unknown name, records ``None``; a two-segment
+    attribute call (``auth.AuthHelper()``) records the dotted name
+    ``"auth.AuthHelper"`` for module-binding resolution. The raw names are kept
     (unlike ``_python_instance_attribute_classes``) so cross-file
     resolution can tell an imported class from a non-construction
     shape. Non-Python files and syntax-invalid Python produce no
@@ -2243,15 +2245,24 @@ def _python_instance_attribute_candidates(
                     value = item.value
                 else:
                     continue
-                if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-                    if value.func.id in class_names:
-                        constructed: str | None = value.func.id
+                if isinstance(value, ast.Call):
+                    func = value.func
+                    if isinstance(func, ast.Name):
+                        if func.id in class_names:
+                            constructed: str | None = func.id
+                        else:
+                            # A same-file factory resolves to its class; any
+                            # other bare-name call keeps its raw name so
+                            # cross-file resolution can tell an imported class
+                            # from a non-construction shape.
+                            constructed = factory_classes.get(func.id, func.id)
+                    elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                        # P15: exactly two segments, `auth.AuthHelper()`;
+                        # three or more segments are not a bare Name here
+                        # and fall through to None (fail closed).
+                        constructed = f"{func.value.id}.{func.attr}"
                     else:
-                        # A same-file factory resolves to its class; any
-                        # other bare-name call keeps its raw name so
-                        # cross-file resolution can tell an imported class
-                        # from a non-construction shape.
-                        constructed = factory_classes.get(value.func.id, value.func.id)
+                        constructed = None
                 else:
                     constructed = None
                 for target in targets:
@@ -2301,7 +2312,10 @@ def _python_cross_file_instance_bindings(
     same-file P8/P13 bindings) and, when the constructed name is a
     ``from``-imported class resolving to a project file that directly
     defines the imported name as a top-level class, record the
-    cross-file binding. The import may be absolute or relative (``from
+    cross-file binding. A dotted constructed name
+    (``auth.AuthHelper()``) resolves instead through the file's module
+    bindings (P15): the module local name maps to a scanned module,
+    and the target file must directly define the class. The import may be absolute or relative (``from
     .auth import AuthHelper``); an ``as`` alias binds under the local
     name. A local name shadowed by a module-level definition or
     assignment, imported from two different modules, or imported from a
@@ -2342,12 +2356,29 @@ def _python_cross_file_instance_bindings(
                 imports.setdefault(alias.asname or alias.name, set()).add(
                     (target_path, alias.name))
         candidates = _python_instance_attribute_candidates(path, source)
+        module_bindings = _python_module_bindings(path, source, module_index)
         bindings: dict[tuple[str, str], tuple[str, str]] = {}
         for (cls, attr), constructed in candidates.items():
             if len(constructed) != 1:
                 continue
             only = next(iter(constructed))
             if only is None or only in class_names or only in shadowed:
+                continue
+            if "." in only:
+                # P15: a two-segment module-attribute construction,
+                # `auth.AuthHelper()`; the module resolves through the
+                # P6/P11 module bindings (shadowing already handled
+                # there), and the target file must directly define the
+                # class.
+                module_local, imported_name = only.split(".", 1)
+                module = module_bindings.get(module_local)
+                if module is None:
+                    continue
+                target_path = module_index.get(module)
+                if target_path is None:
+                    continue
+                if imported_name in _python_top_level_class_names(code_by_file[target_path]):
+                    bindings[(cls, attr)] = (target_path, imported_name)
                 continue
             targets = imports.get(only)
             if not targets or len(targets) != 1:
