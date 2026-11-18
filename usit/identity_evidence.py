@@ -2307,9 +2307,11 @@ def _python_cross_file_instance_bindings(
 
     The Python mirror of ``_ts_cross_file_instance_bindings`` for
     instance attributes: for each file, take the
-    ``_python_instance_attribute_candidates`` whose single constructed
-    class is not a top-level class of the same file (those are the
-    same-file P8/P13 bindings) and, when the constructed name is a
+    ``_python_instance_attribute_candidates`` and resolve every
+    constructed name to a (file, class) target (P18); when all names
+    resolve to the same target in another file, record the cross-file
+    binding. A target in the same file is a same-file P8/P13 binding,
+    not a cross-file one. When the constructed name is a
     ``from``-imported class resolving to a project file that directly
     defines the imported name as a top-level class, record the
     cross-file binding. A dotted constructed name
@@ -2366,52 +2368,62 @@ def _python_cross_file_instance_bindings(
         candidates = _python_instance_attribute_candidates(path, source)
         module_bindings = _python_module_bindings(path, source, module_index)
         bindings: dict[tuple[str, str], tuple[str, str]] = {}
-        for (cls, attr), constructed in candidates.items():
-            if len(constructed) != 1:
-                continue
-            only = next(iter(constructed))
-            if only is None or only in class_names or only in shadowed:
-                continue
-            if "." in only:
-                # P15: a two-segment module-attribute construction,
-                # `auth.AuthHelper()`; the module resolves through the
-                # P6/P11 module bindings (shadowing already handled
-                # there), and the target file must directly define the
-                # class.
-                module_local, imported_name = only.split(".", 1)
+        def _resolve(name: str | None) -> tuple[str, str] | None:
+            # P18: resolve one constructed name to its (file, class)
+            # target, or None when it resolves nowhere. The P14-P17
+            # single-name rules are unchanged; only the caller is new.
+            if name is None or name in shadowed:
+                return None
+            if name in class_names:
+                return (path, name)
+            if "." in name:
+                # P15/P17: a two-segment module-attribute construction,
+                # `auth.AuthHelper()` or `auth.make_auth_helper()`; the
+                # module resolves through the P6/P11 module bindings.
+                module_local, imported_name = name.split(".", 1)
                 module = module_bindings.get(module_local)
                 if module is None:
-                    continue
+                    return None
                 target_path = module_index.get(module)
                 if target_path is None:
-                    continue
+                    return None
                 if imported_name in _python_top_level_class_names(code_by_file[target_path]):
-                    bindings[(cls, attr)] = (target_path, imported_name)
-                    continue
-                # P17: the imported name may be a factory function of
-                # the target file (P13 rules, applied to the target
-                # file), accessed through the module binding.
+                    return (target_path, imported_name)
                 factory_classes = _python_factory_return_classes(
                     target_path, code_by_file[target_path])
                 constructed_class = factory_classes.get(imported_name)
-                if constructed_class is not None:
-                    bindings[(cls, attr)] = (target_path, constructed_class)
-                continue
-            targets = imports.get(only)
+                if constructed_class is None:
+                    return None
+                return (target_path, constructed_class)
+            targets = imports.get(name)
             if not targets or len(targets) != 1:
-                continue
+                return None
             target_path, imported_name = next(iter(targets))
             if imported_name in _python_top_level_class_names(code_by_file[target_path]):
-                bindings[(cls, attr)] = (target_path, imported_name)
-                continue
+                return (target_path, imported_name)
             # P16: the imported name may be a factory function whose
             # every return constructs the same top-level class of the
             # target file (P13 rules, applied to the target file).
             factory_classes = _python_factory_return_classes(
                 target_path, code_by_file[target_path])
             constructed_class = factory_classes.get(imported_name)
-            if constructed_class is not None:
-                bindings[(cls, attr)] = (target_path, constructed_class)
+            if constructed_class is None:
+                return None
+            return (target_path, constructed_class)
+
+        for (cls, attr), constructed in candidates.items():
+            # P18: every constructed name must resolve to the same
+            # cross-file (file, class); a name that resolves nowhere,
+            # or two names resolving to different targets, drops the
+            # attribute (fail closed). A target in this file is the
+            # same-file P8/P13 binding, not a cross-file one.
+            resolved = {_resolve(name) for name in constructed}
+            if None in resolved or len(resolved) != 1:
+                continue
+            target = next(iter(resolved))
+            if target is None or target[0] == path:
+                continue
+            bindings[(cls, attr)] = target
         if bindings:
             result[path] = bindings
     return result

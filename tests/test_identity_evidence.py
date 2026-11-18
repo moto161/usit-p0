@@ -5254,23 +5254,215 @@ class IdentityModuleAttributeFactoryTests(unittest.TestCase):
         })
         self.assertEqual(self._direct_bindings(rows), [])
 
-    def test_module_attr_factory_and_direct_same_class_does_not_bind(self):
+    def test_module_attr_factory_and_local_direct_class_does_not_bind(self):
+        # Boundary moved in P18: a module-attribute factory mixed with
+        # a module-attribute direct construction of the same class now
+        # binds (see
+        # IdentityMultiNameSameTargetTests.test_dotted_factory_and_dotted_direct_mixed_binds);
+        # this test now pins the next boundary, a factory mixed with a
+        # direct construction of a different class defined in this file.
         rows = extract_identity_evidence({
             "server/auth.py": self._auth(),
             "server/photos.py": (
                 "from server import auth\n"
                 "\n"
+                + self._AUTH
+                + "\n"
                 "class PhotoHandler:\n"
                 "    def __init__(self):\n"
                 "        self.helper = auth.make_auth_helper()\n"
                 "\n"
                 "    def setup(self):\n"
-                "        self.helper = auth.AuthHelper()\n"
+                "        self.helper = AuthHelper()\n"
                 "\n"
                 "    def list_photos(self, request):\n"
                 "        uid = self.helper.get_uid(request)\n"
                 '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
             ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
+class IdentityMultiNameSameTargetTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _AUTH = (
+        "class AuthHelper:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.user.id\n"
+    )
+
+    _FACTORY = (
+        "def make_auth_helper():\n"
+        "    return AuthHelper()\n"
+    )
+
+    def _utils(self, factory=_FACTORY, helper=_AUTH):
+        return helper + "\n" + factory
+
+    def _photos(self, import_line, assign_init, assign_setup):
+        return (
+            import_line + "\n\n"
+            "class PhotoHandler:\n"
+            "    def __init__(self):\n"
+            f"        {assign_init}\n"
+            "\n"
+            "    def setup(self):\n"
+            f"        {assign_setup}\n"
+            "\n"
+            "    def list_photos(self, request):\n"
+            "        uid = self.helper.get_uid(request)\n"
+            '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+        )
+
+    def test_bare_factory_and_bare_class_mixed_binds(self):
+        rows = extract_identity_evidence({
+            "server/utils.py": self._utils(),
+            "server/photos.py": self._photos(
+                "from server.utils import AuthHelper, make_auth_helper",
+                "self.helper = make_auth_helper()",
+                "self.helper = AuthHelper()"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 12)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 11, 12])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/utils.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:server/photos.py#list_photos:10")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_dotted_factory_and_dotted_direct_mixed_binds(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._utils(),
+            "server/photos.py": self._photos(
+                "from server import auth",
+                "self.helper = auth.make_auth_helper()",
+                "self.helper = auth.AuthHelper()"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_dotted_factory_and_bare_class_mixed_binds(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._utils(),
+            "server/photos.py": self._photos(
+                "from server import auth\nfrom server.auth import AuthHelper",
+                "self.helper = auth.make_auth_helper()",
+                "self.helper = AuthHelper()"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_bare_factory_and_dotted_direct_mixed_binds(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._utils(),
+            "server/photos.py": self._photos(
+                "from server import auth\nfrom server.auth import make_auth_helper",
+                "self.helper = make_auth_helper()",
+                "self.helper = auth.AuthHelper()"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_mixed_returning_request_identity_binds(self):
+        rows = extract_identity_evidence({
+            "server/utils.py": self._utils(
+                helper=(
+                    "class AuthHelper:\n"
+                    "    def get_owner(self, req):\n"
+                    "        return req.body.user_id\n"
+                )),
+            "server/photos.py": (
+                "from server.utils import AuthHelper, make_auth_helper\n"
+                "\n"
+                "class PhotoHandler:\n"
+                "    def __init__(self):\n"
+                "        self.helper = make_auth_helper()\n"
+                "\n"
+                "    def setup(self):\n"
+                "        self.helper = AuthHelper()\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        owner = self.helper.get_owner(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (owner,))\n'
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_owner")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/utils.py")
+
+    def test_mixed_factory_and_local_direct_class_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/utils.py": self._utils(),
+            "server/photos.py": self._photos(
+                "from server.utils import make_auth_helper\n\n" + self._AUTH,
+                "self.helper = make_auth_helper()",
+                "self.helper = AuthHelper()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_factory_and_other_module_direct_class_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/utils.py": self._utils(),
+            "server/other.py": (
+                "class OtherHelper:\n"
+                "    def get_uid(self, req):\n"
+                "        return req.session.id\n"
+            ),
+            "server/photos.py": self._photos(
+                "from server.utils import make_auth_helper\n"
+                "from server.other import OtherHelper",
+                "self.helper = make_auth_helper()",
+                "self.helper = OtherHelper()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_with_non_construction_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/utils.py": self._utils(),
+            "server/photos.py": self._photos(
+                "from server.utils import make_auth_helper",
+                "self.helper = make_auth_helper()",
+                "self.helper = 5"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_with_unresolvable_name_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/utils.py": self._utils(),
+            "server/photos.py": self._photos(
+                "from server.utils import make_auth_helper\nimport external",
+                "self.helper = make_auth_helper()",
+                "self.helper = external.AuthHelper()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_with_ambiguous_import_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/a.py": self._utils(),
+            "server/b.py": self._utils(),
+            "server/photos.py": self._photos(
+                "from server.a import make_auth_helper\n"
+                "from server.b import make_auth_helper\n"
+                "from server.a import AuthHelper",
+                "self.helper = make_auth_helper()",
+                "self.helper = AuthHelper()"),
         })
         self.assertEqual(self._direct_bindings(rows), [])
 
