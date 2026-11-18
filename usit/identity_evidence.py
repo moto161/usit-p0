@@ -2200,19 +2200,22 @@ def _python_factory_return_classes(path: str, source: str) -> dict[str, str]:
             if len(outcomes) == 1 and outcomes[0] is not None}
 
 
-def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
-    """Map (class, attribute) pairs to the class constructed for them.
+def _python_instance_attribute_candidates(
+        path: str, source: str) -> dict[tuple[str, str], set[str | None]]:
+    """Map (class, attribute) pairs to their constructed class names.
 
-    For each top-level class, collect ``self.<attr> = <ClassName>(...)``
-    assignments across its directly defined methods (including assignments
-    inside nested definitions, whose closures still capture ``self``).
-    An assignment may also call a same-file factory function whose every
-    return constructs the same class (see
-    ``_python_factory_return_classes``). An attribute qualifies only when
-    every such assignment constructs the same top-level class defined in
-    the same file; any other assignment shape, a different class, or a
-    class not defined in this file disqualifies it. Non-Python files and
-    syntax-invalid Python produce no bindings.
+    For each top-level class, collect ``self.<attr> = <Name>(...)``
+    assignments across its directly defined methods (including
+    assignments inside nested definitions, whose closures still capture
+    ``self``). The constructed name is the called class itself when it
+    is a top-level class of the same file, else the class a same-file
+    factory function constructs (see
+    ``_python_factory_return_classes``); any other assignment shape, or
+    a call of an unknown name, records ``None``. The raw names are kept
+    (unlike ``_python_instance_attribute_classes``) so cross-file
+    resolution can tell an imported class from a non-construction
+    shape. Non-Python files and syntax-invalid Python produce no
+    candidates.
     """
     if not path.lower().endswith(".py"):
         return {}
@@ -2244,7 +2247,11 @@ def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str
                     if value.func.id in class_names:
                         constructed: str | None = value.func.id
                     else:
-                        constructed = factory_classes.get(value.func.id)
+                        # A same-file factory resolves to its class; any
+                        # other bare-name call keeps its raw name so
+                        # cross-file resolution can tell an imported class
+                        # from a non-construction shape.
+                        constructed = factory_classes.get(value.func.id, value.func.id)
                 else:
                     constructed = None
                 for target in targets:
@@ -2253,15 +2260,104 @@ def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str
                             and target.value.id == "self"):
                         continue
                     key = (node.name, target.attr)
-                    candidates.setdefault(key, set()).add(
-                        constructed if constructed in class_names else None)
+                    candidates.setdefault(key, set()).add(constructed)
+    return candidates
+
+
+def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
+    """Map (class, attribute) pairs to the class constructed for them.
+
+    For each top-level class, collect ``self.<attr> = <ClassName>(...)``
+    assignments across its directly defined methods (including assignments
+    inside nested definitions, whose closures still capture ``self``).
+    An assignment may also call a same-file factory function whose every
+    return constructs the same class (see
+    ``_python_factory_return_classes``). An attribute qualifies only when
+    every such assignment constructs the same top-level class defined in
+    the same file; any other assignment shape, a different class, or a
+    class not defined in this file disqualifies it. Non-Python files and
+    syntax-invalid Python produce no bindings. This filters the raw
+    candidate sets of ``_python_instance_attribute_candidates``.
+    """
+    class_names = _python_top_level_class_names(source)
+    candidates = _python_instance_attribute_candidates(path, source)
     bindings: dict[tuple[str, str], str] = {}
     for key, constructed in candidates.items():
         if len(constructed) == 1:
             only = next(iter(constructed))
-            if only is not None:
+            if only is not None and only in class_names:
                 bindings[key] = only
     return bindings
+
+
+def _python_cross_file_instance_bindings(
+        code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], tuple[str, str]]]:
+    """Map files to cross-file (class, attribute) -> (target file, class) bindings.
+
+    The Python mirror of ``_ts_cross_file_instance_bindings`` for
+    instance attributes: for each file, take the
+    ``_python_instance_attribute_candidates`` whose single constructed
+    class is not a top-level class of the same file (those are the
+    same-file P8/P13 bindings) and, when the constructed name is a
+    ``from``-imported class resolving to a project file that directly
+    defines the imported name as a top-level class, record the
+    cross-file binding. The import may be absolute or relative (``from
+    .auth import AuthHelper``); an ``as`` alias binds under the local
+    name. A local name shadowed by a module-level definition or
+    assignment, imported from two different modules, or imported from a
+    module outside the scan is dropped (fail closed). Re-exports are
+    not followed: the target file must directly define the class. The
+    P8 disqualification rule applies first: an attribute with a
+    non-construction binding or two different constructed classes is
+    dropped here too.
+    """
+    module_index = _python_module_index(code_by_file)
+    result: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
+    for path, source in code_by_file.items():
+        if not path.lower().endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(source, filename=path)
+        except (SyntaxError, ValueError):
+            continue
+        class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+        shadowed = _python_module_level_shadowed_names(tree)
+        caller_package = _package_for_module(_module_for_path(path), path)
+        imports: dict[str, set[tuple[str, str]]] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if node.level and node.level > 0:
+                absolute = _relative_module(caller_package, node.level, node.module)
+            else:
+                absolute = node.module
+            if absolute is None:
+                continue
+            target_path = module_index.get(absolute)
+            if target_path is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                imports.setdefault(alias.asname or alias.name, set()).add(
+                    (target_path, alias.name))
+        candidates = _python_instance_attribute_candidates(path, source)
+        bindings: dict[tuple[str, str], tuple[str, str]] = {}
+        for (cls, attr), constructed in candidates.items():
+            if len(constructed) != 1:
+                continue
+            only = next(iter(constructed))
+            if only is None or only in class_names or only in shadowed:
+                continue
+            targets = imports.get(only)
+            if not targets or len(targets) != 1:
+                continue
+            target_path, imported_name = next(iter(targets))
+            if imported_name in _python_top_level_class_names(code_by_file[target_path]):
+                bindings[(cls, attr)] = (target_path, imported_name)
+        if bindings:
+            result[path] = bindings
+    return result
 
 
 def _python_module_index(code_by_file: dict[str, str]) -> dict[str, str]:
@@ -2496,6 +2592,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
+    py_cross_instance_bindings = _python_cross_file_instance_bindings(code_by_file)
     module_bindings = {
         file_path: _python_module_bindings(file_path, file_source, module_index)
         for file_path, file_source in code_by_file.items()
@@ -2556,6 +2653,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             method_helpers = same_file_methods.get(path, {})
             class_ranges = _python_class_method_ranges(path, source)
             instance_bindings = same_file_instance_bindings.get(path, {})
+            cross_instance_bindings = py_cross_instance_bindings.get(path, {})
             ts_method_helpers = {}
             ts_class_ranges = {}
             ts_instance_bindings = {}
@@ -2573,6 +2671,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             method_helpers = {}
             class_ranges = {}
             instance_bindings = {}
+            cross_instance_bindings = {}
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
@@ -2589,6 +2688,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             method_helpers = {}
             class_ranges = {}
             instance_bindings = {}
+            cross_instance_bindings = {}
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
@@ -2784,7 +2884,8 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                          {"path": path, "line": line_no, "variable": name}
                                      ]}
                 elif (return_helpers or bindings or method_helpers
-                        or instance_bindings or ts_method_helpers
+                        or instance_bindings or cross_instance_bindings
+                        or ts_method_helpers
                         or ts_instance_bindings or ts_cross_bindings
                         or ts_has_base or py_has_base
                         or ts_file_functions or ts_file_named_functions
@@ -2897,6 +2998,17 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                             path, target, parts[2],
                                             same_file_methods, py_defined_methods,
                                             py_base_classes)
+                                    else:
+                                        # P14: the attribute's class is
+                                        # imported from another file.
+                                        cross = cross_instance_bindings.get(
+                                            (enclosing, parts[1]))
+                                        if cross is not None:
+                                            target_file, target_class = cross
+                                            helper = _python_method_profile(
+                                                target_file, target_class, parts[2],
+                                                same_file_methods, py_defined_methods,
+                                                py_base_classes)
                     if helper is None:
                         # P9: one hop through the direct base class, e.g.
                         # uid = super().get_uid(req). P10: also the
