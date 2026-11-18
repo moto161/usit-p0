@@ -2147,17 +2147,19 @@ def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, st
     return bindings
 
 
-def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
-    """Map (class, attribute) pairs to the class constructed for them.
+def _python_factory_return_classes(path: str, source: str) -> dict[str, str]:
+    """Map top-level factory function names to the class they construct.
 
-    For each top-level class, collect ``self.<attr> = <ClassName>(...)``
-    assignments across its directly defined methods (including assignments
-    inside nested definitions, whose closures still capture ``self``).
-    An attribute qualifies only when every such assignment constructs the
-    same top-level class defined in the same file; any other assignment
-    shape, a different class, or a class not defined in this file
-    disqualifies it. Non-Python files and syntax-invalid Python produce
-    no bindings.
+    A top-level ``def`` (not ``async def`` -- an async factory call
+    returns a coroutine, not an instance) qualifies only when it has at
+    least one return and every return directly constructs the same
+    top-level class defined in the same file (``return <Class>(...)``,
+    arguments ignored). Any other return (``None``, a variable, an
+    attribute call, another class, a valueless return) or no return at
+    all disqualifies the factory. Returns inside nested functions or
+    classes are excluded, same traversal as
+    ``_python_class_method_returns``. A function defined twice is
+    ambiguous and dropped.
     """
     if not path.lower().endswith(".py"):
         return {}
@@ -2166,6 +2168,60 @@ def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str
     except (SyntaxError, ValueError):
         return {}
     class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    by_name: dict[str, list[str | None]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        returns: list[ast.Return] = []
+        stack = list(node.body)
+        while stack:
+            item = stack.pop()
+            if isinstance(item, ast.Return):
+                returns.append(item)
+            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            else:
+                stack.extend(ast.iter_child_nodes(item))
+        constructed: str | None = None
+        if returns:
+            for ret in returns:
+                value = ret.value
+                if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                        and value.func.id in class_names):
+                    constructed = None
+                    break
+                if constructed is None:
+                    constructed = value.func.id
+                elif constructed != value.func.id:
+                    constructed = None
+                    break
+        by_name.setdefault(node.name, []).append(constructed)
+    return {name: outcomes[0] for name, outcomes in by_name.items()
+            if len(outcomes) == 1 and outcomes[0] is not None}
+
+
+def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
+    """Map (class, attribute) pairs to the class constructed for them.
+
+    For each top-level class, collect ``self.<attr> = <ClassName>(...)``
+    assignments across its directly defined methods (including assignments
+    inside nested definitions, whose closures still capture ``self``).
+    An assignment may also call a same-file factory function whose every
+    return constructs the same class (see
+    ``_python_factory_return_classes``). An attribute qualifies only when
+    every such assignment constructs the same top-level class defined in
+    the same file; any other assignment shape, a different class, or a
+    class not defined in this file disqualifies it. Non-Python files and
+    syntax-invalid Python produce no bindings.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    factory_classes = _python_factory_return_classes(path, source)
     candidates: dict[tuple[str, str], set[str | None]] = {}
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
@@ -2185,7 +2241,10 @@ def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str
                 else:
                     continue
                 if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-                    constructed: str | None = value.func.id
+                    if value.func.id in class_names:
+                        constructed: str | None = value.func.id
+                    else:
+                        constructed = factory_classes.get(value.func.id)
                 else:
                     constructed = None
                 for target in targets:
