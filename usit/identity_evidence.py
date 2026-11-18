@@ -2315,7 +2315,11 @@ def _python_cross_file_instance_bindings(
     cross-file binding. A dotted constructed name
     (``auth.AuthHelper()``) resolves instead through the file's module
     bindings (P15): the module local name maps to a scanned module,
-    and the target file must directly define the class. The import may be absolute or relative (``from
+    and the target file must directly define the class. A bare imported
+    name that is not a class may instead be a factory function of the
+    target file (P16): when the target file's
+    ``_python_factory_return_classes`` maps it to a class, the binding
+    records that class. The import may be absolute or relative (``from
     .auth import AuthHelper``); an ``as`` alias binds under the local
     name. A local name shadowed by a module-level definition or
     assignment, imported from two different modules, or imported from a
@@ -2386,6 +2390,15 @@ def _python_cross_file_instance_bindings(
             target_path, imported_name = next(iter(targets))
             if imported_name in _python_top_level_class_names(code_by_file[target_path]):
                 bindings[(cls, attr)] = (target_path, imported_name)
+                continue
+            # P16: the imported name may be a factory function whose
+            # every return constructs the same top-level class of the
+            # target file (P13 rules, applied to the target file).
+            factory_classes = _python_factory_return_classes(
+                target_path, code_by_file[target_path])
+            constructed_class = factory_classes.get(imported_name)
+            if constructed_class is not None:
+                bindings[(cls, attr)] = (target_path, constructed_class)
         if bindings:
             result[path] = bindings
     return result
