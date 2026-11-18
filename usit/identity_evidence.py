@@ -1971,11 +1971,13 @@ def _ts_cross_file_instance_bindings(
 
     The TS mirror of ``_python_imported_identity_helpers`` for instance
     attributes: for each file, take the ``_ts_class_scan`` candidates
-    whose constructed class is not a top-level class of the same file
-    (those are the same-file T2 bindings) and, when the constructed
-    name is a named import (or a default import, T11) resolving to a
-    project file that defines the imported name as a top-level class,
-    record the cross-file binding. The import may be relative or a
+    and resolve every constructed name to a (file, class) target (T14);
+    when all names resolve to the same target in another file, record
+    the cross-file binding. A target in the same file is a same-file
+    T2 binding, not a cross-file one. When the constructed name is a
+    named import (or a default import, T11) resolving to a project
+    file that defines the imported name as a top-level class, record
+    the cross-file binding. The import may be relative or a
     ``tsconfig`` path alias (T7). The T2 disqualification rule applies
     first: an attribute with a non-construction binding or two
     different constructed classes is dropped here too.
@@ -1993,24 +1995,24 @@ def _ts_cross_file_instance_bindings(
             candidates.setdefault(key, set()).update(constructed)
         imports = _ts_import_bindings(path, source)
         bindings: dict[tuple[str, str], tuple[str, str]] = {}
-        for (cls, attr), constructed in candidates.items():
-            if len(constructed) != 1:
-                continue
-            only = next(iter(constructed))
-            if only is None or only in class_names:
-                continue
+        def _resolve(name: str | None) -> tuple[str, str] | None:
+            # T14: resolve one constructed name to its (file, class)
+            # target, or None when it resolves nowhere. The T3/T9/T11
+            # single-name rules are unchanged; only the caller is new.
+            if name is None or name in class_names:
+                return (path, name) if name is not None else None
             default_import = False
-            if "." in only:
+            if "." in name:
                 # T9: a namespaced construction, `new ns.Class(...)`,
                 # resolves through the namespace import, not a named
                 # import; the class must be a top-level class of the
                 # namespace's target file.
-                namespace, imported = only.split(".", 1)
+                namespace, imported = name.split(".", 1)
                 specifier = _ts_namespace_imports(path, source).get(namespace)
                 if specifier is None:
-                    continue
+                    return None
             else:
-                binding = imports.get(only)
+                binding = imports.get(name)
                 if binding is not None:
                     specifier, imported = binding
                 else:
@@ -2018,20 +2020,35 @@ def _ts_cross_file_instance_bindings(
                     # "./auth"`, binds to the target file's
                     # default-exported class; the class name is read
                     # from the target file below.
-                    specifier = _ts_default_import_bindings(path, source).get(only)
+                    specifier = _ts_default_import_bindings(path, source).get(name)
                     if specifier is None:
-                        continue
+                        return None
                     default_import = True
             target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is None or target == path:
-                continue
+                return None
             if default_import:
                 imported = _ts_default_export_class(target, code_by_file[target])
                 if imported is None:
-                    continue
+                    return None
             _m, _r, _c, target_classes, _d = _ts_class_scan(target, code_by_file[target])
-            if imported in target_classes:
-                bindings[(cls, attr)] = (target, imported)
+            if imported not in target_classes:
+                return None
+            return (target, imported)
+
+        for (cls, attr), constructed in candidates.items():
+            # T14: every constructed name must resolve to the same
+            # cross-file (file, class); a name that resolves nowhere,
+            # or two names resolving to different targets, drops the
+            # attribute (fail closed). A target in this file is the
+            # same-file T2 binding, not a cross-file one.
+            resolved = {_resolve(name) for name in constructed}
+            if None in resolved or len(resolved) != 1:
+                continue
+            target = next(iter(resolved))
+            if target is None or target[0] == path:
+                continue
+            bindings[(cls, attr)] = target
         if bindings:
             result[path] = bindings
     return result

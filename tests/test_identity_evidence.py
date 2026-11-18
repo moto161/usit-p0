@@ -2850,6 +2850,212 @@ class TsCrossFileClassReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][0]["path"], "handlers.ts")
 
 
+class TsMultiNameSameTargetTests(unittest.TestCase):
+    def _rows_files(self, files, ts_config=None):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+            if ts_config is not None:
+                (root / "tsconfig.json").write_text(ts_config, encoding="utf-8")
+            js_ts_source = {}
+            for name, source in files.items():
+                if name.endswith(".vue"):
+                    script = vue_script_for_adapter(source)
+                    if script is not None:
+                        js_ts_source[name] = script
+                elif Path(name).suffix.lower() in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+                    js_ts_source[name] = source
+            parsed = analyze_js_ts_project(root, [], js_ts_source=js_ts_source)
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners, ts_config=ts_config)
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _AUTH = (
+        "export class AuthHelper {\n"
+        "  get_uid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    _AUTH_DEFAULT = (
+        "export default class AuthHelper {\n"
+        "  get_uid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def _handler(self, import_block, assign_ctor, assign_setup,
+                 method="get_uid", tail="uid"):
+        lines = import_block.split("\n") + [
+            "",
+            "export class PhotoHandler {",
+            "  constructor() {",
+            f"    this.helper = {assign_ctor};",
+            "  }",
+            "  setup() {",
+            f"    this.helper = {assign_setup};",
+            "  }",
+            "  load(req: any) {",
+        ]
+        if tail == "uid":
+            lines += [
+                f"    const uid = this.helper.{method}(req);",
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);',
+            ]
+        else:
+            lines += [
+                f"    const owner = this.helper.{method}(req);",
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);',
+            ]
+        lines += ["  }", "}"]
+        return "\n".join(lines) + "\n"
+
+    def test_bare_named_and_dotted_namespace_mixed_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": self._handler(
+                'import { AuthHelper } from "./auth";\nimport * as auth from "./auth";',
+                "new AuthHelper()", "new auth.AuthHelper()"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 13)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 12, 13])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:11")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_bare_default_and_dotted_namespace_mixed_binds(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH_DEFAULT,
+            "handlers.ts": self._handler(
+                'import Helper from "./auth";\nimport * as auth from "./auth";',
+                "new Helper()", "new auth.AuthHelper()"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_relative_named_and_aliased_named_mixed_binds(self):
+        rows = self._rows_files({
+            "src/auth.ts": self._AUTH,
+            "src/handlers.ts": self._handler(
+                'import { AuthHelper } from "./auth";\n'
+                'import { AuthHelper as AliasedHelper } from "@/auth";',
+                "new AuthHelper()", "new AliasedHelper()"),
+        }, ts_config='{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}\n')
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/auth.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_mixed_returning_request_identity_binds(self):
+        rows = self._rows_files({
+            "auth.ts": (
+                "export class AuthHelper {\n"
+                "  get_owner(req: any) {\n"
+                "    return req.body.user_id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler(
+                'import { AuthHelper } from "./auth";\nimport * as auth from "./auth";',
+                "new AuthHelper()", "new auth.AuthHelper()",
+                method="get_owner", tail="owner"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_owner")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.ts")
+
+    def test_mixed_with_local_direct_class_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": (
+                'import * as auth from "./auth";\n\n' + self._AUTH + "\n"
+                + self._handler("", "new auth.AuthHelper()", "new AuthHelper()")
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_with_other_module_class_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "other.ts": (
+                "export class OtherHelper {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.session.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler(
+                'import * as auth from "./auth";\nimport { OtherHelper } from "./other";',
+                "new auth.AuthHelper()", "new OtherHelper()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_with_non_construction_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": self._handler(
+                'import { AuthHelper } from "./auth";\nimport * as auth from "./auth";',
+                "new AuthHelper()", "5"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_with_unresolvable_namespace_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": self._handler(
+                'import { AuthHelper } from "./auth";\nimport * as external from "./external";',
+                "new AuthHelper()", "new external.AuthHelper()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_with_missing_class_in_target_file_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "handlers.ts": self._handler(
+                'import { AuthHelper } from "./auth";\nimport * as auth from "./auth";',
+                "new AuthHelper()", "new auth.Other()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_mixed_with_ambiguous_import_does_not_bind(self):
+        rows = self._rows_files({
+            "auth.ts": self._AUTH,
+            "other.ts": (
+                "export class AuthHelper {\n"
+                "  get_uid(req: any) {\n"
+                "    return req.body.user_id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler(
+                'import { AuthHelper } from "./auth";\n'
+                'import { AuthHelper } from "./other";\n'
+                'import * as auth from "./auth";',
+                "new AuthHelper()", "new auth.AuthHelper()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
 class TsInheritedMethodReturnPropagationTests(unittest.TestCase):
     def _rows_files(self, files):
         with tempfile.TemporaryDirectory() as td:
