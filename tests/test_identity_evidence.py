@@ -4827,16 +4827,15 @@ class IdentityModuleAttributeConstructionTests(unittest.TestCase):
         })
         self.assertEqual(self._direct_bindings(rows), [])
 
-    def test_module_attr_factory_does_not_bind(self):
+    def test_module_attr_factory_from_unscanned_module_does_not_bind(self):
+        # Boundary moved in P17: a module-attribute factory whose
+        # class is defined in the factory's own file now binds (see
+        # IdentityModuleAttributeFactoryTests.test_module_attr_factory_binds);
+        # this test now pins the next boundary, a factory accessed
+        # through a module outside the scan.
         rows = extract_identity_evidence({
-            "auth.py": (
-                self._AUTH
-                + "\n"
-                + "def make_auth_helper():\n"
-                "    return AuthHelper()\n"
-            ),
             "server/photos.py": self._photos(
-                "import auth", "self.helper = auth.make_auth_helper()"),
+                "import external", "self.helper = external.make_auth_helper()"),
         })
         self.assertEqual(self._direct_bindings(rows), [])
 
@@ -5074,6 +5073,199 @@ class IdentityCrossFileFactoryTests(unittest.TestCase):
                 "\n"
                 "    def setup(self):\n"
                 "        self.helper = AuthHelper()\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.helper.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
+class IdentityModuleAttributeFactoryTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _AUTH = (
+        "class AuthHelper:\n"
+        "    def get_uid(self, req):\n"
+        "        return req.user.id\n"
+    )
+
+    _FACTORY = (
+        "def make_auth_helper():\n"
+        "    return AuthHelper()\n"
+    )
+
+    def _auth(self, factory=_FACTORY, helper=_AUTH):
+        return helper + "\n" + factory
+
+    def _photos(self, import_line, assign="self.helper = auth.make_auth_helper()"):
+        return (
+            import_line + "\n\n"
+            "class PhotoHandler:\n"
+            "    def __init__(self):\n"
+            f"        {assign}\n"
+            "\n"
+            "    def list_photos(self, request):\n"
+            "        uid = self.helper.get_uid(request)\n"
+            '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+        )
+
+    def test_module_attr_factory_binds(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._auth(),
+            "server/photos.py": self._photos("import auth"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:server/photos.py#list_photos:7")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_from_package_import_module_factory_binds(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(),
+            "server/photos.py": self._photos("from server import auth"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_dotted_module_import_with_alias_factory_binds(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(),
+            "server/photos.py": self._photos("import server.auth as auth"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_aliased_module_factory_binds(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._auth(),
+            "server/photos.py": self._photos(
+                "import auth as a", "self.helper = a.make_auth_helper()"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_relative_module_factory_binds(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(),
+            "server/photos.py": self._photos("from . import auth"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/auth.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_uid")
+
+    def test_module_attr_factory_returning_request_identity_binds(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(
+                helper=(
+                    "class AuthHelper:\n"
+                    "    def get_owner(self, req):\n"
+                    "        return req.body.user_id\n"
+                )),
+            "server/photos.py": (
+                "from server import auth\n"
+                "\n"
+                "class PhotoHandler:\n"
+                "    def __init__(self):\n"
+                "        self.helper = auth.make_auth_helper()\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        owner = self.helper.get_owner(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (owner,))\n'
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "AuthHelper.get_owner")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/auth.py")
+
+    def test_module_attr_factory_returning_imported_class_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/base.py": self._AUTH,
+            "server/auth.py": "from server.base import AuthHelper\n\n" + self._FACTORY,
+            "server/photos.py": self._photos("from server import auth"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_module_attr_factory_mixed_return_with_none_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(
+                "def make_auth_helper(flag):\n"
+                "    if flag:\n"
+                "        return AuthHelper()\n"
+                "    return None\n"),
+            "server/photos.py": self._photos(
+                "from server import auth",
+                "self.helper = auth.make_auth_helper(True)"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_module_attr_factory_variable_return_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(
+                "def make_auth_helper():\n"
+                "    h = AuthHelper()\n"
+                "    return h\n"),
+            "server/photos.py": self._photos("from server import auth"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_three_segment_factory_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(),
+            "server/photos.py": self._photos(
+                "import server.auth", "self.helper = server.auth.make_auth_helper()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_reexported_factory_via_module_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(),
+            "server/mid.py": "from server.auth import make_auth_helper\n",
+            "server/photos.py": self._photos(
+                "from server import mid", "self.helper = mid.make_auth_helper()"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_shadowed_module_name_factory_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "auth.py": self._auth(),
+            "server/photos.py": self._photos("import auth\n\nauth = 5"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_module_attr_factory_and_direct_same_class_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/auth.py": self._auth(),
+            "server/photos.py": (
+                "from server import auth\n"
+                "\n"
+                "class PhotoHandler:\n"
+                "    def __init__(self):\n"
+                "        self.helper = auth.make_auth_helper()\n"
+                "\n"
+                "    def setup(self):\n"
+                "        self.helper = auth.AuthHelper()\n"
                 "\n"
                 "    def list_photos(self, request):\n"
                 "        uid = self.helper.get_uid(request)\n"
