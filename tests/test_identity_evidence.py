@@ -6109,6 +6109,269 @@ class IdentitySelfMethodDelegationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth._get_uid")
 
 
+class TsSecondHopReturnPropagationTests(unittest.TestCase):
+    def _rows_files(self, files, ts_config=None):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+            if ts_config is not None:
+                (root / "tsconfig.json").write_text(ts_config, encoding="utf-8")
+            js_ts_source = {n: s for n, s in files.items()
+                            if Path(n).suffix.lower() in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")}
+            parsed = analyze_js_ts_project(root, [], js_ts_source=js_ts_source)
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners, ts_config=ts_config)
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    _BASE = (
+        "export class BaseAuth {\n"
+        "  getUid(req: any) {\n"
+        "    return req.user.id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    _BASE_OWNER = (
+        "export class BaseAuth {\n"
+        "  getOwner(req: any) {\n"
+        "    return req.body.user_id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def _mid(self, import_block, assign_inner, body, method="getUid"):
+        return (
+            import_block + "\n\n"
+            "export class MidAuth {\n"
+            "  constructor() {\n"
+            f"    {assign_inner}\n"
+            "  }\n"
+            f"  {method}(req: any) {{\n"
+            f"    {body}\n"
+            "  }\n"
+            "}\n"
+        )
+
+    def _handler(self, import_block, assign_helper="this.helper = new MidAuth();", tail="uid"):
+        body = (
+            import_block + "\n\n"
+            "export class PhotoHandler {\n"
+            "  constructor() {\n"
+            f"    {assign_helper}\n"
+            "  }\n"
+            "  load(req: any) {\n"
+        )
+        if tail == "uid":
+            body += (
+                "    const uid = this.helper.getUid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            )
+        else:
+            body += (
+                "    const owner = this.helper.getOwner(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+            )
+        return body + "  }\n}\n"
+
+    def test_cross_file_second_hop_via_instance_attribute_binds(self):
+        rows = self._rows_files({
+            "base.ts": self._BASE,
+            "mid.ts": self._mid(
+                'import { BaseAuth } from "./base";',
+                "this.inner = new BaseAuth();",
+                "return this.inner.getUid(req);"),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 8, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "base.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.getUid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["details"]["propagation"][1]["path"], "mid.ts")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getUid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:7")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_same_file_second_hop_binds(self):
+        rows = self._rows_files({
+            "base.ts": self._BASE,
+            "handlers.ts": (
+                self._mid('import { BaseAuth } from "./base";',
+                          "this.inner = new BaseAuth();",
+                          "return this.inner.getUid(req);")
+                + "\n"
+                + self._handler("", "this.helper = new MidAuth();")
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 8, 19, 20])
+        self.assertEqual(binding["details"]["propagation"][1]["path"], "handlers.ts")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getUid")
+
+    def test_second_hop_via_namespace_import_binds(self):
+        rows = self._rows_files({
+            "base.ts": self._BASE,
+            "mid.ts": self._mid(
+                'import * as base from "./base";',
+                "this.inner = new base.BaseAuth();",
+                "return this.inner.getUid(req);"),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][1]["path"], "mid.ts")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getUid")
+
+    def test_second_hop_returning_request_identity_binds(self):
+        rows = self._rows_files({
+            "base.ts": self._BASE_OWNER,
+            "mid.ts": self._mid(
+                'import { BaseAuth } from "./base";',
+                "this.inner = new BaseAuth();",
+                "return this.inner.getOwner(req);",
+                method="getOwner"),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";', tail="owner"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.getOwner")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getOwner")
+
+    def test_intermediate_mixed_direct_and_delegation_does_not_bind(self):
+        rows = self._rows_files({
+            "base.ts": self._BASE,
+            "mid.ts": (
+                'import { BaseAuth } from "./base";\n\n'
+                "export class MidAuth {\n"
+                "  constructor() {\n"
+                "    this.inner = new BaseAuth();\n"
+                "  }\n"
+                "  getUid(req: any) {\n"
+                "    if (req === null) {\n"
+                "      return req.user.id;\n"
+                "    }\n"
+                "    return this.inner.getUid(req);\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_second_hop_attribute_two_classes_does_not_bind(self):
+        rows = self._rows_files({
+            "base.ts": self._BASE,
+            "other.ts": (
+                "export class OtherAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.session.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "mid.ts": (
+                'import { BaseAuth } from "./base";\n'
+                'import { OtherAuth } from "./other";\n\n'
+                "export class MidAuth {\n"
+                "  constructor() {\n"
+                "    this.inner = new BaseAuth();\n"
+                "  }\n"
+                "  setup() {\n"
+                "    this.inner = new OtherAuth();\n"
+                "  }\n"
+                "  getUid(req: any) {\n"
+                "    return this.inner.getUid(req);\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_second_hop_attribute_non_construction_does_not_bind(self):
+        rows = self._rows_files({
+            "base.ts": self._BASE,
+            "mid.ts": self._mid(
+                'import { BaseAuth } from "./base";',
+                "this.inner = 5;",
+                "return this.inner.getUid(req);"),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_second_hop_target_not_identity_does_not_bind(self):
+        rows = self._rows_files({
+            "base.ts": (
+                "export class BaseAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.session.token;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "mid.ts": self._mid(
+                'import { BaseAuth } from "./base";',
+                "this.inner = new BaseAuth();",
+                "return this.inner.getUid(req);"),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_intermediate_two_delegated_returns_to_same_target_binds(self):
+        rows = self._rows_files({
+            "base.ts": self._BASE,
+            "mid.ts": (
+                'import { BaseAuth } from "./base";\n\n'
+                "export class MidAuth {\n"
+                "  constructor() {\n"
+                "    this.inner = new BaseAuth();\n"
+                "  }\n"
+                "  getUid(req: any) {\n"
+                "    if (req === null) {\n"
+                "      return this.inner.getUid(req);\n"
+                "    }\n"
+                "    return this.inner.getUid(req);\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 9, 11, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getUid")
+        self.assertEqual(binding["details"]["propagation"][2]["function"], "MidAuth.getUid")
+
+    def test_second_hop_via_tsconfig_paths_alias_binds(self):
+        rows = self._rows_files({
+            "src/base.ts": self._BASE,
+            "src/mid.ts": self._mid(
+                'import { BaseAuth } from "@/base";',
+                "this.inner = new BaseAuth();",
+                "return this.inner.getUid(req);"),
+            "src/handlers.ts": self._handler('import { MidAuth } from "@/mid";'),
+        }, ts_config='{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}\n')
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "src/base.ts")
+        self.assertEqual(binding["details"]["propagation"][1]["path"], "src/mid.ts")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getUid")
+
+
 class TsConfigPathsImportTests(unittest.TestCase):
     def _rows_files(self, files, ts_config=None):
         with tempfile.TemporaryDirectory() as td:

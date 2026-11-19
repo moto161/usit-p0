@@ -933,6 +933,7 @@ _TS_EXTENDS_RE = re.compile(
     r"([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b"
 )
 _TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
+_TS_THIS_ATTR_CALL_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(")
 _PY_SUPER_CALL_RE = re.compile(r"^super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_ATTR_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_METHOD_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\s*\(")
@@ -1540,19 +1541,24 @@ def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str],
 
 
 def _ts_all_identity_return_methods(
-        code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
+        code_by_file: dict[str, str],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None
+        ) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
     """Project-wide TS identity return profiles, including super delegation.
 
     Direct profiles first, then up to 8 fixpoint rounds resolving
-    methods whose every direct return is an identity expression or a
+    methods whose every direct return is an identity expression, a
     ``super.<method>(...)`` call to an already-profiled base method
-    (T4 chain walk, ``skip_self=True``). All returns must agree on
-    kind, expression and delegation steps: a direct return mixed with
-    a super-delegated return, or super calls to different targets,
-    disqualifies the method. A delegating profile carries
-    ``delegation``: the target profile's return evidence items (its
-    own delegation first, then its return lines), each
-    ``{path, line, function, returns}``.
+    (T4 chain walk, ``skip_self=True``), or a
+    ``this.<attr>.<method>(...)`` call delegating through an instance
+    attribute whose class resolves via the file's same-file (T2) or
+    cross-file (T3/T9/T11/T14) attribute map (T15 second hop). All
+    returns must agree on kind, expression and delegation steps: a
+    direct return mixed with a delegated return, or delegated calls
+    to different targets, disqualifies the method. A delegating
+    profile carries ``delegation``: the target profile's return
+    evidence items (its own delegation first, then its return
+    lines), each ``{path, line, function, returns}``.
     """
     scans = {
         path: _ts_class_scan(path, source)
@@ -1560,6 +1566,19 @@ def _ts_all_identity_return_methods(
         if not path.lower().endswith(".py")
     }
     bases = _ts_base_classes(code_by_file)
+    # T15: per-file merged (class, attribute) -> (file, class) map
+    # for second-hop delegation: same-file T2 bindings (values
+    # wrapped as (path, class)) plus cross-file T3/T9/T11/T14
+    # bindings; the two are mutually exclusive per attribute.
+    cross_attr = _ts_cross_file_instance_bindings(code_by_file, ts_paths)
+    attr_classes: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
+    for _path, _source in code_by_file.items():
+        if _path.lower().endswith(".py"):
+            continue
+        _merged = {(k[0], k[1]): (_path, v)
+                   for k, v in _ts_instance_attribute_classes(_path, _source).items()}
+        _merged.update(cross_attr.get(_path, {}))
+        attr_classes[_path] = _merged
     defined = {path: scan[4] for path, scan in scans.items()}
     profiles = {
         path: _ts_direct_identity_profiles(path, scan[0])
@@ -1581,12 +1600,29 @@ def _ts_all_identity_return_methods(
                         kind, expr = "request", text
                     else:
                         match = _TS_SUPER_CALL_RE.match(text)
-                        if not match:
-                            profile = None
-                            break
-                        target = _ts_method_profile(
-                            path, key[0], match.group(1), profiles, defined, bases,
-                            skip_self=True)
+                        if match is not None:
+                            target = _ts_method_profile(
+                                path, key[0], match.group(1), profiles, defined, bases,
+                                skip_self=True)
+                        else:
+                            # T15: `return this.<attr>.<method>(...)`
+                            # delegates through an instance attribute
+                            # whose class resolves via the file's
+                            # attribute map (same-file T2 or cross-file
+                            # T3/T9/T11/T14); the target method must
+                            # already have a profile.
+                            attr_match = _TS_THIS_ATTR_CALL_RE.match(text)
+                            if attr_match is None:
+                                profile = None
+                                break
+                            attr_target = attr_classes.get(path, {}).get(
+                                (key[0], attr_match.group(1)))
+                            if attr_target is None:
+                                profile = None
+                                break
+                            target = _ts_method_profile(
+                                attr_target[0], attr_target[1], attr_match.group(2),
+                                profiles, defined, bases)
                         if target is None:
                             profile = None
                             break
@@ -2733,7 +2769,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         for file_path, file_source in code_by_file.items()
         if file_path.lower().endswith(".py")
     }
-    ts_same_file_methods = _ts_all_identity_return_methods(effective_code_by_file)
+    ts_same_file_methods = _ts_all_identity_return_methods(effective_code_by_file, ts_paths)
     ts_same_file_functions = {
         file_path: _ts_top_level_function_profiles(file_path, file_source)
         for file_path, file_source in effective_code_by_file.items()
