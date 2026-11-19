@@ -656,9 +656,11 @@ def _python_all_identity_return_methods(
     ``super().<method>(...)`` / ``super(X, self).<method>(...)`` call
     to an already-profiled base method (P9 chain walk, ``skip_self=True``;
     P10 resolves the target over the C3 MRO, with ``super(X, self)``
-    starting after X), or a ``self.<attr>.<method>(...)`` call delegating
+    starting after X), a ``self.<attr>.<method>(...)`` call delegating
     through an instance attribute whose class resolves via the file's
-    same-file (P8) or cross-file (P14-P18) attribute map (P19 second hop).
+    same-file (P8) or cross-file (P14-P18) attribute map (P19 second hop),
+    or a ``self.<method>(...)`` call delegating to another method of the
+    same class, resolved over the MRO (P20).
     All returns must agree on kind, expression and delegation
     steps: a direct return mixed with a super-delegated return, or
     super calls to different targets, disqualifies the method. A
@@ -722,17 +724,28 @@ def _python_all_identity_return_methods(
                             # P14-P18); the target method must already
                             # have a profile.
                             attr_match = _PY_SELF_ATTR_CALL_RE.match(text)
-                            if attr_match is None:
-                                profile = None
-                                break
-                            attr_target = attr_classes.get(path, {}).get(
-                                (key[0], attr_match.group(1)))
-                            if attr_target is None:
-                                profile = None
-                                break
-                            target = _python_method_profile(
-                                attr_target[0], attr_target[1], attr_match.group(2),
-                                profiles, defined, bases)
+                            if attr_match is not None:
+                                attr_target = attr_classes.get(path, {}).get(
+                                    (key[0], attr_match.group(1)))
+                                if attr_target is None:
+                                    profile = None
+                                    break
+                                target = _python_method_profile(
+                                    attr_target[0], attr_target[1], attr_match.group(2),
+                                    profiles, defined, bases)
+                            else:
+                                # P20: `return self.<method>(...)`
+                                # delegates to another method of the
+                                # same class, resolved over the MRO;
+                                # the target method must already have
+                                # a profile.
+                                method_match = _PY_SELF_METHOD_CALL_RE.match(text)
+                                if method_match is None:
+                                    profile = None
+                                    break
+                                target = _python_method_profile(
+                                    path, key[0], method_match.group(1),
+                                    profiles, defined, bases)
                         if target is None:
                             profile = None
                             break
@@ -922,6 +935,7 @@ _TS_EXTENDS_RE = re.compile(
 _TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
 _PY_SUPER_CALL_RE = re.compile(r"^super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_ATTR_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
+_PY_SELF_METHOD_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\s*\(")
 _PY_SUPER_CALL_RHS = re.compile(r"super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(.*\)$")
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_CLASS_FIELD_ARROW_RE = re.compile(
