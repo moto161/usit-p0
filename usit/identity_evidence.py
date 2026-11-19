@@ -934,6 +934,7 @@ _TS_EXTENDS_RE = re.compile(
 )
 _TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
 _TS_THIS_ATTR_CALL_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(")
+_TS_THIS_METHOD_CALL_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)\s*\(")
 _PY_SUPER_CALL_RE = re.compile(r"^super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_ATTR_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_METHOD_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\s*\(")
@@ -1549,10 +1550,12 @@ def _ts_all_identity_return_methods(
     Direct profiles first, then up to 8 fixpoint rounds resolving
     methods whose every direct return is an identity expression, a
     ``super.<method>(...)`` call to an already-profiled base method
-    (T4 chain walk, ``skip_self=True``), or a
+    (T4 chain walk, ``skip_self=True``), a
     ``this.<attr>.<method>(...)`` call delegating through an instance
     attribute whose class resolves via the file's same-file (T2) or
-    cross-file (T3/T9/T11/T14) attribute map (T15 second hop). All
+    cross-file (T3/T9/T11/T14) attribute map (T15 second hop), or a
+    ``this.<method>(...)`` call delegating to another method of the
+    same class, resolved over the extends chain (T16). All
     returns must agree on kind, expression and delegation steps: a
     direct return mixed with a delegated return, or delegated calls
     to different targets, disqualifies the method. A delegating
@@ -1612,17 +1615,28 @@ def _ts_all_identity_return_methods(
                             # T3/T9/T11/T14); the target method must
                             # already have a profile.
                             attr_match = _TS_THIS_ATTR_CALL_RE.match(text)
-                            if attr_match is None:
-                                profile = None
-                                break
-                            attr_target = attr_classes.get(path, {}).get(
-                                (key[0], attr_match.group(1)))
-                            if attr_target is None:
-                                profile = None
-                                break
-                            target = _ts_method_profile(
-                                attr_target[0], attr_target[1], attr_match.group(2),
-                                profiles, defined, bases)
+                            if attr_match is not None:
+                                attr_target = attr_classes.get(path, {}).get(
+                                    (key[0], attr_match.group(1)))
+                                if attr_target is None:
+                                    profile = None
+                                    break
+                                target = _ts_method_profile(
+                                    attr_target[0], attr_target[1], attr_match.group(2),
+                                    profiles, defined, bases)
+                            else:
+                                # T16: `return this.<method>(...)`
+                                # delegates to another method of the
+                                # same class, resolved over the extends
+                                # chain; the target method must already
+                                # have a profile.
+                                method_match = _TS_THIS_METHOD_CALL_RE.match(text)
+                                if method_match is None:
+                                    profile = None
+                                    break
+                                target = _ts_method_profile(
+                                    path, key[0], method_match.group(1),
+                                    profiles, defined, bases)
                         if target is None:
                             profile = None
                             break

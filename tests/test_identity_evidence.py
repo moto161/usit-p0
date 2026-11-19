@@ -6372,6 +6372,284 @@ class TsSecondHopReturnPropagationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getUid")
 
 
+class TsSelfMethodDelegationTests(unittest.TestCase):
+    def _rows_files(self, files, ts_config=None):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+            if ts_config is not None:
+                (root / "tsconfig.json").write_text(ts_config, encoding="utf-8")
+            js_ts_source = {n: s for n, s in files.items()
+                            if Path(n).suffix.lower() in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")}
+            parsed = analyze_js_ts_project(root, [], js_ts_source=js_ts_source)
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners, ts_config=ts_config)
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    def _handler(self, import_block, assign_helper="this.helper = new MidAuth();", tail="uid"):
+        body = (
+            import_block + "\n\n"
+            "export class PhotoHandler {\n"
+            "  constructor() {\n"
+            f"    {assign_helper}\n"
+            "  }\n"
+            "  load(req: any) {\n"
+        )
+        if tail == "uid":
+            body += (
+                "    const uid = this.helper.getUid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+            )
+        else:
+            body += (
+                "    const owner = this.helper.getOwner(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+            )
+        return body + "  }\n}\n"
+
+    def test_self_method_delegation_binds(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return this._getUid(req);\n"
+                "  }\n"
+                "\n"
+                "  _getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [7, 3, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "mid.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth._getUid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getUid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:7")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_self_method_delegation_to_base_class_binds(self):
+        rows = self._rows_files({
+            "base.ts": (
+                "export class BaseAuth {\n"
+                "  _getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "mid.ts": (
+                'import { BaseAuth } from "./base";\n\n'
+                "export class MidAuth extends BaseAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return this._getUid(req);\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 5, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "base.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth._getUid")
+
+    def test_self_method_delegation_returning_request_identity_binds(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getOwner(req: any) {\n"
+                "    return this._getOwner(req);\n"
+                "  }\n"
+                "\n"
+                "  _getOwner(req: any) {\n"
+                "    return req.body.user_id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";', tail="owner"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth._getOwner")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getOwner")
+
+    def test_two_step_self_method_delegation_binds(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return this._a(req);\n"
+                "  }\n"
+                "\n"
+                "  _a(req: any) {\n"
+                "    return this._b(req);\n"
+                "  }\n"
+                "\n"
+                "  _b(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [11, 7, 3, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth._b")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth._a")
+
+    def test_target_method_mixed_returns_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return this._getUid(req);\n"
+                "  }\n"
+                "\n"
+                "  _getUid(req: any) {\n"
+                "    if (req === null) {\n"
+                "      return req.user.id;\n"
+                "    }\n"
+                "    return req.session.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_target_method_missing_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return this._missing(req);\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_direct_and_self_delegation_mixed_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    if (req === null) {\n"
+                "      return req.user.id;\n"
+                "    }\n"
+                "    return this._getUid(req);\n"
+                "  }\n"
+                "\n"
+                "  _getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_self_method_delegation_cycle_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return this._getUid(req);\n"
+                "  }\n"
+                "\n"
+                "  _getUid(req: any) {\n"
+                "    return this.getUid(req);\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_self_method_delegation_to_super_delegated_method_binds(self):
+        rows = self._rows_files({
+            "base.ts": (
+                "export class BaseAuth {\n"
+                "  _getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "mid.ts": (
+                'import { BaseAuth } from "./base";\n\n'
+                "export class MidAuth extends BaseAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return this._getUid(req);\n"
+                "  }\n"
+                "\n"
+                "  _getUid(req: any) {\n"
+                "    return super._getUid(req);\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 9, 5, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth._getUid")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth._getUid")
+
+    def test_self_method_delegation_to_attribute_delegated_method_binds(self):
+        rows = self._rows_files({
+            "base.ts": (
+                "export class BaseAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "mid.ts": (
+                'import { BaseAuth } from "./base";\n\n'
+                "export class MidAuth {\n"
+                "  constructor() {\n"
+                "    this.inner = new BaseAuth();\n"
+                "  }\n"
+                "  getUid(req: any) {\n"
+                "    return this._getUid(req);\n"
+                "  }\n"
+                "\n"
+                "  _getUid(req: any) {\n"
+                "    return this.inner.getUid(req);\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 12, 8, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.getUid")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth._getUid")
+
+
 class TsConfigPathsImportTests(unittest.TestCase):
     def _rows_files(self, files, ts_config=None):
         with tempfile.TemporaryDirectory() as td:
