@@ -652,11 +652,14 @@ def _python_all_identity_return_methods(
     """Project-wide Python identity return profiles, including super() delegation.
 
     Direct profiles first, then up to 8 fixpoint rounds resolving
-    methods whose every direct return is an identity expression or a
+    methods whose every direct return is an identity expression, a
     ``super().<method>(...)`` / ``super(X, self).<method>(...)`` call
     to an already-profiled base method (P9 chain walk, ``skip_self=True``;
     P10 resolves the target over the C3 MRO, with ``super(X, self)``
-    starting after X). All returns must agree on kind, expression and delegation
+    starting after X), or a ``self.<attr>.<method>(...)`` call delegating
+    through an instance attribute whose class resolves via the file's
+    same-file (P8) or cross-file (P14-P18) attribute map (P19 second hop).
+    All returns must agree on kind, expression and delegation
     steps: a direct return mixed with a super-delegated return, or
     super calls to different targets, disqualifies the method. A
     delegating profile carries ``delegation``: the target profile's
@@ -677,6 +680,20 @@ def _python_all_identity_return_methods(
         path: _python_direct_identity_profiles(path, methods)
         for path, methods in scans.items()
     }
+    # P19: per-file (class, attribute) -> (file, class), merging the
+    # same-file map (P8) with the cross-file map (P14-P18); a pair
+    # resolves at most one way, so the merge cannot collide.
+    cross_attr = _python_cross_file_instance_bindings(code_by_file)
+    attr_classes = {
+        path: {
+            **{(cls, attr): (path, klass)
+               for (cls, attr), klass in
+               _python_instance_attribute_classes(path, source).items()},
+            **cross_attr.get(path, {}),
+        }
+        for path, source in code_by_file.items()
+        if path.lower().endswith(".py")
+    }
     for _round in range(8):
         changed = False
         for path, methods in scans.items():
@@ -693,12 +710,29 @@ def _python_all_identity_return_methods(
                         kind, expr = "request", text
                     else:
                         match = _PY_SUPER_CALL_RE.match(text)
-                        if not match:
-                            profile = None
-                            break
-                        target = _python_method_profile(
-                            path, key[0], match.group(3), profiles, defined, bases,
-                            skip_self=True, after=match.group(2))
+                        if match is not None:
+                            target = _python_method_profile(
+                                path, key[0], match.group(3), profiles, defined, bases,
+                                skip_self=True, after=match.group(2))
+                        else:
+                            # P19: `return self.<attr>.<method>(...)`
+                            # delegates through an instance attribute
+                            # whose class resolves via the file's
+                            # attribute map (same-file P8 or cross-file
+                            # P14-P18); the target method must already
+                            # have a profile.
+                            attr_match = _PY_SELF_ATTR_CALL_RE.match(text)
+                            if attr_match is None:
+                                profile = None
+                                break
+                            attr_target = attr_classes.get(path, {}).get(
+                                (key[0], attr_match.group(1)))
+                            if attr_target is None:
+                                profile = None
+                                break
+                            target = _python_method_profile(
+                                attr_target[0], attr_target[1], attr_match.group(2),
+                                profiles, defined, bases)
                         if target is None:
                             profile = None
                             break
@@ -887,6 +921,7 @@ _TS_EXTENDS_RE = re.compile(
 )
 _TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
 _PY_SUPER_CALL_RE = re.compile(r"^super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(")
+_PY_SELF_ATTR_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
 _PY_SUPER_CALL_RHS = re.compile(r"super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(.*\)$")
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_CLASS_FIELD_ARROW_RE = re.compile(
