@@ -19,8 +19,65 @@ MAX_ADAPTER_SECONDS = MAX_PARSER_TASK_SECONDS
 if MAX_ADAPTER_SECONDS != MAX_PARSER_TASK_SECONDS:
     raise ScanBlocked("SAFETY_LIMIT_CONFIGURATION_INVALID", "Adapter timeout must equal the protocol parser-task limit.")
 EXPECTED_TYPESCRIPT_VERSION = "6.0.3"
-SOURCE_EXTENSIONS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
+SOURCE_EXTENSIONS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue"}
 USIT_ROOT = Path(__file__).resolve().parents[1]
+
+# P3: only function-like symbols own source lines. Classes, interfaces,
+# types and enums do not; lines inside them belong to their methods (or to
+# no function at all when outside any method).
+_FUNCTION_OWNER_KINDS = frozenset({"function", "method"})
+
+
+def ts_function_owners(adapter_result: dict[str, Any]) -> dict[str, dict[int, str]]:
+    """Map source lines to the innermost enclosing TS/JS function symbol.
+
+    Pure function over an ``analyze_js_ts_project`` result (its ``files``
+    mapping). A symbol owns the closed line interval ``[line, end_line]``;
+    nested functions resolve to the innermost one (smallest span wins, then
+    earliest start, then symbol id — the same rule as
+    ``identity_evidence._python_function_owners``). Symbols without a
+    usable ``end_line`` are skipped (fail closed). The owner id is built
+    from the symbol's bare ``name`` and ``line`` (``symbol:<path>#<name>:<line>``):
+    that is the form the scanner uses for graph symbol node ids and the
+    adapter uses for ``caller_symbol_id``, so the owner matches the
+    database-access owner and the graph's symbol lookup. The adapter's
+    ``symbol_id`` field must NOT be reused here: it carries the qualified
+    name (``Class.method``), which matches neither.
+    """
+    owners: dict[str, dict[int, str]] = {}
+    files = adapter_result.get("files")
+    if not isinstance(files, dict):
+        return owners
+    for path, parsed in files.items():
+        if not isinstance(path, str) or not isinstance(parsed, dict):
+            continue
+        symbols = parsed.get("symbols")
+        if not isinstance(symbols, list):
+            continue
+        scopes: list[tuple[int, int, int, str]] = []
+        for symbol in symbols:
+            if not isinstance(symbol, dict):
+                continue
+            if symbol.get("kind") not in _FUNCTION_OWNER_KINDS:
+                continue
+            start = symbol.get("line")
+            end = symbol.get("end_line")
+            name = symbol.get("name")
+            if (not isinstance(start, int) or not isinstance(end, int)
+                    or not isinstance(name, str) or not name
+                    or end < start):
+                continue
+            scopes.append((start, end, end - start,
+                           f"symbol:{path}#{name}:{start}"))
+        if not scopes:
+            continue
+        file_owners: dict[int, str] = {}
+        for start, end, _span, symbol_id in sorted(
+                scopes, key=lambda item: (item[2], item[0], item[3])):
+            for line_no in range(start, end + 1):
+                file_owners.setdefault(line_no, symbol_id)
+        owners[path] = file_owners
+    return owners
 
 
 def _canonical_key(path: Path) -> str:

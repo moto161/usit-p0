@@ -50,6 +50,12 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
         "unsupported": ["runtime evaluation", "reflection", "dynamic computed dispatch", "runtime re-binding certainty"],
         "degradation": "Without Node or the exact project-local TypeScript package, semantic relationships are UNKNOWN.",
     },
+    "Vue": {
+        "parser_name": "typescript-compiler-api", "parser_version": "6.0.3", "level": "PARTIAL_SEMANTIC",
+        "supported": ["Vue SFC <script> block AST", "explicit imports/exports", "project-local symbol and call resolution", "template @event / v-on:event bindings"],
+        "unsupported": ["template compilation", "runtime evaluation", "reflection", "dynamic computed dispatch", "runtime re-binding certainty"],
+        "degradation": "Without Node or the exact project-local TypeScript package, semantic relationships are UNKNOWN. Only the <script> block is parsed; template bindings are extracted textually.",
+    },
     "Java": {
         "parser_name": "heuristic-candidate", "parser_version": "1", "level": "DISCOVERY_ONLY",
         "supported": ["file discovery", "low-confidence textual candidates"],

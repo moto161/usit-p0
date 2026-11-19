@@ -129,6 +129,26 @@ class GraphValidationTests(unittest.TestCase):
         self.assertEqual(json.loads(json_out.read_text(encoding="utf-8"))["status"], "INVALID")
         self.assertIn("INVALID_JSON", md_out.read_text(encoding="utf-8"))
 
+    def test_graph_file_rejects_symlink_without_following(self):
+        source = self.root / "graph-link.json"
+        target = self.root / "graph-target.json"
+        target.write_text(json.dumps(self.graph), encoding="utf-8")
+        try:
+            source.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        result = validate_graph_file(source, self.root)
+        self.assertEqual(result["status"], "INVALID")
+        self.assertIn("GRAPH_READ_ERROR", self.codes(result))
+
+    def test_graph_file_rejects_oversized_input(self):
+        source = self.root / "oversized-graph.json"
+        with source.open("wb") as stream:
+            stream.truncate(256 * 1024 * 1024 + 1)
+        result = validate_graph_file(source, self.root)
+        self.assertEqual(result["status"], "INVALID")
+        self.assertIn("GRAPH_READ_ERROR", self.codes(result))
+
     def test_duplicate_edge_ids_when_present(self):
         graph = copy.deepcopy(self.graph)
         graph["edges"][0]["id"] = "edge-1"

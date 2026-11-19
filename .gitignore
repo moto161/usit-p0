@@ -5,6 +5,14 @@ node_modules/
 !tests/fixtures/javascript_typescript/node_modules/
 !tests/fixtures/javascript_typescript/node_modules/conditional-lib/
 !tests/fixtures/javascript_typescript/node_modules/external-lib/
-outputs/
+outputs/*
+# 历史测试工件（冻结基准，必须进仓库；不放开整个 outputs/）
+!outputs/p0710zrfx/
+!outputs/p0710zxrxf/
+outputs/p0710zrfx/*
+outputs/p0710zxrxf/*
+!outputs/p0710zrfx/B3_BEFORE_FIX.json
+!outputs/p0710zrfx/B3_AFTER_FIX.json
+!outputs/p0710zxrxf/PRE_SHA256.json
 .codex-remote-attachments/
 _zrf12impl_restore_backup/
