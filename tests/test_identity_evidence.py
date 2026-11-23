@@ -7280,6 +7280,249 @@ class TsAttrDirectReturnTests(unittest.TestCase):
         self.assertEqual(self._direct_bindings(rows), [])
 
 
+class TsLocalInstanceMethodTests(unittest.TestCase):
+    def _rows_files(self, files, ts_config=None):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+            if ts_config is not None:
+                (root / "tsconfig.json").write_text(ts_config, encoding="utf-8")
+            js_ts_source = {n: s for n, s in files.items()
+                            if Path(n).suffix.lower() in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")}
+            parsed = analyze_js_ts_project(root, [], js_ts_source=js_ts_source)
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners, ts_config=ts_config)
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    def _local_handler(self, import_block, assign="const auth = new MidAuth();",
+                       call="const uid = auth.getUid(req);", tail="uid"):
+        body = (
+            import_block + "\n\n"
+            "export class PhotoHandler {\n"
+            "  load(req: any) {\n"
+            f"    {assign}\n"
+            f"    {call}\n"
+        )
+        if tail == "uid":
+            body += '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+        else:
+            body += '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+        return body + "  }\n}\n"
+
+    def test_same_file_local_construct_then_method_binds(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth();\n"
+                "    const uid = auth.getUid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 11)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 10, 11])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.getUid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:8")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_local_construct_returning_request_identity_binds(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                "export class MidAuth {\n"
+                "  getOwner(req: any) {\n"
+                "    return req.body.user_id;\n"
+                "  }\n"
+                "}\n"
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth();\n"
+                "    const owner = auth.getOwner(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 10, 11])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.getOwner")
+
+    def test_cross_file_named_import_binds(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._local_handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "mid.ts")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.getUid")
+
+    def test_cross_file_default_import_binds(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export default class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._local_handler('import MidAuth from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 7])
+
+    def test_inherited_method_binds(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                "export class BaseAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+                "export class MidAuth extends BaseAuth {\n"
+                "}\n"
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth();\n"
+                "    const uid = auth.getUid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 12, 13])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "BaseAuth.getUid")
+
+    def test_reassign_to_other_class_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+                "\n"
+                "export class Other {\n"
+                "  getUid(req: any) {\n"
+                '    return "guest";\n'
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._local_handler(
+                'import { MidAuth, Other } from "./mid";',
+                assign="let auth = new MidAuth();\n    auth = new Other();"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_local_copy_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._local_handler(
+                'import { MidAuth } from "./mid";',
+                assign="const auth = new MidAuth();\n    const auth2 = auth;",
+                call="const uid = auth2.getUid(req);"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_non_identity_method_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                '    return "guest";\n'
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._local_handler('import { MidAuth } from "./mid";'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_namespaced_new_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": self._local_handler(
+                'import * as authNs from "./mid";',
+                assign="const auth = new authNs.MidAuth();"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_construct_inside_block_does_not_bind_after_block(self):
+        rows = self._rows_files({
+            "mid.ts": (
+                "export class MidAuth {\n"
+                "  getUid(req: any) {\n"
+                "    return req.user.id;\n"
+                "  }\n"
+                "}\n"
+            ),
+            "handlers.ts": (
+                'import { MidAuth } from "./mid";\n'
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    if (req) {\n"
+                "      const auth = new MidAuth();\n"
+                "    }\n"
+                "    const uid = auth.getUid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
 class TsConfigPathsImportTests(unittest.TestCase):
     def _rows_files(self, files, ts_config=None):
         with tempfile.TemporaryDirectory() as td:

@@ -1021,6 +1021,49 @@ def _ts_default_export_class(path: str, source: str) -> str | None:
         if match:
             return match.group(1)
     return None
+def _ts_imported_class_bindings(
+    path: str, source: str, code_by_file: dict[str, str],
+    ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Resolve named/default-imported classes for one file (T18).
+
+    Only named imports (``import { MidAuth } from "./mid"``) whose
+    target file directly defines the imported name as a top-level
+    class, and default imports (``import MidAuth from "./mid"``)
+    whose target file default-exports a class under that name
+    (T11 rules: only ``export default class <name>`` qualifies).
+    The import may be relative or a ``tsconfig`` path alias (T7,
+    via ``ts_paths``). A local name shadowed by a same-file
+    top-level class or function, or imported from two different
+    modules (``_ts_import_bindings`` drops those), is dropped
+    (fail closed). Re-exports are not followed, and factories are
+    not resolved here.
+    """
+    if path.lower().endswith(".py"):
+        return {}
+    class_names = _ts_class_scan(path, source)[3]
+    top_functions = set(_ts_top_level_function_returns(path, source))
+    result: dict[str, tuple[str, str]] = {}
+    for local, (specifier, imported) in _ts_import_bindings(path, source).items():
+        if local in class_names or local in top_functions:
+            continue
+        target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+        if target is None:
+            continue
+        if imported in _ts_class_scan(target, code_by_file[target])[3]:
+            result[local] = (target, imported)
+    for local, specifier in _ts_default_import_bindings(path, source).items():
+        if local in class_names or local in top_functions or local in result:
+            continue
+        target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+        if target is None:
+            continue
+        default_class = _ts_default_export_class(target, code_by_file[target])
+        if default_class is not None:
+            result[local] = (target, default_class)
+    return result
+
+
 _TS_TOPLEVEL_FN_RE = re.compile(
     r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*"
     r"([A-Za-z_$][\w$]*)\s*\("
@@ -3075,6 +3118,12 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         if not file_path.lower().endswith(".py")
     }
     ts_cross_instance_bindings = _ts_cross_file_instance_bindings(effective_code_by_file, ts_paths)
+    ts_imported_class_bindings = {
+        file_path: _ts_imported_class_bindings(
+            file_path, file_source, effective_code_by_file, ts_paths)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
     ts_defined_methods = {
         file_path: _ts_class_scan(file_path, file_source)[4]
         for file_path, file_source in effective_code_by_file.items()
@@ -3133,9 +3182,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             class_ranges = {}
             instance_bindings = {}
             cross_instance_bindings = {}
-            local_class_imports = {}
-            local_class_names = set()
-            local_function_names = set()
+            local_class_imports = ts_imported_class_bindings.get(path, {})
+            local_class_names = _ts_class_scan(path, source)[3]
+            local_function_names = set(_ts_top_level_function_returns(path, source))
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
@@ -3153,9 +3202,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             class_ranges = {}
             instance_bindings = {}
             cross_instance_bindings = {}
-            local_class_imports = {}
-            local_class_names = set()
-            local_function_names = set()
+            local_class_imports = ts_imported_class_bindings.get(path, {})
+            local_class_names = _ts_class_scan(path, source)[3]
+            local_function_names = set(_ts_top_level_function_returns(path, source))
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
@@ -3427,16 +3476,24 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                         ts_same_file_methods, ts_defined_methods,
                                         ts_base_classes, skip_self=True)
                             elif len(parts) == 2 and parts[0] in local_classes:
-                                # P22: one hop through a method of a
+                                # P22/T18: one hop through a method of a
                                 # locally constructed instance, e.g.
-                                # auth = MidAuth(); uid = auth.get_uid(req).
-                                # The profile walks the class hierarchy
-                                # (P9/P10), so an inherited method binds.
+                                # auth = MidAuth(); uid = auth.get_uid(req)
+                                # or const auth = new MidAuth();
+                                # uid = auth.getUid(req). The profile walks
+                                # the class hierarchy (P9/P10, T4), so an
+                                # inherited method binds.
                                 target_file, target_class = local_classes[parts[0]]
-                                helper = _python_method_profile(
-                                    target_file, target_class, parts[1],
-                                    same_file_methods, py_defined_methods,
-                                    py_base_classes)
+                                if is_python:
+                                    helper = _python_method_profile(
+                                        target_file, target_class, parts[1],
+                                        same_file_methods, py_defined_methods,
+                                        py_base_classes)
+                                else:
+                                    helper = _ts_method_profile(
+                                        target_file, target_class, parts[1],
+                                        ts_same_file_methods, ts_defined_methods,
+                                        ts_base_classes)
                             elif len(parts) == 2:
                                 # T6: one hop through a namespace import,
                                 # e.g. import * as auth from "./auth";
@@ -3529,17 +3586,30 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                         }
                     else:
                         aliases.pop(name, None)
-                        # P22: a bare call constructing a known class
-                        # binds the local name to that class, so a later
-                        # `local.method(...)` call resolves through it.
-                        # Any other right-hand side invalidates the
-                        # local binding instead of retaining it.
+                        # P22/T18: a bare call constructing a known class
+                        # binds the local name to that class (Python), and
+                        # a `new <Class>(...)` right-hand side does the
+                        # same for TS/JS; a later `local.method(...)` call
+                        # then resolves through it. Any other right-hand
+                        # side invalidates the local binding instead of
+                        # retaining it.
                         if call_match is not None:
                             constructed = call_match.group(1)
                             if (constructed in local_class_names
                                     and constructed not in local_function_names):
                                 local_classes[name] = (path, constructed)
                             elif constructed in local_class_imports:
+                                local_classes[name] = local_class_imports[constructed]
+                            else:
+                                local_classes.pop(name, None)
+                        elif not is_python:
+                            constructed = _ts_constructed_class(rhs)
+                            if (constructed is not None and "." not in constructed
+                                    and constructed in local_class_names
+                                    and constructed not in local_function_names):
+                                local_classes[name] = (path, constructed)
+                            elif (constructed is not None and "." not in constructed
+                                    and constructed in local_class_imports):
                                 local_classes[name] = local_class_imports[constructed]
                             else:
                                 local_classes.pop(name, None)
