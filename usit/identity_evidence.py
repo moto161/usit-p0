@@ -3804,6 +3804,18 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      "propagation": aliases[rhs]["propagation"] + [
                                          {"path": path, "line": line_no, "variable": name}
                                      ]}
+                elif re.fullmatch(r"[A-Za-z_$][\w$]*", rhs) and rhs in local_classes:
+                    # P24/T20: copying a locally constructed instance
+                    # binds the new name to the same class (snapshot, not
+                    # a reference), and carries the constructor arguments
+                    # along so a P23/T19 fallback still resolves through
+                    # the copy. Chained copies work because the target
+                    # lands in local_classes itself.
+                    local_classes[name] = local_classes[rhs]
+                    if rhs in local_ctor_args:
+                        local_ctor_args[name] = list(local_ctor_args[rhs])
+                    else:
+                        local_ctor_args.pop(name, None)
                 elif (return_helpers or bindings or method_helpers
                         or instance_bindings or cross_instance_bindings
                         or local_class_imports or local_class_names
