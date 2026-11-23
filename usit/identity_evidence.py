@@ -1040,6 +1040,7 @@ _TS_EXTENDS_RE = re.compile(
 _TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
 _TS_THIS_ATTR_CALL_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(")
 _TS_THIS_METHOD_CALL_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)\s*\(")
+_TS_THIS_ATTR_RETURN_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)$")
 _PY_SUPER_CALL_RE = re.compile(r"^super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_ATTR_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_METHOD_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\s*\(")
@@ -1069,10 +1070,12 @@ def _strip_ts_line(line: str) -> str:
 
 def _ts_class_scan(path: str, source: str) -> tuple[
         dict[tuple[str, str], list[tuple[int, str]]], dict[int, str],
-        dict[tuple[str, str], set[str | None]], set[str], set[tuple[str, str]]]:
+        dict[tuple[str, str], set[str | None]], set[str], set[tuple[str, str]],
+        dict[tuple[str, str], list[tuple[str, int, str]]]]:
     """One brace-counting pass over a TS/JS file.
 
-    Returns ``(methods, ranges, attr_candidates, class_names, defined)``:
+    Returns ``(methods, ranges, attr_candidates, class_names, defined,
+    method_assigns)``:
     ``methods`` maps ``(class, method)`` pairs directly defined in a
     top-level class to their direct ``(line, expression)`` returns;
     ``ranges`` maps line numbers to their enclosing top-level class
@@ -1082,7 +1085,10 @@ def _ts_class_scan(path: str, source: str) -> tuple[
     the attribute); ``class_names`` is the set of top-level class
     names; ``defined`` is the set of ``(class, method)`` pairs directly
     defined in a top-level class (including methods without returns;
-    used for the inheritance shadowing check). Returns inside nested
+    used for the inheritance shadowing check); ``method_assigns`` maps
+    ``(class, method)`` pairs to their ``(attr, line, rhs)``
+    ``this.<attr> = <rhs>`` assignments (same-method, same traversal
+    rules as returns; T17). Returns inside nested
     functions or classes are excluded from both. A method header must
     open its body on the same line; anything else fails closed (no
     method, no returns). Only the direct returns are collected --
@@ -1094,6 +1100,7 @@ def _ts_class_scan(path: str, source: str) -> tuple[
     attr_candidates: dict[tuple[str, str], set[str | None]] = {}
     class_names: set[str] = set()
     defined: set[tuple[str, str]] = set()
+    method_assigns: dict[tuple[str, str], list[tuple[str, int, str]]] = {}
     # Frames: kind "class" | "method" | "nested", interior brace depth,
     # class name, method name. "nested" covers nested functions and
     # nested classes, whose lines and returns never belong to the outer
@@ -1145,7 +1152,7 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                                       "depth": interior(match.end()),
                                       "class": class_frame["class"], "method": name,
                                       "constructor": name == "constructor",
-                                      "returns": []})
+                                      "returns": [], "assigns": []})
                         method_frame = stack[-1]
                         defined.add((class_frame["class"], name))
             if method_frame is not None and class_frame is not None and "{" in stripped:
@@ -1173,6 +1180,10 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                 ret = _TS_RETURN_RE.match(stripped)
                 if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
                     method_frame["returns"].append((line_no, ret.group(1).strip()))
+                assign = _TS_THIS_ASSIGN_RE.match(stripped)
+                if assign:
+                    method_frame["assigns"].append(
+                        (assign.group(1), line_no, assign.group(2).strip()))
             if method_frame is not None and nested_this:
                 # T2: this.<attr> = new <Class>(...) inside a method (an
                 # arrow body's `this` still refers to the outer instance;
@@ -1207,7 +1218,7 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                             stack.append({"kind": "method",
                                           "depth": interior(stripped.index("{", arrow.end()) + 1),
                                           "class": class_frame["class"], "method": name,
-                                          "constructor": False, "returns": []})
+                                          "constructor": False, "returns": [], "assigns": []})
                             method_frame = stack[-1]
                             defined.add((class_frame["class"], name))
                         else:
@@ -1245,11 +1256,13 @@ def _ts_class_scan(path: str, source: str) -> tuple[
             frame = stack.pop()
             if frame["kind"] == "method" and frame["returns"] and not frame.get("constructor"):
                 methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
+                method_assigns.setdefault((frame["class"], frame["method"]), []).extend(frame["assigns"])
     while stack:
         frame = stack.pop()
         if frame["kind"] == "method" and frame["returns"] and not frame.get("constructor"):
             methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
-    return methods, ranges, attr_candidates, class_names, defined
+            method_assigns.setdefault((frame["class"], frame["method"]), []).extend(frame["assigns"])
+    return methods, ranges, attr_candidates, class_names, defined, method_assigns
 
 
 _VUE_OPTIONS_CLASS = "__vue_options__"
@@ -1298,7 +1311,7 @@ def _ts_vue_options_methods(path: str, source: str) -> tuple[
     attr_candidates: dict[tuple[str, str], set[str | None]] = {}
     if not path.lower().endswith(".vue"):
         return methods, ranges, defined, attr_candidates
-    _m, _r, _c, class_names, _d = _ts_class_scan(path, source)
+    _m, _r, _c, class_names, _d, _a = _ts_class_scan(path, source)
     if _VUE_OPTIONS_CLASS in class_names:
         return methods, ranges, defined, attr_candidates
     # Frames: kind "default" | "methods" | "method" | "nested", interior
@@ -1643,8 +1656,80 @@ def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str],
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
-    methods, _ranges, _candidates, _names, _defined = _ts_class_scan(path, source)
+    methods, _ranges, _candidates, _names, _defined, _assigns = _ts_class_scan(path, source)
     return _ts_direct_identity_profiles(path, methods)
+
+
+def _ts_attr_return_resolution(
+        path: str, key: tuple[str, str], returns: list[tuple[int, str]],
+        assigns: dict[tuple[str, str], list[tuple[str, int, str]]],
+        profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
+        defined: dict[str, set[tuple[str, str]]],
+        bases: dict[str, dict[str, list[tuple[str, str]]]],
+        attr: str) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Resolve ``return this.<attr>`` from same-method assignments (T17).
+
+    The TS mirror of ``_python_attr_return_resolution``: only
+    assignments in the same method, before its earliest return line,
+    count (an assignment after a return is dead code; an assignment
+    in another method is not statically guaranteed to have run).
+    Every such assignment's right-hand side must resolve to the same
+    identity source: a direct identity expression, or a
+    ``this.<method>(...)`` call to an already-profiled method
+    (extends chain, no ``skip_self``; the target's delegation and
+    return lines follow the assignment-line item in the step). All
+    assignments must agree on kind and expression; the returned step
+    accumulates every assignment's items in source order, so two
+    assignments of the same expression both appear in the
+    propagation. Any other right-hand side, a missing assignment, or
+    a kind/expression mismatch disqualifies the method (None).
+    """
+    if not returns:
+        return None
+    earliest_return = min(line_no for line_no, _ in returns)
+    method_assigns = sorted(
+        (line_no, rhs) for name, line_no, rhs in assigns.get(key, [])
+        if name == attr and line_no < earliest_return)
+    if not method_assigns:
+        return None
+    kind: str | None = None
+    expr: str | None = None
+    step: list[dict[str, Any]] = []
+    for assign_line, rhs in method_assigns:
+        if _TRUSTED.fullmatch(rhs):
+            rhs_kind, rhs_expr = "trusted", rhs
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}", "returns": rhs}]
+        elif _REQUEST.fullmatch(rhs):
+            rhs_kind, rhs_expr = "request", rhs
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}", "returns": rhs}]
+        else:
+            method_match = _TS_THIS_METHOD_CALL_RE.match(rhs)
+            if method_match is None:
+                return None
+            target = _ts_method_profile(
+                path, key[0], method_match.group(1), profiles, defined, bases)
+            if target is None:
+                return None
+            rhs_kind, rhs_expr = target["kind"], target["expression"]
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}",
+                         "returns": target["expression"]}]
+            rhs_step.extend(target.get("delegation", []))
+            rhs_step.extend(
+                {"path": target["path"], "line": return_line,
+                 "function": target["function"],
+                 "returns": target["expression"]}
+                for return_line in target["return_lines"])
+        if kind is None:
+            kind, expr = rhs_kind, rhs_expr
+        elif kind != rhs_kind or expr != rhs_expr:
+            return None
+        step.extend(rhs_step)
+    if kind is None or expr is None:
+        return None
+    return kind, expr, step
 
 
 def _ts_all_identity_return_methods(
@@ -1659,9 +1744,12 @@ def _ts_all_identity_return_methods(
     (T4 chain walk, ``skip_self=True``), a
     ``this.<attr>.<method>(...)`` call delegating through an instance
     attribute whose class resolves via the file's same-file (T2) or
-    cross-file (T3/T9/T11/T14) attribute map (T15 second hop), or a
+    cross-file (T3/T9/T11/T14) attribute map (T15 second hop), a
     ``this.<method>(...)`` call delegating to another method of the
-    same class, resolved over the extends chain (T16). All
+    same class, resolved over the extends chain (T16), or a
+    ``return this.<attr>`` returning an instance attribute assigned
+    from an identity source in the same method, before its earliest
+    return (T17). All
     returns must agree on kind, expression and delegation steps: a
     direct return mixed with a delegated return, or delegated calls
     to different targets, disqualifies the method. A delegating
@@ -1737,21 +1825,42 @@ def _ts_all_identity_return_methods(
                                 # chain; the target method must already
                                 # have a profile.
                                 method_match = _TS_THIS_METHOD_CALL_RE.match(text)
-                                if method_match is None:
-                                    profile = None
-                                    break
-                                target = _ts_method_profile(
-                                    path, key[0], method_match.group(1),
-                                    profiles, defined, bases)
-                        if target is None:
-                            profile = None
-                            break
-                        kind, expr = target["kind"], target["expression"]
-                        step = target.get("delegation", []) + [
-                            {"path": target["path"], "line": return_line,
-                             "function": target["function"],
-                             "returns": target["expression"]}
-                            for return_line in target["return_lines"]]
+                                if method_match is not None:
+                                    target = _ts_method_profile(
+                                        path, key[0], method_match.group(1),
+                                        profiles, defined, bases)
+                                else:
+                                    # T17: `return this.<attr>`
+                                    # returns an instance attribute
+                                    # assigned from an identity source
+                                    # in the same method, before its
+                                    # earliest return; the resolution
+                                    # builds the delegation step
+                                    # directly (assignment line first,
+                                    # then the target method's
+                                    # evidence, if any).
+                                    attr_return = _TS_THIS_ATTR_RETURN_RE.match(text)
+                                    if attr_return is None:
+                                        profile = None
+                                        break
+                                    resolved = _ts_attr_return_resolution(
+                                        path, key, returns, scan[5],
+                                        profiles, defined, bases,
+                                        attr_return.group(1))
+                                    if resolved is None:
+                                        profile = None
+                                        break
+                                    kind, expr, step = resolved
+                        if step is None:
+                            if target is None:
+                                profile = None
+                                break
+                            kind, expr = target["kind"], target["expression"]
+                            step = target.get("delegation", []) + [
+                                {"path": target["path"], "line": return_line,
+                                 "function": target["function"],
+                                 "returns": target["expression"]}
+                                for return_line in target["return_lines"]]
                     if profile is None:
                         profile = {"kind": kind, "expression": expr,
                                    "return_lines": [line_no]}
@@ -1784,7 +1893,7 @@ def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
-    _methods, ranges, _candidates, _names, _defined = _ts_class_scan(path, source)
+    _methods, ranges, _candidates, _names, _defined, _a = _ts_class_scan(path, source)
     return ranges
 
 
@@ -2191,7 +2300,7 @@ def _ts_cross_file_instance_bindings(
     for path, source in code_by_file.items():
         if path.lower().endswith(".py"):
             continue
-        _methods, _ranges, candidates, class_names, _defined = _ts_class_scan(path, source)
+        _methods, _ranges, candidates, class_names, _defined, _a = _ts_class_scan(path, source)
         # V4: instance attributes bound in Vue Options API methods
         # share the same candidate map, keyed on the synthetic class
         # `__vue_options__`.
@@ -2236,7 +2345,7 @@ def _ts_cross_file_instance_bindings(
                 imported = _ts_default_export_class(target, code_by_file[target])
                 if imported is None:
                     return None
-            _m, _r, _c, target_classes, _d = _ts_class_scan(target, code_by_file[target])
+            _m, _r, _c, target_classes, _d, _a = _ts_class_scan(target, code_by_file[target])
             if imported not in target_classes:
                 return None
             return (target, imported)
@@ -2276,7 +2385,7 @@ def _ts_base_classes(
     for path, source in code_by_file.items():
         if path.lower().endswith(".py"):
             continue
-        _m, _r, _c, class_names, _d = _ts_class_scan(path, source)
+        _m, _r, _c, class_names, _d, _a = _ts_class_scan(path, source)
         imports = _ts_import_bindings(path, source)
         bases: dict[str, tuple[str, str]] = {}
         for line in source.splitlines():
@@ -2296,7 +2405,7 @@ def _ts_base_classes(
             target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is None or target == path:
                 continue
-            _m2, _r2, _c2, target_classes, _d2 = _ts_class_scan(
+            _m2, _r2, _c2, target_classes, _d2, _a2 = _ts_class_scan(
                 target, code_by_file[target])
             if imported in target_classes:
                 bases[cls] = (target, imported)
@@ -2353,7 +2462,7 @@ def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, st
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
-    _methods, _ranges, candidates, class_names, _defined = _ts_class_scan(path, source)
+    _methods, _ranges, candidates, class_names, _defined, _a = _ts_class_scan(path, source)
     # V4: instance attributes bound in Vue Options API methods
     # (created() and friends) share the same candidate map, keyed on
     # the synthetic class `__vue_options__`.
