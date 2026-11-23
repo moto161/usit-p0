@@ -2838,6 +2838,58 @@ def _python_imported_identity_helpers(
     return imported
 
 
+def _python_imported_class_bindings(
+    path: str, source: str, module_index: dict[str, str],
+    code_by_file: dict[str, str],
+) -> dict[str, tuple[str, str]]:
+    """Resolve ``from``-imported classes for one file (P22).
+
+    Only top-level ``from <module> import <Class> [as <alias>]``
+    whose target file directly defines the imported name as a
+    top-level class. A local name shadowed by a module-level
+    definition or assignment, imported from two different modules,
+    or imported from a module outside the scan is dropped (fail
+    closed). Re-exports are not followed. Factories are not
+    resolved here: an imported name that is a function of the
+    target file maps to nothing (P16 factory locals are out of
+    scope for P22).
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    caller_package = _package_for_module(_module_for_path(path), path)
+    shadowed = _python_module_level_shadowed_names(tree)
+    imports: dict[str, set[tuple[str, str]]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        if node.level and node.level > 0:
+            absolute = _relative_module(caller_package, node.level, node.module)
+        else:
+            absolute = node.module
+        if absolute is None:
+            continue
+        target_path = module_index.get(absolute)
+        if target_path is None:
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            imports.setdefault(alias.asname or alias.name, set()).add(
+                (target_path, alias.name))
+    result: dict[str, tuple[str, str]] = {}
+    for local_name, targets in imports.items():
+        if local_name in shadowed or len(targets) != 1:
+            continue
+        target_path, imported_name = next(iter(targets))
+        if imported_name in _python_top_level_class_names(code_by_file[target_path]):
+            result[local_name] = (target_path, imported_name)
+    return result
+
+
 def _python_module_level_shadowed_names(tree: ast.Module) -> set[str]:
     """Module-level names that shadow an import: top-level defs/classes
     and simple module-level assignment targets."""
@@ -2993,6 +3045,12 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         if file_path.lower().endswith(".py")
     }
     py_cross_instance_bindings = _python_cross_file_instance_bindings(code_by_file)
+    py_imported_class_bindings = {
+        file_path: _python_imported_class_bindings(
+            file_path, file_source, module_index, code_by_file)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
     module_bindings = {
         file_path: _python_module_bindings(file_path, file_source, module_index)
         for file_path, file_source in code_by_file.items()
@@ -3054,6 +3112,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             class_ranges = _python_class_method_ranges(path, source)
             instance_bindings = same_file_instance_bindings.get(path, {})
             cross_instance_bindings = py_cross_instance_bindings.get(path, {})
+            local_class_imports = py_imported_class_bindings.get(path, {})
+            local_class_names = _python_top_level_class_names(source)
+            local_function_names = _python_top_level_function_names(source)
             ts_method_helpers = {}
             ts_class_ranges = {}
             ts_instance_bindings = {}
@@ -3072,6 +3133,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             class_ranges = {}
             instance_bindings = {}
             cross_instance_bindings = {}
+            local_class_imports = {}
+            local_class_names = set()
+            local_function_names = set()
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
@@ -3089,6 +3153,9 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             class_ranges = {}
             instance_bindings = {}
             cross_instance_bindings = {}
+            local_class_imports = {}
+            local_class_names = set()
+            local_function_names = set()
             ts_method_helpers = ts_same_file_methods.get(path, {})
             ts_class_ranges = ts_same_file_ranges.get(path, {})
             ts_instance_bindings = ts_same_file_instance.get(path, {})
@@ -3099,6 +3166,10 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             ts_file_namespaces = ts_namespace_import_bindings.get(path, {})
             py_has_base = False
         aliases: dict[str, dict[str, Any]] = {}
+        # P22: locals bound by direct construction, e.g.
+        # `auth = MidAuth()` -> {"auth": (path, "MidAuth")}; cleared
+        # wherever `aliases` is cleared, invalidated by reassignment.
+        local_classes: dict[str, tuple[str, str]] = {}
         brace_depth = 0
         previous_depth = 0
         previous_indent = 0
@@ -3111,18 +3182,23 @@ def extract_identity_evidence(code_by_file: dict[str, str],
             if is_python:
                 if re.match(r"(?:async\s+)?(?:def|class)\s+", stripped):
                     aliases.clear()
+                    local_classes.clear()
                     python_scope_indent = indent
                 elif python_scope_indent is not None and stripped and indent <= python_scope_indent:
                     aliases.clear()
+                    local_classes.clear()
                     python_scope_indent = None
                 elif stripped and indent < previous_indent:
                     aliases.clear()
+                    local_classes.clear()
                 current_scope = python_scope_indent if python_scope_indent is not None else 0
             else:
                 if brace_depth != previous_depth:
                     aliases.clear()
+                    local_classes.clear()
                 if re.search(r"\b(?:function|class)\b|=>\s*\{", line):
                     aliases.clear()
+                    local_classes.clear()
                 current_scope = brace_depth
 
             trusted = sorted(set(match.group(0) for match in _TRUSTED.finditer(line)))
@@ -3285,6 +3361,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      ]}
                 elif (return_helpers or bindings or method_helpers
                         or instance_bindings or cross_instance_bindings
+                        or local_class_imports
                         or ts_method_helpers
                         or ts_instance_bindings or ts_cross_bindings
                         or ts_has_base or py_has_base
@@ -3349,6 +3426,17 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                         path, enclosing, parts[1],
                                         ts_same_file_methods, ts_defined_methods,
                                         ts_base_classes, skip_self=True)
+                            elif len(parts) == 2 and parts[0] in local_classes:
+                                # P22: one hop through a method of a
+                                # locally constructed instance, e.g.
+                                # auth = MidAuth(); uid = auth.get_uid(req).
+                                # The profile walks the class hierarchy
+                                # (P9/P10), so an inherited method binds.
+                                target_file, target_class = local_classes[parts[0]]
+                                helper = _python_method_profile(
+                                    target_file, target_class, parts[1],
+                                    same_file_methods, py_defined_methods,
+                                    py_base_classes)
                             elif len(parts) == 2:
                                 # T6: one hop through a namespace import,
                                 # e.g. import * as auth from "./auth";
@@ -3441,6 +3529,22 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                         }
                     else:
                         aliases.pop(name, None)
+                        # P22: a bare call constructing a known class
+                        # binds the local name to that class, so a later
+                        # `local.method(...)` call resolves through it.
+                        # Any other right-hand side invalidates the
+                        # local binding instead of retaining it.
+                        if call_match is not None:
+                            constructed = call_match.group(1)
+                            if (constructed in local_class_names
+                                    and constructed not in local_function_names):
+                                local_classes[name] = (path, constructed)
+                            elif constructed in local_class_imports:
+                                local_classes[name] = local_class_imports[constructed]
+                            else:
+                                local_classes.pop(name, None)
+                        else:
+                            local_classes.pop(name, None)
                 else:
                     aliases.pop(name, None)
 
@@ -3449,6 +3553,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                 brace_depth += line.count("{") - line.count("}")
                 if brace_depth != previous_depth:
                     aliases.clear()
+                    local_classes.clear()
             previous_indent = indent
     records.sort(key=lambda item: (item["source"], item["line"], item["kind"], item["evidence_id"]))
     return records
