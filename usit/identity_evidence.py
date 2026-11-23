@@ -368,7 +368,10 @@ def _python_class_method_returns(path: str, source: str) -> dict[
     Each entry carries the method's ``function_line`` and its direct
     ``(line, ast.unparse text)`` returns (returns inside nested
     functions or classes excluded, same traversal as
-    ``_identity_return_profile``). A (class, method) defined twice
+    ``_identity_return_profile``), plus its ``assigns``: the
+    ``(attr, line, ast.unparse rhs)`` of ``self.<attr> = <rhs>``
+    assignments in the same method (single-target ``ast.Assign`` only,
+    same traversal rules; P21). A (class, method) defined twice
     merges its returns, matching ``_python_identity_return_methods``.
     """
     if not path.lower().endswith(".py"):
@@ -385,6 +388,7 @@ def _python_class_method_returns(path: str, source: str) -> dict[
             if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             returns: list[ast.Return] = []
+            assigns: list[tuple[str, int, str]] = []
             stack = list(method.body)
             while stack:
                 item = stack.pop()
@@ -393,11 +397,20 @@ def _python_class_method_returns(path: str, source: str) -> dict[
                 elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     continue
                 else:
+                    if isinstance(item, ast.Assign) and len(item.targets) == 1:
+                        target = item.targets[0]
+                        if (isinstance(target, ast.Attribute)
+                                and isinstance(target.value, ast.Name)
+                                and target.value.id == "self"):
+                            assigns.append((target.attr, item.lineno,
+                                            ast.unparse(item.value)))
                     stack.extend(ast.iter_child_nodes(item))
             entry = methods.setdefault((node.name, method.name),
-                                       {"function_line": method.lineno, "returns": []})
+                                       {"function_line": method.lineno, "returns": [],
+                                        "assigns": []})
             entry["returns"].extend((ret.lineno, ast.unparse(ret.value))
                                     for ret in returns if ret.value is not None)
+            entry["assigns"].extend(assigns)
     return methods
 
 
@@ -647,6 +660,76 @@ def _python_method_profile(file: str, cls: str, method: str,
     return None
 
 
+def _python_attr_return_resolution(
+        path: str, key: tuple[str, str], info: dict[str, Any],
+        profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
+        defined: dict[str, set[tuple[str, str]]],
+        bases: dict[str, dict[str, list[tuple[str, str]]]],
+        attr: str) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Resolve ``return self.<attr>`` from same-method assignments (P21).
+
+    Only assignments in the same method, before its earliest return
+    line, count (an assignment after a return is dead code; an
+    assignment in another method is not statically guaranteed to have
+    run). Every such assignment's right-hand side must resolve to the
+    same identity source: a direct identity expression, or a
+    ``self.<method>(...)`` call to an already-profiled method (MRO,
+    no ``skip_self``; the target's delegation and return lines follow
+    the assignment-line item in the step). All assignments must agree
+    on kind and expression; the returned step accumulates every
+    assignment's items in source order, so two assignments of the same
+    expression both appear in the propagation. Any other right-hand
+    side, a missing assignment, or a kind/expression mismatch
+    disqualifies the method (None).
+    """
+    if not info["returns"]:
+        return None
+    earliest_return = min(line_no for line_no, _ in info["returns"])
+    assigns = sorted(
+        (line_no, rhs) for name, line_no, rhs in info.get("assigns", [])
+        if name == attr and line_no < earliest_return)
+    if not assigns:
+        return None
+    kind: str | None = None
+    expr: str | None = None
+    step: list[dict[str, Any]] = []
+    for assign_line, rhs in assigns:
+        if _TRUSTED.fullmatch(rhs):
+            rhs_kind, rhs_expr = "trusted", rhs
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}", "returns": rhs}]
+        elif _REQUEST.fullmatch(rhs):
+            rhs_kind, rhs_expr = "request", rhs
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}", "returns": rhs}]
+        else:
+            method_match = _PY_SELF_METHOD_CALL_RE.match(rhs)
+            if method_match is None:
+                return None
+            target = _python_method_profile(
+                path, key[0], method_match.group(1), profiles, defined, bases)
+            if target is None:
+                return None
+            rhs_kind, rhs_expr = target["kind"], target["expression"]
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}",
+                         "returns": target["expression"]}]
+            rhs_step.extend(target.get("delegation", []))
+            rhs_step.extend(
+                {"path": target["path"], "line": return_line,
+                 "function": target["function"],
+                 "returns": target["expression"]}
+                for return_line in target["return_lines"])
+        if kind is None:
+            kind, expr = rhs_kind, rhs_expr
+        elif kind != rhs_kind or expr != rhs_expr:
+            return None
+        step.extend(rhs_step)
+    if kind is None or expr is None:
+        return None
+    return kind, expr, step
+
+
 def _python_all_identity_return_methods(
         code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
     """Project-wide Python identity return profiles, including super() delegation.
@@ -660,7 +743,9 @@ def _python_all_identity_return_methods(
     through an instance attribute whose class resolves via the file's
     same-file (P8) or cross-file (P14-P18) attribute map (P19 second hop),
     or a ``self.<method>(...)`` call delegating to another method of the
-    same class, resolved over the MRO (P20).
+    same class, resolved over the MRO (P20), or a ``return self.<attr>``
+    returning an instance attribute assigned from an identity source in
+    the same method, before its earliest return (P21).
     All returns must agree on kind, expression and delegation
     steps: a direct return mixed with a super-delegated return, or
     super calls to different targets, disqualifies the method. A
@@ -740,21 +825,41 @@ def _python_all_identity_return_methods(
                                 # the target method must already have
                                 # a profile.
                                 method_match = _PY_SELF_METHOD_CALL_RE.match(text)
-                                if method_match is None:
-                                    profile = None
-                                    break
-                                target = _python_method_profile(
-                                    path, key[0], method_match.group(1),
-                                    profiles, defined, bases)
-                        if target is None:
-                            profile = None
-                            break
-                        kind, expr = target["kind"], target["expression"]
-                        step = target.get("delegation", []) + [
-                            {"path": target["path"], "line": return_line,
-                             "function": target["function"],
-                             "returns": target["expression"]}
-                            for return_line in target["return_lines"]]
+                                if method_match is not None:
+                                    target = _python_method_profile(
+                                        path, key[0], method_match.group(1),
+                                        profiles, defined, bases)
+                                else:
+                                    # P21: `return self.<attr>`
+                                    # returns an instance attribute
+                                    # assigned from an identity source
+                                    # in the same method, before its
+                                    # earliest return; the resolution
+                                    # builds the delegation step
+                                    # directly (assignment line first,
+                                    # then the target method's
+                                    # evidence, if any).
+                                    attr_return = _PY_SELF_ATTR_RETURN_RE.match(text)
+                                    if attr_return is None:
+                                        profile = None
+                                        break
+                                    resolved = _python_attr_return_resolution(
+                                        path, key, info, profiles, defined, bases,
+                                        attr_return.group(1))
+                                    if resolved is None:
+                                        profile = None
+                                        break
+                                    kind, expr, step = resolved
+                        if step is None:
+                            if target is None:
+                                profile = None
+                                break
+                            kind, expr = target["kind"], target["expression"]
+                            step = target.get("delegation", []) + [
+                                {"path": target["path"], "line": return_line,
+                                 "function": target["function"],
+                                 "returns": target["expression"]}
+                                for return_line in target["return_lines"]]
                     if profile is None:
                         profile = {"kind": kind, "expression": expr,
                                    "return_lines": [line_no],
@@ -938,6 +1043,7 @@ _TS_THIS_METHOD_CALL_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)\s*\(")
 _PY_SUPER_CALL_RE = re.compile(r"^super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_ATTR_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
 _PY_SELF_METHOD_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\s*\(")
+_PY_SELF_ATTR_RETURN_RE = re.compile(r"^self\.([A-Za-z_]\w*)$")
 _PY_SUPER_CALL_RHS = re.compile(r"super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(.*\)$")
 _TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
 _TS_CLASS_FIELD_ARROW_RE = re.compile(

@@ -6109,6 +6109,207 @@ class IdentitySelfMethodDelegationTests(unittest.TestCase):
         self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth._get_uid")
 
 
+class IdentityAttrDirectReturnTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    def _photos(self, import_block, assign_helper="self.helper = MidAuth()", tail="uid"):
+        body = (
+            import_block + "\n\n"
+            "class PhotoHandler:\n"
+            "    def __init__(self):\n"
+            f"        {assign_helper}\n"
+            "\n"
+            "    def list_photos(self, request):\n"
+        )
+        if tail == "uid":
+            body += (
+                "        uid = self.helper.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            )
+        else:
+            body += (
+                "        owner = self.helper.get_owner(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (owner,))\n'
+            )
+        return body
+
+    def test_same_method_assign_then_return_binds(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def get_uid(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "        return self.uid\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 9)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 4, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/mid.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:server/photos.py#list_photos:7")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_same_method_assign_returning_request_identity_binds(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def get_owner(self, req):\n"
+                "        self.owner = req.body.user_id\n"
+                "        return self.owner\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth", tail="owner"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 4, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.get_owner")
+
+    def test_same_file_assign_then_return_binds(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def get_uid(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "        return self.uid\n"
+                "\n"
+                "\n"
+                "class PhotoHandler:\n"
+                "    def __init__(self):\n"
+                "        self.helper = MidAuth()\n"
+                "\n"
+                "    def list_photos(self, request):\n"
+                "        uid = self.helper.get_uid(request)\n"
+                '        cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 13)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 4, 12, 13])
+
+    def test_attr_assigned_from_method_delegation_binds(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def get_uid(self, req):\n"
+                "        self.uid = self._get_uid(req)\n"
+                "        return self.uid\n"
+                "\n"
+                "    def _get_uid(self, req):\n"
+                "        return req.user.id\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 7, 4, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.get_uid")
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth._get_uid")
+        self.assertEqual(binding["details"]["propagation"][2]["function"], "MidAuth.get_uid")
+
+    def test_same_expression_assigned_twice_binds(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def get_uid(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "        self.uid = req.user.id\n"
+                "        return self.uid\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 4, 5, 8, 9])
+        self.assertEqual(binding["details"]["propagation"][0]["returns"], "req.user.id")
+        self.assertEqual(binding["details"]["propagation"][1]["returns"], "req.user.id")
+
+    def test_mixed_assign_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def get_uid(self, req):\n"
+                "        if req:\n"
+                "            self.uid = req.user.id\n"
+                "        else:\n"
+                '            self.uid = "anon"\n'
+                "        return self.uid\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_non_identity_assign_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def get_uid(self, req):\n"
+                '        self.uid = "guest"\n'
+                "        return self.uid\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_two_different_identity_assigns_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def get_uid(self, req):\n"
+                "        if req:\n"
+                "            self.uid = req.user.id\n"
+                "        else:\n"
+                "            self.uid = req.session.uid\n"
+                "        return self.uid\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_assign_in_other_method_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def _load(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "\n"
+                "    def get_uid(self, req):\n"
+                "        return self.uid\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_returning_other_attribute_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def get_uid(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "        return self.other\n"
+            ),
+            "server/photos.py": self._photos("from server.mid import MidAuth"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
 class TsSecondHopReturnPropagationTests(unittest.TestCase):
     def _rows_files(self, files, ts_config=None):
         with tempfile.TemporaryDirectory() as td:
