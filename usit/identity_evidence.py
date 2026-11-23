@@ -1,0 +1,4065 @@
+"""Conservative identity-to-resource data-flow evidence.
+
+Only same-line, syntactically explicit patterns are emitted, except that
+a database call spanning several lines is joined on balanced parens (at
+most 10 physical lines) for the sink check; the record lands on the
+call's first line. Local-variable propagation is straight-line within one
+scope, plus one single hop through a top-level helper whose every return
+is the same identity expression (``INTERPROCEDURAL_SINGLE_HOP_RETURN``);
+the helper may live in the same file, be brought in by a ``from`` import,
+be reached through a module binding (``import X`` / ``from P import M``)
+as an attribute call, or be a method of the enclosing class reached
+through ``self`` / ``cls``, or be a method of a class an instance
+attribute was constructed from (``self.helper = AuthHelper()`` then
+``self.helper.get_uid(...)``). This is not a general taint engine and
+never proves runtime identity or authorization.
+"""
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import posixpath
+import re
+from collections.abc import Mapping
+from typing import Any
+
+from .python_resolver import _module_for_path, _package_for_module, _relative_module
+from .vue_parser import vue_script_for_adapter
+
+_TRUSTED = re.compile(
+    r"\b(?:req|request)\.(?:user|auth\.user)\.(?:id|userId)\b"
+    r"|\b(?:session\.user|ctx\.state\.user|currentUser|auth)\.(?:id|userId)\b"
+)
+_REQUEST = re.compile(
+    r"\b(?:req|request)\.(?:body|params|query)\."
+    r"(?:user_?id|owner_?id|account_?id|created_?by)\b"
+)
+_OWNER_FIELD = re.compile(r"\b(owner_?id|user_?id|created_?by|account_?id)\b", re.I)
+_DB_CALL = re.compile(r"\.(?:execute|query|raw)\s*\(")
+_OWNER_PREDICATE = re.compile(
+    r"\b(?:owner_?id|user_?id|created_?by|account_?id)\s*=\s*(?:\?|\$\d+|:[A-Za-z_]\w*|%s|%\([A-Za-z_]\w*\)s)",
+    re.I,
+)
+_COMPARE = re.compile(
+    r"\b(owner_?id|user_?id|created_?by|account_?id)\s*(?:===|==|!==|!=)\s*"
+    r"(req\.(?:user|auth\.user)\.(?:id|userId)|request\.(?:user|auth\.user)\.(?:id|userId)|"
+    r"session\.user\.(?:id|userId)|ctx\.state\.user\.(?:id|userId)|currentUser\.(?:id|userId))\b",
+    re.I,
+)
+
+
+def _id(record: Mapping[str, Any]) -> str:
+    raw = json.dumps(record, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return "identity-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+
+def _call_parameter_code(line: str, call_start: int) -> str:
+    """Return code-only text from positional arguments after the SQL string argument.
+
+    String literals and comments are excluded. Nested arrays/objects/calls are
+    retained. Unsupported or unbalanced calls return an empty string.
+    """
+    stack = ["("]
+    args: list[str] = []
+    start = call_start + 1
+    quote: str | None = None
+    escaped = False
+    index = start
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'} or char == chr(96):
+            quote = char
+            index += 1
+            continue
+        if line.startswith("//", index) or char == "#":
+            break
+        if char in "([{":
+            stack.append(char)
+        elif char in ")]}":
+            if not stack:
+                return ""
+            expected = {")": "(", "]": "[", "}": "{"}[char]
+            if stack[-1] != expected:
+                return ""
+            stack.pop()
+            if not stack:
+                args.append(line[start:index])
+                break
+        elif char == "," and len(stack) == 1 and stack[0] == "(":
+            args.append(line[start:index])
+            start = index + 1
+        index += 1
+    if stack or len(args) < 2:
+        return ""
+
+    code_parts: list[str] = []
+    for argument in args[1:]:
+        quote = None
+        escaped = False
+        index = 0
+        while index < len(argument):
+            char = argument[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                code_parts.append(" ")
+                index += 1
+                continue
+            if char in {"'", '"'} or char == chr(96):
+                quote = char
+                code_parts.append(" ")
+                index += 1
+                continue
+            if argument.startswith("//", index) or char == "#":
+                break
+            code_parts.append(char)
+            index += 1
+    return "".join(code_parts)
+
+def _call_parameter_expressions(line: str, call_start: int) -> list[str]:
+    """Return cleaned positional binding arguments after the SQL string argument."""
+    stack = ["("]
+    args: list[str] = []
+    start = call_start + 1
+    quote: str | None = None
+    escaped = False
+    index = start
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'} or char == chr(96):
+            quote = char
+            index += 1
+            continue
+        if line.startswith("//", index) or char == "#":
+            break
+        if char in "([{":
+            stack.append(char)
+        elif char in ")]}":
+            if not stack:
+                return []
+            expected = {")": "(", "]": "[", "}": "{"}[char]
+            if stack[-1] != expected:
+                return []
+            stack.pop()
+            if not stack:
+                args.append(line[start:index])
+                break
+        elif char == "," and len(stack) == 1 and stack[0] == "(":
+            args.append(line[start:index])
+            start = index + 1
+        index += 1
+    if stack or len(args) < 2:
+        return []
+
+    cleaned: list[str] = []
+    for argument in args[1:]:
+        output: list[str] = []
+        quote = None
+        escaped = False
+        index = 0
+        while index < len(argument):
+            char = argument[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                output.append(" ")
+                index += 1
+                continue
+            if char in {"'", '"'} or char == chr(96):
+                quote = char
+                output.append(" ")
+                index += 1
+                continue
+            if argument.startswith("//", index) or char == "#":
+                break
+            output.append(char)
+            index += 1
+        value = "".join(output).strip()
+        if value:
+            cleaned.append(value)
+    return cleaned
+
+
+def _split_call_args(text: str, open_paren_index: int) -> list[str] | None:
+    """Split a call's top-level arguments, verbatim (P23/T19).
+
+    ``open_paren_index`` is the index of the opening paren. Returns
+    the stripped argument texts in order (``[]`` for an empty call),
+    or None when the parens do not balance on this line. Unlike
+    ``_call_parameter_expressions`` this keeps every argument
+    (including the first, and string literals verbatim) so a
+    constructor call's positional arguments map 1:1 to its parameters.
+    """
+    depth: list[str] = []
+    quote: str | None = None
+    escaped = False
+    start = open_paren_index + 1
+    args: list[str] = []
+    index = open_paren_index
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char in {"'", '"'} or char == chr(96):
+            quote = char
+        elif char in "([{":
+            depth.append(char)
+        elif char in ")]}":
+            expected = {"(": ")", "[": "]", "{": "}"}
+            if not depth or expected[depth[-1]] != char:
+                return None
+            depth.pop()
+            if not depth:
+                tail = text[start:index].strip()
+                if tail:
+                    args.append(tail)
+                return args
+        elif char == "," and len(depth) == 1:
+            args.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+    return None
+
+
+def _join_balanced_call(lines: list[str], start_index: int, call_start: int) -> tuple[str, int] | None:
+    """Join physical lines until the call's parens balance, or None.
+
+    Scans from just after the call's opening paren, tracking the bracket
+    stack and string quotes (``'``/``"``/backtick, ``\\`` escapes) exactly
+    like _call_parameter_code; a paren inside a string literal does not
+    count. At most 10 physical lines; unbalanced within the cap returns
+    None (fail-closed, the caller falls back to the first line alone).
+    """
+    stack = ["("]
+    quote: str | None = None
+    escaped = False
+    parts = [lines[start_index]]
+    current = lines[start_index]
+    pos = call_start + 1
+    end_index = start_index
+    while True:
+        while pos < len(current):
+            char = current[pos]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+            elif char in {"'", '"'} or char == chr(96):
+                quote = char
+            elif char in "([{":
+                stack.append(char)
+            elif char in ")]}":
+                if not stack:
+                    return None
+                expected = {")": "(", "]": "[", "}": "{"}[char]
+                if stack[-1] != expected:
+                    return None
+                stack.pop()
+                if not stack:
+                    return ("\n".join(parts), end_index)
+            pos += 1
+        if end_index - start_index >= 9:
+            return None
+        end_index += 1
+        if end_index >= len(lines):
+            return None
+        parts.append(lines[end_index])
+        current = lines[end_index]
+        pos = 0
+
+
+def _python_function_owners(path: str, source: str) -> dict[int, str]:
+    """Map source lines to the innermost AST-proven Python function symbol.
+
+    Non-Python files and syntax-invalid Python deliberately produce no owner.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    scopes: list[tuple[int, int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end_line = getattr(node, "end_lineno", None)
+            if isinstance(end_line, int) and end_line >= node.lineno:
+                scopes.append((node.lineno, end_line, end_line - node.lineno,
+                               f"symbol:{path}#{node.name}:{node.lineno}"))
+    owners: dict[int, str] = {}
+    for start, end, _span, symbol_id in sorted(scopes, key=lambda item: (item[2], item[0], item[3])):
+        for line_no in range(start, end + 1):
+            owners.setdefault(line_no, symbol_id)
+    return owners
+
+
+def _identity_return_profile(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, Any] | None:
+    """Single identity-return profile of one function, or None.
+
+    The function qualifies only when every ``return`` in its body (not
+    counting returns inside nested functions or classes) carries a value
+    whose ``ast.unparse`` text fully matches one identity pattern, and all
+    those values are the same kind and the same expression text. No return,
+    a bare return, a non-identity return, mixed kinds, or differing
+    expressions disqualify it.
+    """
+    returns: list[ast.Return] = []
+    stack = list(node.body)
+    while stack:
+        item = stack.pop()
+        if isinstance(item, ast.Return):
+            returns.append(item)
+        elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        else:
+            stack.extend(ast.iter_child_nodes(item))
+    if not returns:
+        return None
+    profile: dict[str, Any] | None = None
+    for ret in returns:
+        if ret.value is None:
+            return None
+        text = ast.unparse(ret.value)
+        if _TRUSTED.fullmatch(text):
+            kind = "trusted"
+        elif _REQUEST.fullmatch(text):
+            kind = "request"
+        else:
+            return None
+        if profile is None:
+            profile = {"kind": kind, "expression": text,
+                       "return_lines": [ret.lineno], "function_line": node.lineno}
+        elif profile["kind"] != kind or profile["expression"] != text:
+            return None
+        else:
+            profile["return_lines"].append(ret.lineno)
+    return profile
+
+
+def _python_identity_return_helpers(path: str, source: str) -> dict[str, dict[str, Any]]:
+    """Map top-level Python helper names to their single identity return.
+
+    A helper qualifies only when every ``return`` in its body (not counting
+    returns inside nested functions or classes) carries a value whose
+    ``ast.unparse`` text fully matches one identity pattern, and all those
+    values are the same kind and the same expression text. A helper with no
+    return, a bare ``return``, a non-identity return, mixed kinds, or
+    differing expressions does not qualify. A name defined twice with
+    different return profiles is ambiguous and dropped. Non-Python files
+    and syntax-invalid Python deliberately produce no helpers.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        profile = _identity_return_profile(node)
+        if profile is not None:
+            candidates.setdefault(node.name, []).append(profile)
+    helpers: dict[str, dict[str, Any]] = {}
+    for name, profiles in candidates.items():
+        first = profiles[0]
+        if all(p["kind"] == first["kind"] and p["expression"] == first["expression"]
+               for p in profiles):
+            helpers[name] = {**first, "return_lines": sorted(
+                {line for p in profiles for line in p["return_lines"]})}
+    return helpers
+
+
+def _python_class_method_returns(path: str, source: str) -> dict[
+        tuple[str, str], dict[str, Any]]:
+    """Map (class, method) pairs to their direct returns, for Python.
+
+    Each entry carries the method's ``function_line`` and its direct
+    ``(line, ast.unparse text)`` returns (returns inside nested
+    functions or classes excluded, same traversal as
+    ``_identity_return_profile``), plus its ``assigns``: the
+    ``(attr, line, ast.unparse rhs)`` of ``self.<attr> = <rhs>``
+    assignments in the same method (single-target ``ast.Assign`` only,
+    same traversal rules; P21), plus its ``params``: the positional
+    parameter names after the first (``self``/``cls``), in order (P23:
+    constructor parameter value flow). A (class, method) defined twice
+    merges its returns, matching ``_python_identity_return_methods``.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    methods: dict[tuple[str, str], dict[str, Any]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            returns: list[ast.Return] = []
+            assigns: list[tuple[str, int, str]] = []
+            stack = list(method.body)
+            while stack:
+                item = stack.pop()
+                if isinstance(item, ast.Return):
+                    returns.append(item)
+                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                else:
+                    if isinstance(item, ast.Assign) and len(item.targets) == 1:
+                        target = item.targets[0]
+                        if (isinstance(target, ast.Attribute)
+                                and isinstance(target.value, ast.Name)
+                                and target.value.id == "self"):
+                            assigns.append((target.attr, item.lineno,
+                                            ast.unparse(item.value)))
+                    stack.extend(ast.iter_child_nodes(item))
+            entry = methods.setdefault((node.name, method.name),
+                                       {"function_line": method.lineno, "returns": [],
+                                        "assigns": [],
+                                        "params": [arg.arg for arg in
+                                                   list(method.args.posonlyargs)
+                                                   + list(method.args.args)][1:]})
+            entry["returns"].extend((ret.lineno, ast.unparse(ret.value))
+                                    for ret in returns if ret.value is not None)
+            entry["assigns"].extend(assigns)
+    return methods
+
+
+def _python_direct_identity_profiles(
+        path: str, methods: dict[tuple[str, str], dict[str, Any]]
+        ) -> dict[tuple[str, str], dict[str, Any]]:
+    """Direct identity profiles for one file's (class, method) -> returns map.
+
+    A method qualifies only when every direct return fully matches one
+    identity pattern, all the same kind and the same expression text.
+    The profile carries the qualified ``Class.method`` name, the
+    defining file, the method's definition line and an empty
+    ``delegation`` list (direct profiles delegate to nothing).
+    """
+    helpers: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, info in methods.items():
+        profile: dict[str, Any] | None = None
+        for line_no, text in info["returns"]:
+            if _TRUSTED.fullmatch(text):
+                kind = "trusted"
+            elif _REQUEST.fullmatch(text):
+                kind = "request"
+            else:
+                profile = None
+                break
+            if profile is None:
+                profile = {"kind": kind, "expression": text,
+                           "return_lines": [line_no],
+                           "function_line": info["function_line"]}
+            elif profile["kind"] != kind or profile["expression"] != text:
+                profile = None
+                break
+            else:
+                profile["return_lines"].append(line_no)
+        if profile is not None:
+            # Return lines are sorted and deduplicated, matching the
+            # previous _python_identity_return_methods merge (the AST
+            # stack walk collects them in reverse source order).
+            profile["return_lines"] = sorted(set(profile["return_lines"]))
+            helpers[key] = {**profile, "path": path,
+                            "function": f"{key[0]}.{key[1]}", "delegation": []}
+    return helpers
+
+
+def _python_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Map (class, method) pairs to their single identity return.
+
+    Only methods directly defined in a top-level class qualify, under the
+    same return rule as top-level helpers (see ``_identity_return_profile``).
+    A (class, method) defined twice with different return profiles is
+    ambiguous and dropped. The profile carries the qualified ``Class.method``
+    name and the defining file, for propagation records. Non-Python files
+    and syntax-invalid Python deliberately produce no methods. This is the
+    direct-only version; methods delegating through ``super()`` need the
+    project-wide ``_python_all_identity_return_methods``.
+    """
+    return _python_direct_identity_profiles(path, _python_class_method_returns(path, source))
+
+
+def _python_top_level_class_names(source: str) -> set[str]:
+    """Top-level class names defined in one Python source (AST, fail-closed)."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    return {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+
+
+def _python_base_classes(
+        code_by_file: dict[str, str]) -> dict[str, dict[str, list[tuple[str, str]]]]:
+    """Map files to {class: [direct bases in declaration order]} for Python extends clauses.
+
+    Only bare-identifier bases (``class X(Base, Mixin)``) and two-segment
+    attribute bases (``class X(auth.Base)``) count: each base resolves
+    to a top-level class of the same file first, else through a
+    ``from <module> import Base`` (bare names) or through a module import
+    binding (attribute bases; same import rules as
+    ``_python_module_bindings``). All declared bases must resolve: a
+    class with any unresolvable base gets no entry (fail closed -- an
+    incomplete hierarchy has no trustworthy MRO). Expression bases
+    (``class X(mixin(Base))``) and three-or-more-segment attribute bases
+    (``class X(pkg.auth.Base)``) leave the class without a base (fail
+    closed). Only top-level classes are recorded.
+    """
+    module_index = _python_module_index(code_by_file)
+    result: dict[str, dict[str, list[tuple[str, str]]]] = {}
+    for path, source in code_by_file.items():
+        if not path.lower().endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(source, filename=path)
+        except (SyntaxError, ValueError):
+            continue
+        class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+        caller_package = _package_for_module(_module_for_path(path), path)
+        module_bindings = _python_module_bindings(path, source, module_index)
+        bases: dict[str, list[tuple[str, str]]] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if not node.bases or not all(
+                    isinstance(base, ast.Name)
+                    or (isinstance(base, ast.Attribute)
+                        and isinstance(base.value, ast.Name))
+                    for base in node.bases):
+                continue
+            resolved: list[tuple[str, str]] = []
+            for base_node in node.bases:
+                if isinstance(base_node, ast.Attribute):
+                    module = module_bindings.get(base_node.value.id)
+                    if module is None:
+                        break
+                    target_path = module_index.get(module)
+                    if target_path is None:
+                        break
+                    if base_node.attr in _python_top_level_class_names(
+                            code_by_file[target_path]):
+                        resolved.append((target_path, base_node.attr))
+                    else:
+                        break
+                    continue
+                base = base_node.id
+                if base in class_names:
+                    resolved.append((path, base))
+                    continue
+                target_path: str | None = None
+                for import_node in tree.body:
+                    if not isinstance(import_node, ast.ImportFrom) or import_node.module is None:
+                        continue
+                    if import_node.level and import_node.level > 0:
+                        absolute = _relative_module(caller_package, import_node.level,
+                                                    import_node.module)
+                    else:
+                        absolute = import_node.module
+                    if absolute is None:
+                        continue
+                    candidate = module_index.get(absolute)
+                    if candidate is None:
+                        continue
+                    if any(alias.name == base and (alias.asname or alias.name) == base
+                           for alias in import_node.names):
+                        target_path = candidate
+                        break
+                if target_path is None:
+                    break
+                if base in _python_top_level_class_names(code_by_file[target_path]):
+                    resolved.append((target_path, base))
+                else:
+                    break
+            if len(resolved) == len(node.bases):
+                bases[node.name] = resolved
+        if bases:
+            result[path] = bases
+    return result
+
+
+def _python_class_mro(
+        start: tuple[str, str],
+        bases: dict[str, dict[str, list[tuple[str, str]]]]) -> list[tuple[str, str]] | None:
+    """C3 linearization of a class hierarchy, excluding the class itself.
+
+    ``bases`` maps ``(file, class)`` to its direct bases in declaration
+    order. Returns the ancestors in Python method-resolution order, or
+    None when the hierarchy is cyclic or inconsistent (fail closed).
+    """
+    memo: dict[tuple[str, str], list[tuple[str, str]] | None] = {}
+    visiting: set[tuple[str, str]] = set()
+
+    def linearize(key: tuple[str, str]) -> list[tuple[str, str]] | None:
+        if key in memo:
+            return memo[key]
+        if key in visiting:
+            return None
+        visiting.add(key)
+        direct = bases.get(key[0], {}).get(key[1], [])
+        seqs: list[list[tuple[str, str]]] = []
+        for base in direct:
+            tail = linearize(base)
+            if tail is None:
+                visiting.discard(key)
+                memo[key] = None
+                return None
+            seqs.append([base] + tail)
+        seqs.append(list(direct))
+        merged: list[tuple[str, str]] = []
+        while True:
+            seqs = [seq for seq in seqs if seq]
+            if not seqs:
+                break
+            head: tuple[str, str] | None = None
+            for seq in seqs:
+                candidate = seq[0]
+                if not any(candidate in other[1:] for other in seqs):
+                    head = candidate
+                    break
+            if head is None:
+                visiting.discard(key)
+                memo[key] = None
+                return None
+            merged.append(head)
+            for seq in seqs:
+                if seq[0] == head:
+                    seq.pop(0)
+        visiting.discard(key)
+        memo[key] = merged
+        return merged
+
+    return linearize(start)
+
+
+def _python_method_profile(file: str, cls: str, method: str,
+                           profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
+                           defined: dict[str, set[tuple[str, str]]],
+                           bases: dict[str, dict[str, list[tuple[str, str]]]],
+                           skip_self: bool = False,
+                           after: str | None = None) -> dict[str, Any] | None:
+    """Resolve a method to its single identity return profile, walking the MRO.
+
+    The Python mirror of ``_ts_method_profile``: the class itself first
+    (unless ``skip_self``, for ``super()`` calls, which skip the current
+    class): defined but without an identity profile means shadowed --
+    return None and do not walk up. Not defined: walk the C3 MRO tail
+    (at most 8 ancestors); the first ancestor defining the method wins
+    (profile or shadowed None). ``after`` names the class a two-argument
+    ``super(X, self)`` starts after: X itself means the normal
+    ``super()`` start; an ancestor means start after it; a name not in
+    the hierarchy, or ambiguous across files, fails closed.
+    """
+    if not skip_self and (cls, method) in defined.get(file, set()):
+        return profiles.get(file, {}).get((cls, method))
+    mro = _python_class_mro((file, cls), bases)
+    if mro is None:
+        return None
+    if after is not None:
+        candidates = [(file, cls)] + mro
+        matches = [key for key in candidates if key[1] == after]
+        if len(matches) != 1:
+            return None
+        start = matches[0]
+        if start == (file, cls):
+            pass
+        else:
+            mro = mro[mro.index(start) + 1:]
+    for base_file, base_class in mro[:8]:
+        if (base_class, method) in defined.get(base_file, set()):
+            return profiles.get(base_file, {}).get((base_class, method))
+    return None
+
+
+def _python_attr_return_resolution(
+        path: str, key: tuple[str, str], info: dict[str, Any],
+        profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
+        defined: dict[str, set[tuple[str, str]]],
+        bases: dict[str, dict[str, list[tuple[str, str]]]],
+        attr: str) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Resolve ``return self.<attr>`` from same-method assignments (P21).
+
+    Only assignments in the same method, before its earliest return
+    line, count (an assignment after a return is dead code; an
+    assignment in another method is not statically guaranteed to have
+    run). Every such assignment's right-hand side must resolve to the
+    same identity source: a direct identity expression, or a
+    ``self.<method>(...)`` call to an already-profiled method (MRO,
+    no ``skip_self``; the target's delegation and return lines follow
+    the assignment-line item in the step). All assignments must agree
+    on kind and expression; the returned step accumulates every
+    assignment's items in source order, so two assignments of the same
+    expression both appear in the propagation. Any other right-hand
+    side, a missing assignment, or a kind/expression mismatch
+    disqualifies the method (None).
+    """
+    if not info["returns"]:
+        return None
+    earliest_return = min(line_no for line_no, _ in info["returns"])
+    assigns = sorted(
+        (line_no, rhs) for name, line_no, rhs in info.get("assigns", [])
+        if name == attr and line_no < earliest_return)
+    if not assigns:
+        return None
+    kind: str | None = None
+    expr: str | None = None
+    step: list[dict[str, Any]] = []
+    for assign_line, rhs in assigns:
+        if _TRUSTED.fullmatch(rhs):
+            rhs_kind, rhs_expr = "trusted", rhs
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}", "returns": rhs}]
+        elif _REQUEST.fullmatch(rhs):
+            rhs_kind, rhs_expr = "request", rhs
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}", "returns": rhs}]
+        else:
+            method_match = _PY_SELF_METHOD_CALL_RE.match(rhs)
+            if method_match is None:
+                return None
+            target = _python_method_profile(
+                path, key[0], method_match.group(1), profiles, defined, bases)
+            if target is None:
+                return None
+            rhs_kind, rhs_expr = target["kind"], target["expression"]
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}",
+                         "returns": target["expression"]}]
+            rhs_step.extend(target.get("delegation", []))
+            rhs_step.extend(
+                {"path": target["path"], "line": return_line,
+                 "function": target["function"],
+                 "returns": target["expression"]}
+                for return_line in target["return_lines"])
+        if kind is None:
+            kind, expr = rhs_kind, rhs_expr
+        elif kind != rhs_kind or expr != rhs_expr:
+            return None
+        step.extend(rhs_step)
+    if kind is None or expr is None:
+        return None
+    return kind, expr, step
+
+
+def _python_ctor_attr_resolution(
+        path: str, cls: str, attr: str, params: list[str],
+        init: dict[str, Any], ctor_args: list[str]) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Resolve one ``self.<attr>`` through ``__init__`` assignments (P23).
+
+    Every ``self.<attr> = <rhs>`` assignment in ``__init__`` must
+    resolve to the same identity source. A right-hand side is either
+    a bare ``__init__`` parameter (the construction argument at that
+    position must itself be an identity expression) or an identity
+    expression whose leading name is an ``__init__`` parameter (the
+    construction argument substitutes for that name, and the result
+    must match the same pattern). Anything else -- a literal, a local,
+    a ``self.<method>(...)`` call -- fails closed. Keyword arguments
+    and an argument count that does not match the parameter count fail
+    closed. The returned step holds one item per assignment, in
+    source order.
+    """
+    if any(re.match(r"[A-Za-z_]\w*\s*=", arg) for arg in ctor_args):
+        return None
+    if len(ctor_args) != len(params):
+        return None
+    assigns = sorted(
+        (line_no, rhs) for name, line_no, rhs in init.get("assigns", [])
+        if name == attr)
+    if not assigns:
+        return None
+    kind: str | None = None
+    expr: str | None = None
+    step: list[dict[str, Any]] = []
+    for assign_line, rhs in assigns:
+        if re.fullmatch(r"[A-Za-z_]\w*", rhs) and rhs in params:
+            arg = ctor_args[params.index(rhs)]
+            if _TRUSTED.fullmatch(arg):
+                rhs_kind, rhs_expr = "trusted", arg
+            elif _REQUEST.fullmatch(arg):
+                rhs_kind, rhs_expr = "request", arg
+            else:
+                return None
+        else:
+            head = re.match(r"([A-Za-z_]\w*)\.", rhs)
+            if head is None or head.group(1) not in params:
+                return None
+            substituted = ctor_args[params.index(head.group(1))] + rhs[head.end(1):]
+            if _TRUSTED.fullmatch(substituted):
+                rhs_kind, rhs_expr = "trusted", substituted
+            elif _REQUEST.fullmatch(substituted):
+                rhs_kind, rhs_expr = "request", substituted
+            else:
+                return None
+        if kind is None:
+            kind, expr = rhs_kind, rhs_expr
+        elif kind != rhs_kind or expr != rhs_expr:
+            return None
+        step.append({"path": path, "line": assign_line,
+                     "function": f"{cls}.__init__", "returns": rhs_expr})
+    if kind is None or expr is None:
+        return None
+    return kind, expr, step
+
+
+def _python_ctor_return_resolution(
+        target_file: str, target_class: str, method: str,
+        ctor_args: list[str],
+        scans: dict[str, dict[tuple[str, str], dict[str, Any]]],
+        defined: dict[str, set[tuple[str, str]]]) -> dict[str, Any] | None:
+    """Resolve ``return self.<attr>`` through a constructor call (P23).
+
+    Call-site fallback for the P22 local-instance branch: the method
+    has no identity profile (its returns are attribute reads, not
+    direct identity expressions), but it is defined in the target
+    class, and the instance was constructed locally with known
+    positional arguments. Every direct return must be ``self.<attr>``
+    resolving through the same class's ``__init__`` assignments to the
+    same identity source (``_python_ctor_attr_resolution``); the
+    returned profile-like dict carries the ``__init__`` assignment
+    lines as its delegation. Anything else -- a direct identity
+    return, a mixed return, an attribute with no ``__init__``
+    assignment -- fails closed.
+    """
+    if (target_class, method) not in defined.get(target_file, set()):
+        return None
+    methods = scans.get(target_file, {})
+    info = methods.get((target_class, method))
+    if info is None or not info.get("returns"):
+        return None
+    init = methods.get((target_class, "__init__"))
+    if init is None:
+        return None
+    params = init.get("params", [])
+    kind: str | None = None
+    expr: str | None = None
+    seen: dict[str, tuple[str, str, list[dict[str, Any]]]] = {}
+    order: list[str] = []
+    return_lines: list[int] = []
+    for line_no, text in info["returns"]:
+        attr_match = _PY_SELF_ATTR_RETURN_RE.match(text)
+        if attr_match is None:
+            return None
+        attr = attr_match.group(1)
+        if attr not in seen:
+            resolved = _python_ctor_attr_resolution(
+                target_file, target_class, attr, params, init, ctor_args)
+            if resolved is None:
+                return None
+            seen[attr] = resolved
+            order.append(attr)
+        attr_kind, attr_expr, _attr_step = seen[attr]
+        if kind is None:
+            kind, expr = attr_kind, attr_expr
+        elif kind != attr_kind or expr != attr_expr:
+            return None
+        return_lines.append(line_no)
+    if kind is None or expr is None:
+        return None
+    step: list[dict[str, Any]] = []
+    for attr in order:
+        step.extend(seen[attr][2])
+    return {"kind": kind, "expression": expr, "path": target_file,
+            "function": f"{target_class}.{method}",
+            "return_lines": sorted(set(return_lines)),
+            "function_line": info["function_line"], "delegation": step}
+
+
+def _python_all_identity_return_methods(
+        code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
+    """Project-wide Python identity return profiles, including super() delegation.
+
+    Direct profiles first, then up to 8 fixpoint rounds resolving
+    methods whose every direct return is an identity expression, a
+    ``super().<method>(...)`` / ``super(X, self).<method>(...)`` call
+    to an already-profiled base method (P9 chain walk, ``skip_self=True``;
+    P10 resolves the target over the C3 MRO, with ``super(X, self)``
+    starting after X), a ``self.<attr>.<method>(...)`` call delegating
+    through an instance attribute whose class resolves via the file's
+    same-file (P8) or cross-file (P14-P18) attribute map (P19 second hop),
+    or a ``self.<method>(...)`` call delegating to another method of the
+    same class, resolved over the MRO (P20), or a ``return self.<attr>``
+    returning an instance attribute assigned from an identity source in
+    the same method, before its earliest return (P21).
+    All returns must agree on kind, expression and delegation
+    steps: a direct return mixed with a super-delegated return, or
+    super calls to different targets, disqualifies the method. A
+    delegating profile carries ``delegation``: the target profile's
+    return evidence items (its own delegation first, then its return
+    lines), each ``{path, line, function, returns}``.
+    """
+    scans = {
+        path: _python_class_method_returns(path, source)
+        for path, source in code_by_file.items()
+        if path.lower().endswith(".py")
+    }
+    bases = _python_base_classes(code_by_file)
+    defined = {
+        path: {(cls, method) for (cls, method) in methods}
+        for path, methods in scans.items()
+    }
+    profiles = {
+        path: _python_direct_identity_profiles(path, methods)
+        for path, methods in scans.items()
+    }
+    # P19: per-file (class, attribute) -> (file, class), merging the
+    # same-file map (P8) with the cross-file map (P14-P18); a pair
+    # resolves at most one way, so the merge cannot collide.
+    cross_attr = _python_cross_file_instance_bindings(code_by_file)
+    attr_classes = {
+        path: {
+            **{(cls, attr): (path, klass)
+               for (cls, attr), klass in
+               _python_instance_attribute_classes(path, source).items()},
+            **cross_attr.get(path, {}),
+        }
+        for path, source in code_by_file.items()
+        if path.lower().endswith(".py")
+    }
+    for _round in range(8):
+        changed = False
+        for path, methods in scans.items():
+            for key, info in methods.items():
+                if key in profiles[path]:
+                    continue
+                profile: dict[str, Any] | None = None
+                delegation: list[dict[str, Any]] | None = None
+                for line_no, text in info["returns"]:
+                    step: list[dict[str, Any]] | None = None
+                    if _TRUSTED.fullmatch(text):
+                        kind, expr = "trusted", text
+                    elif _REQUEST.fullmatch(text):
+                        kind, expr = "request", text
+                    else:
+                        match = _PY_SUPER_CALL_RE.match(text)
+                        if match is not None:
+                            target = _python_method_profile(
+                                path, key[0], match.group(3), profiles, defined, bases,
+                                skip_self=True, after=match.group(2))
+                        else:
+                            # P19: `return self.<attr>.<method>(...)`
+                            # delegates through an instance attribute
+                            # whose class resolves via the file's
+                            # attribute map (same-file P8 or cross-file
+                            # P14-P18); the target method must already
+                            # have a profile.
+                            attr_match = _PY_SELF_ATTR_CALL_RE.match(text)
+                            if attr_match is not None:
+                                attr_target = attr_classes.get(path, {}).get(
+                                    (key[0], attr_match.group(1)))
+                                if attr_target is None:
+                                    profile = None
+                                    break
+                                target = _python_method_profile(
+                                    attr_target[0], attr_target[1], attr_match.group(2),
+                                    profiles, defined, bases)
+                            else:
+                                # P20: `return self.<method>(...)`
+                                # delegates to another method of the
+                                # same class, resolved over the MRO;
+                                # the target method must already have
+                                # a profile.
+                                method_match = _PY_SELF_METHOD_CALL_RE.match(text)
+                                if method_match is not None:
+                                    target = _python_method_profile(
+                                        path, key[0], method_match.group(1),
+                                        profiles, defined, bases)
+                                else:
+                                    # P21: `return self.<attr>`
+                                    # returns an instance attribute
+                                    # assigned from an identity source
+                                    # in the same method, before its
+                                    # earliest return; the resolution
+                                    # builds the delegation step
+                                    # directly (assignment line first,
+                                    # then the target method's
+                                    # evidence, if any).
+                                    attr_return = _PY_SELF_ATTR_RETURN_RE.match(text)
+                                    if attr_return is None:
+                                        profile = None
+                                        break
+                                    resolved = _python_attr_return_resolution(
+                                        path, key, info, profiles, defined, bases,
+                                        attr_return.group(1))
+                                    if resolved is None:
+                                        profile = None
+                                        break
+                                    kind, expr, step = resolved
+                        if step is None:
+                            if target is None:
+                                profile = None
+                                break
+                            kind, expr = target["kind"], target["expression"]
+                            step = target.get("delegation", []) + [
+                                {"path": target["path"], "line": return_line,
+                                 "function": target["function"],
+                                 "returns": target["expression"]}
+                                for return_line in target["return_lines"]]
+                    if profile is None:
+                        profile = {"kind": kind, "expression": expr,
+                                   "return_lines": [line_no],
+                                   "function_line": info["function_line"]}
+                        delegation = step if step is not None else []
+                    elif (profile["kind"] != kind or profile["expression"] != expr
+                          or delegation != (step if step is not None else [])):
+                        profile = None
+                        break
+                    else:
+                        profile["return_lines"].append(line_no)
+                if profile is not None:
+                    profile["return_lines"] = sorted(set(profile["return_lines"]))
+                    profiles[path][key] = {
+                        **profile, "path": path,
+                        "function": f"{key[0]}.{key[1]}",
+                        "delegation": delegation if delegation is not None else []}
+                    changed = True
+        if not changed:
+            break
+    return profiles
+
+
+def _python_class_method_ranges(path: str, source: str) -> dict[int, str]:
+    """Map line numbers to their enclosing top-level class name.
+
+    Only lines inside a method directly defined in a top-level class are
+    mapped. Lines inside a nested function or class definition within that
+    method are excluded: their ``self`` does not refer to the outer
+    instance. Non-Python files and syntax-invalid Python produce no ranges.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    ranges: dict[int, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            lines = set(range(method.lineno, method.end_lineno + 1))
+            for nested in ast.walk(method):
+                if nested is method:
+                    continue
+                if isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    lines -= set(range(nested.lineno, nested.end_lineno + 1))
+            for line in lines:
+                ranges[line] = node.name
+    return ranges
+
+
+_TS_CLASS_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)\b"
+)
+_TS_METHOD_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|async|readonly|declare|override|abstract)\s+)*"
+    r"([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\((?:[^(){}]|\([^()]*\))*\)\s*(?::\s*[^{]+?)?\s*\{"
+)
+_TS_RETURN_RE = re.compile(r"^\s*return\s+([^;]+?)\s*;?\s*$")
+_TS_FIELD_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|readonly|declare|override|abstract|static)\s+)*"
+    r"([A-Za-z_$][\w$]*)\s*(?:!)?\s*(?::\s*[^=;{]+?)?\s*=\s*(.+?)\s*;?\s*$"
+)
+_TS_THIS_ASSIGN_RE = re.compile(
+    r"^\s*this\.([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+?)\s*;?\s*$"
+)
+_TS_NEW_RE = re.compile(r"^new\s+([A-Za-z_$][\w$]*)\s*(?:\(|;|$)")
+_TS_NS_NEW_RE = re.compile(
+    r"^new\s+([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*(?:\(|;|$)")
+
+def _ts_constructed_class(rhs: str) -> str | None:
+    """Class constructed by a `new` right-hand side, if any (T9).
+
+    A bare `new <Class>(...)` yields the class name; a two-segment
+    `new <ns>.<Class>(...)` yields the dotted name `"ns.Class"`.
+    Anything else yields None (the attribute is disqualified).
+    """
+    constructed = _TS_NEW_RE.match(rhs)
+    if constructed:
+        return constructed.group(1)
+    namespaced = _TS_NS_NEW_RE.match(rhs)
+    if namespaced:
+        return f"{namespaced.group(1)}.{namespaced.group(2)}"
+    return None
+_TS_NAMED_IMPORT_RE = re.compile(
+    r"import\s*\{([^}]*)\}\s*from\s*[\"']([^\"']+)[\"']"
+)
+_TS_IMPORT_SPEC_RE = re.compile(
+    r"^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$"
+)
+_TS_NAMESPACE_IMPORT_RE = re.compile(
+    r"import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*[\"']([^\"']+)[\"']"
+)
+_TS_DEFAULT_IMPORT_RE = re.compile(
+    r"^\s*import\s+([A-Za-z_$][\w$]*)\s+from\s*[\"']([^\"']+)[\"']")
+_TS_MIXED_IMPORT_RE = re.compile(
+    r"^\s*import\s+([A-Za-z_$][\w$]*)\s*,\s*\{([^}]*)\}\s*from\s*[\"']([^\"']+)[\"']")
+_TS_DEFAULT_EXPORT_FN_RE = re.compile(
+    r"^\s*export\s+default\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")
+_TS_DEFAULT_EXPORT_CLASS_RE = re.compile(
+    r"^\s*export\s+default\s+(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)")
+
+
+def _ts_default_import_bindings(path: str, source: str) -> dict[str, str]:
+    """Map local names to specifiers for default imports (T10).
+
+    Only the bare `import <name> from "<spec>"` form, plus the
+    default part of a mixed `import <name>, { ... } from "<spec>"`.
+    Named imports (`import { ... }`), namespace imports
+    (`import * as ...`) and side-effect imports (`import "<spec>"`)
+    do not match; `import type` is skipped.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return {}
+    bindings: dict[str, str] = {}
+    for line in source.splitlines():
+        match = _TS_DEFAULT_IMPORT_RE.match(line)
+        if match and match.group(1) != "type":
+            bindings.setdefault(match.group(1), match.group(2))
+        mixed = _TS_MIXED_IMPORT_RE.match(line)
+        if mixed and mixed.group(1) != "type":
+            bindings.setdefault(mixed.group(1), mixed.group(3))
+    return bindings
+
+
+def _ts_default_export_function(path: str, source: str) -> str | None:
+    """Name of the default-exported function of a TS/JS file, if any (T10).
+
+    Only `export default [async] function <name>` qualifies. An
+    `export default <expr>`, a re-exported identifier
+    (`export default get_uid;`) and an anonymous default export have
+    no such function and return None.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return None
+    for line in source.splitlines():
+        match = _TS_DEFAULT_EXPORT_FN_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _ts_default_export_class(path: str, source: str) -> str | None:
+    """Name of the default-exported class of a TS/JS file, if any (T11).
+
+    Only `export default [abstract] class <name>` qualifies. An
+    anonymous default class (`export default class { ... }`) and a
+    re-exported identifier (`export default AuthHelper;`) have no such
+    class and return None.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return None
+    for line in source.splitlines():
+        match = _TS_DEFAULT_EXPORT_CLASS_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+def _ts_imported_class_bindings(
+    path: str, source: str, code_by_file: dict[str, str],
+    ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Resolve named/default-imported classes for one file (T18).
+
+    Only named imports (``import { MidAuth } from "./mid"``) whose
+    target file directly defines the imported name as a top-level
+    class, and default imports (``import MidAuth from "./mid"``)
+    whose target file default-exports a class under that name
+    (T11 rules: only ``export default class <name>`` qualifies).
+    The import may be relative or a ``tsconfig`` path alias (T7,
+    via ``ts_paths``). A local name shadowed by a same-file
+    top-level class or function, or imported from two different
+    modules (``_ts_import_bindings`` drops those), is dropped
+    (fail closed). Re-exports are not followed, and factories are
+    not resolved here.
+    """
+    if path.lower().endswith(".py"):
+        return {}
+    class_names = _ts_class_scan(path, source)[3]
+    top_functions = set(_ts_top_level_function_returns(path, source))
+    result: dict[str, tuple[str, str]] = {}
+    for local, (specifier, imported) in _ts_import_bindings(path, source).items():
+        if local in class_names or local in top_functions:
+            continue
+        target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+        if target is None:
+            continue
+        if imported in _ts_class_scan(target, code_by_file[target])[3]:
+            result[local] = (target, imported)
+    for local, specifier in _ts_default_import_bindings(path, source).items():
+        if local in class_names or local in top_functions or local in result:
+            continue
+        target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+        if target is None:
+            continue
+        default_class = _ts_default_export_class(target, code_by_file[target])
+        if default_class is not None:
+            result[local] = (target, default_class)
+    return result
+
+
+_TS_TOPLEVEL_FN_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*"
+    r"([A-Za-z_$][\w$]*)\s*\("
+)
+_TS_TOPLEVEL_ARROW_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:async\s+)?(?:\((?:[^)]*)\)|[A-Za-z_$][\w$]*)\s*=>"
+)
+_TS_TOPLEVEL_FN_EXPR_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:async\s+)?function\s*(?:[A-Za-z_$][\w$]*)?\s*\("
+)
+_TS_EXTENDS_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+"
+    r"([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b"
+)
+_TS_SUPER_CALL_RE = re.compile(r"^super\.([A-Za-z_$][\w$]*)\s*\(")
+_TS_THIS_ATTR_CALL_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(")
+_TS_THIS_METHOD_CALL_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)\s*\(")
+_TS_THIS_ATTR_RETURN_RE = re.compile(r"^this\.([A-Za-z_$][\w$]*)$")
+_PY_SUPER_CALL_RE = re.compile(r"^super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(")
+_PY_SELF_ATTR_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
+_PY_SELF_METHOD_CALL_RE = re.compile(r"^self\.([A-Za-z_]\w*)\s*\(")
+_PY_SELF_ATTR_RETURN_RE = re.compile(r"^self\.([A-Za-z_]\w*)$")
+_PY_SUPER_CALL_RHS = re.compile(r"super\((?:()|([A-Za-z_]\w*)\s*,\s*(?:self|cls))\)\.([A-Za-z_]\w*)\s*\(.*\)$")
+_TS_NESTED_FN_RE = re.compile(r"=>\s*\{|\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\(")
+_TS_CLASS_FIELD_ARROW_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|readonly|declare|override|abstract)\s+)*"
+    r"([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:\((?:[^)]*)\)|[A-Za-z_$][\w$]*)\s*=>"
+)
+_TS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
+
+
+def _strip_ts_line(line: str) -> str:
+    """Remove same-line string literals and a trailing ``//`` comment.
+
+    Only for the brace/return scan below: braces inside strings and
+    comments must not move the scope stack. A backtick string without a
+    closing backtick on this line (a multi-line template literal) is
+    stripped from its first backtick to the end of the line.
+    """
+    line = _TS_STRING_RE.sub("", line)
+    if "`" in line:
+        line = line.split("`", 1)[0]
+    return line.split("//", 1)[0]
+
+
+def _ts_method_params(header: str) -> list[str]:
+    """Parameter names from a TS/JS method header (T19).
+
+    Takes the ``_TS_METHOD_RE`` match text (e.g.
+    ``constructor(req: any) {``) and returns the bare parameter
+    identifiers in order, stripping type annotations and defaults.
+    Any shape the parser cannot read returns [] (fail closed: an
+    empty list never matches a non-empty constructor call).
+    """
+    start = header.find("(")
+    if start < 0:
+        return []
+    depth = 0
+    end = -1
+    for index in range(start, len(header)):
+        char = header[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                end = index
+                break
+    if end < 0:
+        return []
+    inner = header[start + 1:end].strip()
+    if not inner:
+        return []
+    pieces: list[str] = []
+    depth = 0
+    piece_start = 0
+    for index, char in enumerate(inner):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            pieces.append(inner[piece_start:index])
+            piece_start = index + 1
+    pieces.append(inner[piece_start:])
+    params: list[str] = []
+    for piece in pieces:
+        name = re.match(r"[A-Za-z_$][\w$]*", piece.strip())
+        if name is None:
+            return []
+        params.append(name.group(0))
+    return params
+
+
+def _ts_class_scan(path: str, source: str) -> tuple[
+        dict[tuple[str, str], list[tuple[int, str]]], dict[int, str],
+        dict[tuple[str, str], set[str | None]], set[str], set[tuple[str, str]],
+        dict[tuple[str, str], list[tuple[str, int, str]]],
+        dict[tuple[str, str], list[str]]]:
+    """One brace-counting pass over a TS/JS file.
+
+    Returns ``(methods, ranges, attr_candidates, class_names, defined,
+    method_assigns, method_params)``:
+    ``methods`` maps ``(class, method)`` pairs directly defined in a
+    top-level class to their direct ``(line, expression)`` returns;
+    ``ranges`` maps line numbers to their enclosing top-level class
+    name, for lines inside such a method; ``attr_candidates`` maps
+    ``(class, attribute)`` pairs to the set of classes constructed for
+    them (``None`` for a non-construction binding, which disqualifies
+    the attribute); ``class_names`` is the set of top-level class
+    names; ``defined`` is the set of ``(class, method)`` pairs directly
+    defined in a top-level class (including methods without returns;
+    used for the inheritance shadowing check); ``method_assigns`` maps
+    ``(class, method)`` pairs to their ``(attr, line, rhs)``
+    ``this.<attr> = <rhs>`` assignments (same-method, same traversal
+    rules as returns; T17; T19 also records constructor frames under
+    the key ``(class, "constructor")``); ``method_params`` maps
+    ``(class, method)`` pairs to their bare parameter names in order
+    (T19: constructor parameter value flow). Returns inside nested
+    functions or classes are excluded from both. A method header must
+    open its body on the same line; anything else fails closed (no
+    method, no returns). Only the direct returns are collected --
+    whether they qualify as identity returns is decided by
+    ``_ts_identity_return_methods``.
+    """
+    methods: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    ranges: dict[int, str] = {}
+    attr_candidates: dict[tuple[str, str], set[str | None]] = {}
+    class_names: set[str] = set()
+    defined: set[tuple[str, str]] = set()
+    method_assigns: dict[tuple[str, str], list[tuple[str, int, str]]] = {}
+    method_params: dict[tuple[str, str], list[str]] = {}
+    # Frames: kind "class" | "method" | "nested", interior brace depth,
+    # class name, method name. "nested" covers nested functions and
+    # nested classes, whose lines and returns never belong to the outer
+    # method; its "flavor" ("arrow" | "function" | "class") records
+    # whether the nested body captures the outer ``this``.
+    stack: list[dict[str, Any]] = []
+    depth = 0
+    in_template = False
+    pending_nested: str | None = None
+    for line_no, raw in enumerate(source.splitlines(), 1):
+        # A multi-line template literal: skip detection and returns on
+        # its inner lines, but keep counting braces like the rest of
+        # this module does (an approximation, documented here).
+        if (raw.count("`") - raw.count("\\`")) % 2 == 1:
+            in_template = not in_template
+        stripped = "" if in_template else _strip_ts_line(raw)
+        while stack and stack[-1]["depth"] > depth:
+            stack.pop()
+        opens = stripped.count("{")
+        closes = stripped.count("}")
+        was_pending_nested = pending_nested
+        pending_nested = None
+
+        def interior(match_end: int) -> int:
+            prefix = stripped[:match_end]
+            return depth + prefix.count("{") - prefix.count("}")
+
+        def _flush(frame: dict[str, Any]) -> None:
+            if frame["kind"] != "method":
+                return
+            method_params.setdefault(
+                (frame["class"], frame["method"]), frame.get("params", []))
+            if frame.get("constructor"):
+                # T19: a constructor's assigns are recorded (under the
+                # key (class, "constructor")) even though its returns
+                # never enter `methods`.
+                method_assigns.setdefault(
+                    (frame["class"], frame["method"]), []).extend(frame["assigns"])
+            elif frame["returns"]:
+                methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
+                method_assigns.setdefault((frame["class"], frame["method"]), []).extend(frame["assigns"])
+
+        if stripped:
+            class_frame = next((f for f in reversed(stack) if f["kind"] == "class"), None)
+            method_frame = next((f for f in reversed(stack) if f["kind"] == "method"), None)
+            nested = any(f["kind"] == "nested" for f in stack)
+            nested_this = not any(
+                f["kind"] == "nested" and f.get("flavor") in ("function", "class")
+                for f in stack)
+            if class_frame is None and depth == 0:
+                match = _TS_CLASS_RE.match(stripped)
+                if match and "{" in stripped:
+                    stack.append({"kind": "class", "depth": interior(stripped.index("{") + 1),
+                                  "class": match.group(1), "method": None})
+                    class_frame = stack[-1]
+                    class_names.add(match.group(1))
+            elif method_frame is None and class_frame is not None and not nested:
+                match = _TS_METHOD_RE.match(stripped)
+                if match:
+                    name = match.group(1)
+                    is_static = "static" in re.findall(r"[A-Za-z_$][\w$]*", stripped[:match.start(1)])
+                    if not is_static:
+                        stack.append({"kind": "method",
+                                      "depth": interior(match.end()),
+                                      "class": class_frame["class"], "method": name,
+                                      "constructor": name == "constructor",
+                                      "params": _ts_method_params(match.group(0)),
+                                      "returns": [], "assigns": []})
+                        method_frame = stack[-1]
+                        defined.add((class_frame["class"], name))
+            if method_frame is not None and class_frame is not None and "{" in stripped:
+                # A nested function or class opens a nested frame only when
+                # its brace sits deeper than the method body: a brace in a
+                # parameter default (e.g. cb = () => {}) is at the method's
+                # own depth and must not shadow the whole method.
+                brace_depth = interior(stripped.index("{") + 1)
+                if brace_depth > method_frame["depth"]:
+                    flavor: str | None = None
+                    if _TS_CLASS_RE.match(stripped):
+                        flavor = "class"
+                    elif _TS_NESTED_FN_RE.search(stripped):
+                        flavor = ("arrow" if "=>" in stripped[:stripped.index("{")]
+                                  else "function")
+                    elif was_pending_nested is not None:
+                        flavor = was_pending_nested
+                    if flavor is not None:
+                        stack.append({"kind": "nested", "depth": brace_depth,
+                                      "class": None, "method": None, "flavor": flavor})
+                        nested = True
+                        nested_this = flavor == "arrow"
+            if method_frame is not None and not nested:
+                ranges[line_no] = method_frame["class"]
+                ret = _TS_RETURN_RE.match(stripped)
+                if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
+                    method_frame["returns"].append((line_no, ret.group(1).strip()))
+                assign = _TS_THIS_ASSIGN_RE.match(stripped)
+                if assign:
+                    method_frame["assigns"].append(
+                        (assign.group(1), line_no, assign.group(2).strip()))
+            if method_frame is not None and nested_this:
+                # T2: this.<attr> = new <Class>(...) inside a method (an
+                # arrow body's `this` still refers to the outer instance;
+                # a nested `function` or class body does not). Any other
+                # assignment shape records None and disqualifies the
+                # attribute, exactly like the Python rule.
+                assign = _TS_THIS_ASSIGN_RE.match(stripped)
+                if assign:
+                    attr_candidates.setdefault(
+                        (method_frame["class"], assign.group(1)), set()).add(
+                        _ts_constructed_class(assign.group(2)))
+            if (class_frame is not None and method_frame is None and not nested
+                    and depth == class_frame["depth"]):
+                # T12: a class field arrow function, e.g.
+                # get_uid = (req) => req.user.id; or
+                # get_uid = (req) => { return req.user.id; };. An
+                # expression body records its same-line body as the
+                # return directly; a block body opens a method frame
+                # whose returns are collected like a normal method's.
+                # A `=>` at end of line (multi-line expression body)
+                # fails closed. A static field arrow never matches the
+                # regex (`static` is not a listed modifier, so it is
+                # read as the name and the `=` check fails).
+                arrow = _TS_CLASS_FIELD_ARROW_RE.match(stripped)
+                if arrow:
+                    name = arrow.group(1)
+                    is_static = "static" in re.findall(
+                        r"[A-Za-z_$][\w$]*", stripped[:arrow.start(1)])
+                    if not is_static:
+                        rest = stripped[arrow.end():]
+                        if rest.lstrip().startswith("{"):
+                            stack.append({"kind": "method",
+                                          "depth": interior(stripped.index("{", arrow.end()) + 1),
+                                          "class": class_frame["class"], "method": name,
+                                          "constructor": False, "returns": [], "assigns": []})
+                            method_frame = stack[-1]
+                            defined.add((class_frame["class"], name))
+                        else:
+                            expr = rest.strip()
+                            if expr.endswith(";"):
+                                expr = expr[:-1].strip()
+                            if expr:
+                                methods.setdefault((class_frame["class"], name), []).append(
+                                    (line_no, expr))
+                                defined.add((class_frame["class"], name))
+                else:
+                    # T2: a class field declaration with an initializer, e.g.
+                    # private helper = new AuthHelper();. The depth guard keeps
+                    # body lines of a method whose header the scanner failed to
+                    # recognize from being read as field declarations. A static
+                    # field is not an instance attribute. A non-new initializer
+                    # records None and disqualifies the attribute.
+                    field = _TS_FIELD_RE.match(stripped)
+                    if field:
+                        is_static = "static" in re.findall(
+                            r"[A-Za-z_$][\w$]*", stripped[:field.start(1)])
+                        if not is_static:
+                            attr_candidates.setdefault(
+                                (class_frame["class"], field.group(1)), set()).add(
+                                _ts_constructed_class(field.group(2)))
+            if method_frame is not None and not nested:
+                # An arrow or function header whose body brace lands on the
+                # next line (Allman style): remember it for exactly one line.
+                if re.search(r"=>\s*$", stripped):
+                    pending_nested = "arrow"
+                elif re.search(r"\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\([^;{]*\)\s*$", stripped):
+                    pending_nested = "function"
+        depth += opens - closes
+        while stack and stack[-1]["depth"] > depth:
+            _flush(stack.pop())
+    while stack:
+        _flush(stack.pop())
+    return methods, ranges, attr_candidates, class_names, defined, method_assigns, method_params
+
+
+_VUE_OPTIONS_CLASS = "__vue_options__"
+_TS_VUE_DEFAULT_EXPORT_RE = re.compile(
+    r"^\s*export\s+default\s+(?:defineComponent\s*\()?\s*\{"
+)
+_TS_VUE_METHODS_RE = re.compile(
+    r"^\s*[\"']?methods[\"']?\s*:\s*\{"
+)
+
+
+def _ts_vue_options_methods(path: str, source: str) -> tuple[
+        dict[tuple[str, str], list[tuple[int, str]]], dict[int, str],
+        set[tuple[str, str]], dict[tuple[str, str], set[str | None]]]:
+    """Scan a Vue Options API ``methods:`` block for identity returns.
+
+    Returns ``(methods, ranges, defined, attr_candidates)`` in the same
+    shapes as ``_ts_class_scan``'s first, second, fifth and third
+    values, keyed on the synthetic class ``__vue_options__``: ``methods``
+    maps ``(__vue_options__, method)`` to direct ``(line, expression)``
+    returns; ``ranges`` maps lines inside an options method to the
+    synthetic class; ``defined`` is the set of directly defined
+    options methods (for the shadowing check, which treats a
+    definition without an identity profile as shadowing);
+    ``attr_candidates`` maps ``(__vue_options__, attribute)`` to the
+    set of classes constructed for it by ``this.<attr> = new <Class>``
+    assignments in options methods (``None`` for a non-construction
+    binding, which disqualifies the attribute).
+
+    Only ``.vue`` files, only the default-export object (``export
+    default {`` or ``export default defineComponent({``). Identity
+    return profiles are collected only for methods inside ``methods:``;
+    direct methods of the default object (lifecycle hooks such as
+    ``created()``, ``data()``) still map their lines and their
+    ``this.<attr> = new <Class>`` assignments -- that is where
+    instance attributes are bound -- but their returns are never
+    profiled (like a class constructor). ``computed:`` / ``watch:`` /
+    non-default objects never qualify, and the ``setup()`` hook is
+    excluded outright (its ``this`` is undefined at runtime).
+    A top-level class literally named ``__vue_options__`` in the same
+    file, or a second ``export default``, fails the whole scan closed.
+    """
+    methods: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    ranges: dict[int, str] = {}
+    defined: set[tuple[str, str]] = set()
+    attr_candidates: dict[tuple[str, str], set[str | None]] = {}
+    if not path.lower().endswith(".vue"):
+        return methods, ranges, defined, attr_candidates
+    _m, _r, _c, class_names, _d, _a, _p = _ts_class_scan(path, source)
+    if _VUE_OPTIONS_CLASS in class_names:
+        return methods, ranges, defined, attr_candidates
+    # Frames: kind "default" | "methods" | "method" | "nested", interior
+    # brace depth, method name.
+    stack: list[dict[str, Any]] = []
+    depth = 0
+    in_template = False
+    pending_nested: str | None = None
+    default_seen = False
+    for line_no, raw in enumerate(source.splitlines(), 1):
+        if (raw.count("`") - raw.count("\\`")) % 2 == 1:
+            in_template = not in_template
+        stripped = "" if in_template else _strip_ts_line(raw)
+        while stack and stack[-1]["depth"] > depth:
+            stack.pop()
+        opens = stripped.count("{")
+        closes = stripped.count("}")
+        was_pending_nested = pending_nested
+        pending_nested = None
+
+        def interior(match_end: int) -> int:
+            prefix = stripped[:match_end]
+            return depth + prefix.count("{") - prefix.count("}")
+
+        if stripped:
+            default_frame = next((f for f in reversed(stack) if f["kind"] == "default"), None)
+            methods_frame = next((f for f in reversed(stack) if f["kind"] == "methods"), None)
+            method_frame = next((f for f in reversed(stack) if f["kind"] == "method"), None)
+            nested = any(f["kind"] == "nested" for f in stack)
+            nested_this = not any(
+                f["kind"] == "nested" and f.get("flavor") in ("function", "class")
+                for f in stack)
+            if default_frame is None and depth == 0:
+                match = _TS_VUE_DEFAULT_EXPORT_RE.match(stripped)
+                if match:
+                    if default_seen:
+                        return {}, {}, set(), {}
+                    default_seen = True
+                    stack.append({"kind": "default",
+                                  "depth": interior(stripped.index("{") + 1),
+                                  "method": None})
+                    default_frame = stack[-1]
+            elif (method_frame is None and default_frame is not None
+                    and not nested and depth == default_frame["depth"]):
+                # At the default object's direct depth: either the
+                # `methods:` property or a direct method (a lifecycle
+                # hook such as `created()`, or `data()`). The two
+                # checks share one branch because a line at this depth
+                # can only be one of them; the `methods:` check runs
+                # first so its property is never read as a method.
+                if methods_frame is None:
+                    match = _TS_VUE_METHODS_RE.match(stripped)
+                    if match:
+                        stack.append({"kind": "methods",
+                                      "depth": interior(stripped.index("{") + 1),
+                                      "method": None})
+                        methods_frame = stack[-1]
+                if methods_frame is None and method_frame is None:
+                    # A direct method of the default object. Its lines
+                    # and `this.<attr> = new <Class>` assignments count
+                    # (that is where instance attributes are bound),
+                    # but its returns are never profiled -- like a class
+                    # constructor, a hook's return value is not a
+                    # helper. `setup()` is excluded: its `this` is
+                    # undefined.
+                    match = _TS_METHOD_RE.match(stripped)
+                    if match:
+                        name = match.group(1)
+                        if name not in ("constructor", "setup"):
+                            stack.append({"kind": "method",
+                                          "depth": interior(match.end()),
+                                          "method": name, "returns": [],
+                                          "in_methods": False})
+                            method_frame = stack[-1]
+                            defined.add((_VUE_OPTIONS_CLASS, name))
+            elif method_frame is None and methods_frame is not None and not nested:
+                match = _TS_METHOD_RE.match(stripped)
+                if match:
+                    name = match.group(1)
+                    if name != "constructor":
+                        stack.append({"kind": "method",
+                                      "depth": interior(match.end()),
+                                      "method": name, "returns": [],
+                                      "in_methods": True})
+                        method_frame = stack[-1]
+                        defined.add((_VUE_OPTIONS_CLASS, name))
+            if method_frame is not None and "{" in stripped:
+                # A nested function or class opens a nested frame only when
+                # its brace sits deeper than the method body.
+                brace_depth = interior(stripped.index("{") + 1)
+                if brace_depth > method_frame["depth"]:
+                    flavor: str | None = None
+                    if _TS_CLASS_RE.match(stripped):
+                        flavor = "class"
+                    elif _TS_NESTED_FN_RE.search(stripped):
+                        flavor = ("arrow" if "=>" in stripped[:stripped.index("{")]
+                                  else "function")
+                    elif was_pending_nested is not None:
+                        flavor = was_pending_nested
+                    if flavor is not None:
+                        stack.append({"kind": "nested", "depth": brace_depth,
+                                      "method": None, "flavor": flavor})
+                        nested = True
+                        nested_this = flavor == "arrow"
+            if method_frame is not None and not nested:
+                ranges[line_no] = _VUE_OPTIONS_CLASS
+                # Only `methods:` methods profile their returns;
+                # lifecycle hooks and `data()` never do.
+                if method_frame.get("in_methods"):
+                    ret = _TS_RETURN_RE.match(stripped)
+                    if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
+                        method_frame["returns"].append((line_no, ret.group(1).strip()))
+            if method_frame is not None and nested_this:
+                # V4: this.<attr> = new <Class>(...) inside an options
+                # method (an arrow body's `this` still refers to the
+                # outer instance; a nested `function` or class body does
+                # not). Any other assignment shape records None and
+                # disqualifies the attribute, exactly like the class rule.
+                assign = _TS_THIS_ASSIGN_RE.match(stripped)
+                if assign:
+                    attr_candidates.setdefault(
+                        (_VUE_OPTIONS_CLASS, assign.group(1)), set()).add(
+                        _ts_constructed_class(assign.group(2)))
+            if method_frame is not None and not nested:
+                # An arrow or function header whose body brace lands on the
+                # next line (Allman style): remember it for exactly one line.
+                if re.search(r"=>\s*$", stripped):
+                    pending_nested = "arrow"
+                elif re.search(r"\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\([^;{]*\)\s*$", stripped):
+                    pending_nested = "function"
+        depth += opens - closes
+        while stack and stack[-1]["depth"] > depth:
+            frame = stack.pop()
+            if frame["kind"] == "method" and frame["returns"]:
+                methods.setdefault((_VUE_OPTIONS_CLASS, frame["method"]), []).extend(frame["returns"])
+    while stack:
+        frame = stack.pop()
+        if frame["kind"] == "method" and frame["returns"]:
+            methods.setdefault((_VUE_OPTIONS_CLASS, frame["method"]), []).extend(frame["returns"])
+    return methods, ranges, defined, attr_candidates
+
+
+def _ts_direct_identity_profiles(
+        path: str, methods: dict[tuple[str, str], list[tuple[int, str]]]
+        ) -> dict[tuple[str, str], dict[str, Any]]:
+    """Direct identity profiles for one file's (class, method) -> returns map.
+
+    A method qualifies only when every direct return fully matches one
+    identity pattern, all the same kind and the same expression text.
+    The profile carries the qualified ``Class.method`` name, the
+    defining file and an empty ``delegation`` list (direct profiles
+    delegate to nothing).
+    """
+    helpers: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, returns in methods.items():
+        profile: dict[str, Any] | None = None
+        for line_no, text in returns:
+            if _TRUSTED.fullmatch(text):
+                kind = "trusted"
+            elif _REQUEST.fullmatch(text):
+                kind = "request"
+            else:
+                profile = None
+                break
+            if profile is None:
+                profile = {"kind": kind, "expression": text,
+                           "return_lines": [line_no]}
+            elif profile["kind"] != kind or profile["expression"] != text:
+                profile = None
+                break
+            else:
+                profile["return_lines"].append(line_no)
+        if profile is not None:
+            helpers[key] = {**profile, "path": path,
+                            "function": f"{key[0]}.{key[1]}", "delegation": []}
+    return helpers
+
+
+def _ts_top_level_function_returns(path: str, source: str) -> dict[str, list[tuple[int, str]]]:
+    """Map top-level function names to their direct returns, for TS/JS.
+
+    Only depth-0 ``function`` declarations count (``export`` / ``default`` /
+    ``async`` / ``*`` prefixes allowed; an anonymous default export or a
+    declaration without a body does not). The header must open its body on
+    the same line (Allman style fails closed, like ``_ts_class_scan``).
+    Returns inside nested functions or classes are excluded; returns
+    inside plain blocks (``if``/``for``) count, as for class methods.
+    Arrow-function consts, function expressions and object methods are
+    out of scope. A function defined twice merges its returns.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return {}
+    functions: dict[str, list[tuple[int, str]]] = {}
+    # Frames: kind "function" | "nested", interior brace depth, name,
+    # returns. "nested" covers nested functions and nested classes, whose
+    # lines and returns never belong to the outer function.
+    stack: list[dict[str, Any]] = []
+    depth = 0
+    in_template = False
+    pending_nested: str | None = None
+    for line_no, raw in enumerate(source.splitlines(), 1):
+        if (raw.count("`") - raw.count("\\`")) % 2 == 1:
+            in_template = not in_template
+        stripped = "" if in_template else _strip_ts_line(raw)
+        while stack and stack[-1]["depth"] > depth:
+            frame = stack.pop()
+            if frame["kind"] == "function" and frame["returns"]:
+                functions.setdefault(frame["name"], []).extend(frame["returns"])
+        opens = stripped.count("{")
+        closes = stripped.count("}")
+        was_pending_nested = pending_nested
+        pending_nested = None
+
+        def interior(match_end: int) -> int:
+            prefix = stripped[:match_end]
+            return depth + prefix.count("{") - prefix.count("}")
+
+        if stripped:
+            fn_frame = next((f for f in reversed(stack) if f["kind"] == "function"), None)
+            nested = any(f["kind"] == "nested" for f in stack)
+            if fn_frame is None and depth == 0:
+                match = _TS_TOPLEVEL_FN_RE.match(stripped)
+                if match and "{" in stripped:
+                    stack.append({"kind": "function",
+                                  "depth": interior(stripped.index("{") + 1),
+                                  "name": match.group(1), "returns": []})
+                    fn_frame = stack[-1]
+                else:
+                    # T8: a top-level const bound to an arrow function or
+                    # a function expression counts as a top-level
+                    # function. An expression-bodied arrow returns its
+                    # body on the same line; a block-bodied arrow or a
+                    # function expression opens a frame like a
+                    # declaration. A `=>` with no same-line body, a
+                    # type-annotated const, or a parameter list the
+                    # regex cannot read fails closed.
+                    arrow = _TS_TOPLEVEL_ARROW_RE.match(stripped)
+                    fn_expr = None if arrow else _TS_TOPLEVEL_FN_EXPR_RE.match(stripped)
+                    if arrow:
+                        # The match ends right after `=>`.
+                        arrow_pos = arrow.end() - 2
+                        body = stripped[arrow_pos + 2:].strip().rstrip(";").strip()
+                        if body.startswith("{"):
+                            stack.append({"kind": "function",
+                                          "depth": interior(stripped.index("{", arrow_pos) + 1),
+                                          "name": arrow.group(1), "returns": []})
+                            fn_frame = stack[-1]
+                        elif body:
+                            functions.setdefault(arrow.group(1), []).append(
+                                (line_no, body))
+                    elif fn_expr and "{" in stripped:
+                        stack.append({"kind": "function",
+                                      "depth": interior(stripped.index("{") + 1),
+                                      "name": fn_expr.group(1), "returns": []})
+                        fn_frame = stack[-1]
+            elif fn_frame is not None and "{" in stripped:
+                brace_depth = interior(stripped.index("{") + 1)
+                if brace_depth > fn_frame["depth"]:
+                    flavor: str | None = None
+                    if _TS_CLASS_RE.match(stripped):
+                        flavor = "class"
+                    elif _TS_NESTED_FN_RE.search(stripped):
+                        flavor = ("arrow" if "=>" in stripped[:stripped.index("{")]
+                                  else "function")
+                    elif was_pending_nested is not None:
+                        flavor = was_pending_nested
+                    if flavor is not None:
+                        stack.append({"kind": "nested", "depth": brace_depth,
+                                      "name": None, "returns": []})
+                        nested = True
+            if fn_frame is not None and not nested:
+                ret = _TS_RETURN_RE.match(stripped)
+                if ret and not _TS_NESTED_FN_RE.search(stripped[:ret.start()]):
+                    fn_frame["returns"].append((line_no, ret.group(1).strip()))
+                if re.search(r"=>\s*$", stripped):
+                    pending_nested = "arrow"
+                elif re.search(r"\bfunction\s*(?:[A-Za-z_$][\w$]*)?\s*\([^;{]*\)\s*$", stripped):
+                    pending_nested = "function"
+        depth += opens - closes
+        while stack and stack[-1]["depth"] > depth:
+            frame = stack.pop()
+            if frame["kind"] == "function" and frame["returns"]:
+                functions.setdefault(frame["name"], []).extend(frame["returns"])
+    while stack:
+        frame = stack.pop()
+        if frame["kind"] == "function" and frame["returns"]:
+            functions.setdefault(frame["name"], []).extend(frame["returns"])
+    return functions
+
+
+def _ts_top_level_function_profiles(path: str, source: str) -> dict[str, dict[str, Any]]:
+    """Map top-level function names to their single identity return, for TS/JS.
+
+    The TS mirror of ``_python_identity_return_helpers``: a top-level
+    function qualifies only when every direct return fully matches one
+    identity pattern, all the same kind and the same expression text. A
+    function defined twice with different return profiles is ambiguous
+    and dropped. The profile carries the bare function name and the
+    defining file, for propagation records.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return {}
+    returns_map = _ts_top_level_function_returns(path, source)
+    helpers: dict[str, dict[str, Any]] = {}
+    for name, returns in returns_map.items():
+        profile: dict[str, Any] | None = None
+        for line_no, text in returns:
+            if _TRUSTED.fullmatch(text):
+                kind = "trusted"
+            elif _REQUEST.fullmatch(text):
+                kind = "request"
+            else:
+                profile = None
+                break
+            if profile is None:
+                profile = {"kind": kind, "expression": text,
+                           "return_lines": [line_no]}
+            elif profile["kind"] != kind or profile["expression"] != text:
+                profile = None
+                break
+            else:
+                profile["return_lines"].append(line_no)
+        if profile is not None:
+            helpers[name] = {**profile, "path": path,
+                             "function": name, "delegation": []}
+    return helpers
+
+
+def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Map (class, method) pairs to their single identity return, for TS/JS.
+
+    The TS mirror of ``_python_identity_return_methods``: only methods
+    directly defined in a top-level class qualify, under the same return
+    rule as ``_identity_return_profile`` (every direct return fully
+    matches one identity pattern, all the same kind and the same
+    expression text). A (class, method) defined twice with different
+    return profiles is ambiguous and dropped. The profile carries the
+    qualified ``Class.method`` name and the defining file, for
+    propagation records. This is the direct-only version; methods
+    delegating through ``super`` need the project-wide
+    ``_ts_all_identity_return_methods``.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return {}
+    methods, _ranges, _candidates, _names, _defined, _assigns, _params = _ts_class_scan(path, source)
+    return _ts_direct_identity_profiles(path, methods)
+
+
+def _ts_attr_return_resolution(
+        path: str, key: tuple[str, str], returns: list[tuple[int, str]],
+        assigns: dict[tuple[str, str], list[tuple[str, int, str]]],
+        profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
+        defined: dict[str, set[tuple[str, str]]],
+        bases: dict[str, dict[str, list[tuple[str, str]]]],
+        attr: str) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Resolve ``return this.<attr>`` from same-method assignments (T17).
+
+    The TS mirror of ``_python_attr_return_resolution``: only
+    assignments in the same method, before its earliest return line,
+    count (an assignment after a return is dead code; an assignment
+    in another method is not statically guaranteed to have run).
+    Every such assignment's right-hand side must resolve to the same
+    identity source: a direct identity expression, or a
+    ``this.<method>(...)`` call to an already-profiled method
+    (extends chain, no ``skip_self``; the target's delegation and
+    return lines follow the assignment-line item in the step). All
+    assignments must agree on kind and expression; the returned step
+    accumulates every assignment's items in source order, so two
+    assignments of the same expression both appear in the
+    propagation. Any other right-hand side, a missing assignment, or
+    a kind/expression mismatch disqualifies the method (None).
+    """
+    if not returns:
+        return None
+    earliest_return = min(line_no for line_no, _ in returns)
+    method_assigns = sorted(
+        (line_no, rhs) for name, line_no, rhs in assigns.get(key, [])
+        if name == attr and line_no < earliest_return)
+    if not method_assigns:
+        return None
+    kind: str | None = None
+    expr: str | None = None
+    step: list[dict[str, Any]] = []
+    for assign_line, rhs in method_assigns:
+        if _TRUSTED.fullmatch(rhs):
+            rhs_kind, rhs_expr = "trusted", rhs
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}", "returns": rhs}]
+        elif _REQUEST.fullmatch(rhs):
+            rhs_kind, rhs_expr = "request", rhs
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}", "returns": rhs}]
+        else:
+            method_match = _TS_THIS_METHOD_CALL_RE.match(rhs)
+            if method_match is None:
+                return None
+            target = _ts_method_profile(
+                path, key[0], method_match.group(1), profiles, defined, bases)
+            if target is None:
+                return None
+            rhs_kind, rhs_expr = target["kind"], target["expression"]
+            rhs_step = [{"path": path, "line": assign_line,
+                         "function": f"{key[0]}.{key[1]}",
+                         "returns": target["expression"]}]
+            rhs_step.extend(target.get("delegation", []))
+            rhs_step.extend(
+                {"path": target["path"], "line": return_line,
+                 "function": target["function"],
+                 "returns": target["expression"]}
+                for return_line in target["return_lines"])
+        if kind is None:
+            kind, expr = rhs_kind, rhs_expr
+        elif kind != rhs_kind or expr != rhs_expr:
+            return None
+        step.extend(rhs_step)
+    if kind is None or expr is None:
+        return None
+    return kind, expr, step
+
+
+def _ts_new_call_args(rhs: str) -> list[str] | None:
+    """Positional arguments of a ``new <Name>(...)`` right-hand side (T19).
+
+    Returns the verbatim argument texts in order (``[]`` for an empty
+    call), or None when the right-hand side is not a bare ``new``
+    construction with balanced parens on this line.
+    """
+    match = _TS_NEW_RE.match(rhs)
+    if match is None:
+        return None
+    open_index = rhs.find("(", match.end(1))
+    if open_index < 0:
+        return []
+    return _split_call_args(rhs, open_index)
+
+
+def _ts_ctor_attr_resolution(
+        path: str, cls: str, attr: str, params: list[str],
+        assigns: list[tuple[str, int, str]],
+        ctor_args: list[str]) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Resolve one ``this.<attr>`` through constructor assignments (T19).
+
+    The TS mirror of ``_python_ctor_attr_resolution``: every
+    ``this.<attr> = <rhs>`` assignment in the constructor must resolve
+    to the same identity source, either a bare constructor parameter
+    (the construction argument at that position must itself be an
+    identity expression) or an identity expression whose leading name
+    is a constructor parameter (the construction argument substitutes
+    for that name, and the result must match the same pattern).
+    Keyword arguments and an argument count that does not match the
+    parameter count fail closed. The returned step holds one item per
+    assignment, in source order.
+    """
+    if any(re.match(r"[A-Za-z_$][\w$]*\s*=", arg) for arg in ctor_args):
+        return None
+    if len(ctor_args) != len(params):
+        return None
+    resolved = sorted(
+        (line_no, rhs) for name, line_no, rhs in assigns if name == attr)
+    if not resolved:
+        return None
+    kind: str | None = None
+    expr: str | None = None
+    step: list[dict[str, Any]] = []
+    for assign_line, rhs in resolved:
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", rhs) and rhs in params:
+            arg = ctor_args[params.index(rhs)]
+            if _TRUSTED.fullmatch(arg):
+                rhs_kind, rhs_expr = "trusted", arg
+            elif _REQUEST.fullmatch(arg):
+                rhs_kind, rhs_expr = "request", arg
+            else:
+                return None
+        else:
+            head = re.match(r"([A-Za-z_$][\w$]*)\.", rhs)
+            if head is None or head.group(1) not in params:
+                return None
+            substituted = ctor_args[params.index(head.group(1))] + rhs[head.end(1):]
+            if _TRUSTED.fullmatch(substituted):
+                rhs_kind, rhs_expr = "trusted", substituted
+            elif _REQUEST.fullmatch(substituted):
+                rhs_kind, rhs_expr = "request", substituted
+            else:
+                return None
+        if kind is None:
+            kind, expr = rhs_kind, rhs_expr
+        elif kind != rhs_kind or expr != rhs_expr:
+            return None
+        step.append({"path": path, "line": assign_line,
+                     "function": f"{cls}.constructor", "returns": rhs_expr})
+    if kind is None or expr is None:
+        return None
+    return kind, expr, step
+
+
+def _ts_ctor_return_resolution(
+        target_file: str, target_class: str, method: str,
+        ctor_args: list[str],
+        scans: dict[str, tuple]) -> dict[str, Any] | None:
+    """Resolve ``return this.<attr>`` through a constructor call (T19).
+
+    The TS mirror of ``_python_ctor_return_resolution``: call-site
+    fallback for the T18 local-instance branch. The method has no
+    identity profile (its returns are attribute reads), but it is
+    defined in the target class, and the instance was constructed
+    locally with known positional arguments. Every direct return must
+    be ``this.<attr>`` resolving through the same class's constructor
+    assignments to the same identity source; the returned profile-like
+    dict carries the constructor assignment lines as its delegation.
+    """
+    scan = scans.get(target_file)
+    if scan is None:
+        return None
+    methods, _ranges, _candidates, _names, defined, method_assigns, method_params = scan
+    if (target_class, method) not in defined:
+        return None
+    returns = methods.get((target_class, method))
+    if not returns:
+        return None
+    params = method_params.get((target_class, "constructor"), [])
+    assigns = method_assigns.get((target_class, "constructor"), [])
+    kind: str | None = None
+    expr: str | None = None
+    seen: dict[str, tuple[str, str, list[dict[str, Any]]]] = {}
+    order: list[str] = []
+    return_lines: list[int] = []
+    for line_no, text in returns:
+        attr_match = _TS_THIS_ATTR_RETURN_RE.match(text)
+        if attr_match is None:
+            return None
+        attr = attr_match.group(1)
+        if attr not in seen:
+            resolved = _ts_ctor_attr_resolution(
+                target_file, target_class, attr, params, assigns, ctor_args)
+            if resolved is None:
+                return None
+            seen[attr] = resolved
+            order.append(attr)
+        attr_kind, attr_expr, _attr_step = seen[attr]
+        if kind is None:
+            kind, expr = attr_kind, attr_expr
+        elif kind != attr_kind or expr != attr_expr:
+            return None
+        return_lines.append(line_no)
+    if kind is None or expr is None:
+        return None
+    step: list[dict[str, Any]] = []
+    for attr in order:
+        step.extend(seen[attr][2])
+    return {"kind": kind, "expression": expr, "path": target_file,
+            "function": f"{target_class}.{method}",
+            "return_lines": sorted(set(return_lines)),
+            "delegation": step}
+
+
+def _ts_all_identity_return_methods(
+        code_by_file: dict[str, str],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None
+        ) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
+    """Project-wide TS identity return profiles, including super delegation.
+
+    Direct profiles first, then up to 8 fixpoint rounds resolving
+    methods whose every direct return is an identity expression, a
+    ``super.<method>(...)`` call to an already-profiled base method
+    (T4 chain walk, ``skip_self=True``), a
+    ``this.<attr>.<method>(...)`` call delegating through an instance
+    attribute whose class resolves via the file's same-file (T2) or
+    cross-file (T3/T9/T11/T14) attribute map (T15 second hop), a
+    ``this.<method>(...)`` call delegating to another method of the
+    same class, resolved over the extends chain (T16), or a
+    ``return this.<attr>`` returning an instance attribute assigned
+    from an identity source in the same method, before its earliest
+    return (T17). All
+    returns must agree on kind, expression and delegation steps: a
+    direct return mixed with a delegated return, or delegated calls
+    to different targets, disqualifies the method. A delegating
+    profile carries ``delegation``: the target profile's return
+    evidence items (its own delegation first, then its return
+    lines), each ``{path, line, function, returns}``.
+    """
+    scans = {
+        path: _ts_class_scan(path, source)
+        for path, source in code_by_file.items()
+        if not path.lower().endswith(".py")
+    }
+    bases = _ts_base_classes(code_by_file)
+    # T15: per-file merged (class, attribute) -> (file, class) map
+    # for second-hop delegation: same-file T2 bindings (values
+    # wrapped as (path, class)) plus cross-file T3/T9/T11/T14
+    # bindings; the two are mutually exclusive per attribute.
+    cross_attr = _ts_cross_file_instance_bindings(code_by_file, ts_paths)
+    attr_classes: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
+    for _path, _source in code_by_file.items():
+        if _path.lower().endswith(".py"):
+            continue
+        _merged = {(k[0], k[1]): (_path, v)
+                   for k, v in _ts_instance_attribute_classes(_path, _source).items()}
+        _merged.update(cross_attr.get(_path, {}))
+        attr_classes[_path] = _merged
+    defined = {path: scan[4] for path, scan in scans.items()}
+    profiles = {
+        path: _ts_direct_identity_profiles(path, scan[0])
+        for path, scan in scans.items()
+    }
+    for _round in range(8):
+        changed = False
+        for path, scan in scans.items():
+            for key, returns in scan[0].items():
+                if key in profiles[path]:
+                    continue
+                profile: dict[str, Any] | None = None
+                delegation: list[dict[str, Any]] | None = None
+                for line_no, text in returns:
+                    step: list[dict[str, Any]] | None = None
+                    if _TRUSTED.fullmatch(text):
+                        kind, expr = "trusted", text
+                    elif _REQUEST.fullmatch(text):
+                        kind, expr = "request", text
+                    else:
+                        match = _TS_SUPER_CALL_RE.match(text)
+                        if match is not None:
+                            target = _ts_method_profile(
+                                path, key[0], match.group(1), profiles, defined, bases,
+                                skip_self=True)
+                        else:
+                            # T15: `return this.<attr>.<method>(...)`
+                            # delegates through an instance attribute
+                            # whose class resolves via the file's
+                            # attribute map (same-file T2 or cross-file
+                            # T3/T9/T11/T14); the target method must
+                            # already have a profile.
+                            attr_match = _TS_THIS_ATTR_CALL_RE.match(text)
+                            if attr_match is not None:
+                                attr_target = attr_classes.get(path, {}).get(
+                                    (key[0], attr_match.group(1)))
+                                if attr_target is None:
+                                    profile = None
+                                    break
+                                target = _ts_method_profile(
+                                    attr_target[0], attr_target[1], attr_match.group(2),
+                                    profiles, defined, bases)
+                            else:
+                                # T16: `return this.<method>(...)`
+                                # delegates to another method of the
+                                # same class, resolved over the extends
+                                # chain; the target method must already
+                                # have a profile.
+                                method_match = _TS_THIS_METHOD_CALL_RE.match(text)
+                                if method_match is not None:
+                                    target = _ts_method_profile(
+                                        path, key[0], method_match.group(1),
+                                        profiles, defined, bases)
+                                else:
+                                    # T17: `return this.<attr>`
+                                    # returns an instance attribute
+                                    # assigned from an identity source
+                                    # in the same method, before its
+                                    # earliest return; the resolution
+                                    # builds the delegation step
+                                    # directly (assignment line first,
+                                    # then the target method's
+                                    # evidence, if any).
+                                    attr_return = _TS_THIS_ATTR_RETURN_RE.match(text)
+                                    if attr_return is None:
+                                        profile = None
+                                        break
+                                    resolved = _ts_attr_return_resolution(
+                                        path, key, returns, scan[5],
+                                        profiles, defined, bases,
+                                        attr_return.group(1))
+                                    if resolved is None:
+                                        profile = None
+                                        break
+                                    kind, expr, step = resolved
+                        if step is None:
+                            if target is None:
+                                profile = None
+                                break
+                            kind, expr = target["kind"], target["expression"]
+                            step = target.get("delegation", []) + [
+                                {"path": target["path"], "line": return_line,
+                                 "function": target["function"],
+                                 "returns": target["expression"]}
+                                for return_line in target["return_lines"]]
+                    if profile is None:
+                        profile = {"kind": kind, "expression": expr,
+                                   "return_lines": [line_no]}
+                        delegation = step if step is not None else []
+                    elif (profile["kind"] != kind or profile["expression"] != expr
+                          or delegation != (step if step is not None else [])):
+                        profile = None
+                        break
+                    else:
+                        profile["return_lines"].append(line_no)
+                if profile is not None:
+                    profile["return_lines"] = sorted(set(profile["return_lines"]))
+                    profiles[path][key] = {
+                        **profile, "path": path,
+                        "function": f"{key[0]}.{key[1]}",
+                        "delegation": delegation if delegation is not None else []}
+                    changed = True
+        if not changed:
+            break
+    return profiles
+
+
+def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
+    """Map line numbers to their enclosing top-level class name, for TS/JS.
+
+    The TS mirror of ``_python_class_method_ranges``: only lines inside
+    a method directly defined in a top-level class are mapped. Lines
+    inside a nested function or class definition within that method are
+    excluded: their ``this`` does not refer to the outer instance.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return {}
+    _methods, ranges, _candidates, _names, _defined, _a, _p = _ts_class_scan(path, source)
+    return ranges
+
+
+def _strip_ts_comment(line: str) -> str:
+    """Remove // and same-line /* */ comments, keeping string contents.
+
+    ``_strip_ts_line`` also blanks string contents, which is right for
+    return scanning but wrong for import parsing (the module specifier
+    is a string). This keeps strings intact and only cuts comments.
+    """
+    out: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(line):
+        ch = line[index]
+        if quote is not None:
+            out.append(ch)
+            if ch == "\\" and index + 1 < len(line):
+                out.append(line[index + 1])
+                index += 2
+                continue
+            if ch == quote:
+                quote = None
+            index += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            out.append(ch)
+        elif ch == "/" and index + 1 < len(line) and line[index + 1] == "/":
+            break
+        elif ch == "/" and index + 1 < len(line) and line[index + 1] == "*":
+            end = line.find("*/", index + 2)
+            if end == -1:
+                break
+            index = end + 2
+            continue
+        else:
+            out.append(ch)
+        index += 1
+    return "".join(out)
+
+
+def _ts_import_bindings(path: str, source: str) -> dict[str, tuple[str, str]]:
+    """Map local names to (module specifier, imported name) for named TS/JS imports.
+
+    Only value named imports count (``import { A, B as C } from "./x"``
+    and the named part of a mixed ``import d, { A } from "./x"``);
+    default imports, namespace imports, side-effect imports, dynamic
+    ``import(...)``, ``require(...)`` and ``import type`` are ignored.
+    A local name imported from two different modules is ambiguous and
+    dropped. Multi-line imports are joined until the ``from "..."``
+    part is complete.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue")):
+        return {}
+    bindings: dict[str, tuple[str, str]] = {}
+    ambiguous: set[str] = set()
+    lines = source.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = _strip_ts_comment(lines[index])
+        head = stripped.lstrip()
+        if (head.startswith("import") and not head.startswith("import(")
+                and not re.match(r"import\s+type\b", head)):
+            buf = stripped
+            while (not re.search(r"from\s*[\"'][^\"']+[\"']", buf)
+                   and index + 1 < len(lines)):
+                index += 1
+                buf += " " + _strip_ts_comment(lines[index])
+            for match in _TS_NAMED_IMPORT_RE.finditer(buf):
+                specifier = match.group(2)
+                for spec in match.group(1).split(","):
+                    spec = spec.strip()
+                    if not spec:
+                        continue
+                    spec_match = _TS_IMPORT_SPEC_RE.match(spec)
+                    if not spec_match:
+                        continue
+                    imported = spec_match.group(1)
+                    local = spec_match.group(2) or imported
+                    if local in ambiguous:
+                        continue
+                    binding = (specifier, imported)
+                    if local in bindings and bindings[local] != binding:
+                        del bindings[local]
+                        ambiguous.add(local)
+                    else:
+                        bindings[local] = binding
+            for match in _TS_MIXED_IMPORT_RE.finditer(buf):
+                specifier = match.group(3)
+                for spec in match.group(2).split(","):
+                    spec = spec.strip()
+                    if not spec:
+                        continue
+                    spec_match = _TS_IMPORT_SPEC_RE.match(spec)
+                    if not spec_match:
+                        continue
+                    imported = spec_match.group(1)
+                    local = spec_match.group(2) or imported
+                    if local in ambiguous:
+                        continue
+                    binding = (specifier, imported)
+                    if local in bindings and bindings[local] != binding:
+                        del bindings[local]
+                        ambiguous.add(local)
+                    else:
+                        bindings[local] = binding
+        index += 1
+    return bindings
+
+
+def _ts_namespace_imports(path: str, source: str) -> dict[str, str]:
+    """Map local names to module specifiers for namespace TS/JS imports.
+
+    Only ``import * as ns from \"./x\"`` counts; default imports,
+    named imports, side-effect imports, dynamic ``import(...)``,
+    ``require(...)`` and ``import type`` are ignored. A local name
+    imported from two different modules is ambiguous and dropped.
+    Multi-line imports are joined until the ``from \"...\"`` part is
+    complete, like ``_ts_import_bindings``.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue")):
+        return {}
+    bindings: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    lines = source.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = _strip_ts_comment(lines[index])
+        head = stripped.lstrip()
+        if (head.startswith("import") and not head.startswith("import(")
+                and not re.match(r"import\s+type\b", head)):
+            buf = stripped
+            while (not re.search(r"from\s*[\"'][^\"']+[\"']", buf)
+                   and index + 1 < len(lines)):
+                index += 1
+                buf += " " + _strip_ts_comment(lines[index])
+            for match in _TS_NAMESPACE_IMPORT_RE.finditer(buf):
+                local, specifier = match.group(1), match.group(2)
+                if local in ambiguous:
+                    continue
+                if local in bindings and bindings[local] != specifier:
+                    del bindings[local]
+                    ambiguous.add(local)
+                else:
+                    bindings[local] = specifier
+        index += 1
+    return bindings
+
+
+def _ts_namespace_import_bindings(
+        code_by_file: dict[str, str],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None) -> dict[str, dict[str, str]]:
+    """Map files to {namespace local: target file} for namespace imports.
+
+    Relative specifiers and ``tsconfig`` path aliases (T7, via
+    ``ts_paths``) resolving to a project file count; bare package
+    imports and anything outside the project fail closed. The target
+    file's top-level function profiles decide whether a ``ns.<fn>(...)``
+    call binds -- this map alone binds nothing.
+    """
+    result: dict[str, dict[str, str]] = {}
+    for path, source in code_by_file.items():
+        if path.lower().endswith(".py"):
+            continue
+        bindings: dict[str, str] = {}
+        for local, specifier in _ts_namespace_imports(path, source).items():
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+            if target is not None and target != path:
+                bindings[local] = target
+        if bindings:
+            result[path] = bindings
+    return result
+
+
+def _ts_named_function_bindings(
+        code_by_file: dict[str, str],
+        top_level_profiles: dict[str, dict[str, dict[str, Any]]],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None
+        ) -> dict[str, dict[str, dict[str, Any]]]:
+    """Map files to {local name: profile} for named-imported top-level functions.
+
+    The TS mirror of ``_python_imported_identity_helpers`` for functions:
+    only ``import { name [as alias] } from \"./x\"`` (or a ``tsconfig``
+    path alias, T7) whose target file directly defines a qualifying
+    top-level function under the original name. A default import
+    (T10) binds the local name to the target file's default-exported
+    function. A local name shadowed by a top-level function defined in
+    the importing file itself is skipped (the local definition wins).
+    Re-exports (the target file itself importing the name) are not
+    followed.
+    """
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    for path, source in code_by_file.items():
+        if path.lower().endswith(".py"):
+            continue
+        local_names = set(_ts_top_level_function_returns(path, source))
+        bindings: dict[str, dict[str, Any]] = {}
+        for local, (specifier, imported) in _ts_import_bindings(path, source).items():
+            if local in local_names or local in bindings:
+                continue
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+            if target is None or target == path:
+                continue
+            profile = top_level_profiles.get(target, {}).get(imported)
+            if profile is not None:
+                bindings[local] = profile
+        for local, specifier in _ts_default_import_bindings(path, source).items():
+            if local in local_names or local in bindings:
+                continue
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+            if target is None or target == path:
+                continue
+            default_fn = _ts_default_export_function(target, code_by_file[target])
+            if default_fn is None:
+                continue
+            profile = top_level_profiles.get(target, {}).get(default_fn)
+            if profile is not None:
+                bindings[local] = profile
+        if bindings:
+            result[path] = bindings
+    return result
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Strip `//` and `/* */` comments from JSONC text, keeping strings intact."""
+    out: list[str] = []
+    index = 0
+    in_string = False
+    while index < len(text):
+        ch = text[index]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and index + 1 < len(text):
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if ch == '"':
+                in_string = False
+            index += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            index += 1
+            continue
+        if ch == "/" and index + 1 < len(text) and text[index + 1] == "/":
+            while index < len(text) and text[index] != "\n":
+                index += 1
+            continue
+        if ch == "/" and index + 1 < len(text) and text[index + 1] == "*":
+            index += 2
+            while index + 1 < len(text) and not (text[index] == "*" and text[index + 1] == "/"):
+                index += 1
+            index += 2
+            continue
+        out.append(ch)
+        index += 1
+    return "".join(out)
+
+
+def _tsconfig_paths(config_text: str | None) -> tuple[str, list[tuple[str, str | None, list[str]]]] | None:
+    """Parse the root tsconfig/jsconfig `paths` mapping (T7).
+
+    Returns ``(base_url, patterns)`` where ``base_url`` is the
+    ``compilerOptions.baseUrl`` ("" when absent, i.e. the tsconfig's
+    own directory) and ``patterns`` is a list of
+    ``(prefix, suffix, targets)`` for each pattern with at most one
+    ``*`` (the matched middle is substituted into each target, which
+    is relative to ``base_url``). Anything unparseable, missing, or
+    malformed returns None (fail closed). Only the config file's own
+    ``compilerOptions.paths`` is read; an ``extends`` base file is
+    never followed.
+    """
+    if not config_text:
+        return None
+    try:
+        data = json.loads(config_text)
+    except (ValueError, TypeError):
+        try:
+            cleaned = re.sub(r",\s*([}\]])", r"\1", _strip_jsonc_comments(config_text))
+            data = json.loads(cleaned)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(data, dict):
+        return None
+    options = data.get("compilerOptions")
+    if not isinstance(options, dict):
+        return None
+    paths = options.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        return None
+    base_url = options.get("baseUrl", "")
+    if not isinstance(base_url, str):
+        return None
+    base_url = posixpath.normpath(base_url) if base_url not in ("", ".") else ""
+    patterns: list[tuple[str, str | None, list[str]]] = []
+    for pattern, targets in paths.items():
+        if not isinstance(pattern, str) or pattern.count("*") > 1:
+            continue
+        if not isinstance(targets, list):
+            continue
+        clean_targets = [t for t in targets if isinstance(t, str) and t]
+        if not clean_targets:
+            continue
+        if "*" in pattern:
+            prefix, suffix = pattern.split("*", 1)
+        else:
+            # An exact pattern matches only the specifier itself;
+            # suffix None marks it so the resolver does not treat a
+            # longer specifier sharing the prefix as a match.
+            prefix, suffix = pattern, None
+        patterns.append((prefix, suffix, clean_targets))
+    if not patterns:
+        return None
+    return base_url, patterns
+
+
+def _ts_resolve_candidate(base: str, code_by_file: dict[str, str]) -> str | None:
+    """Try a resolved base path against the project files.
+
+    An explicit suffix resolves directly when the file is in the
+    project (the extension candidates below would look for
+    `<name>.vue.ts` instead); otherwise the usual extension and
+    ``index`` variants are tried.
+    """
+    if base in code_by_file:
+        return base
+    for candidate in [base + ext for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue")]:
+        if candidate in code_by_file:
+            return candidate
+    for candidate in [base + "/index" + ext for ext in (".ts", ".tsx", ".js", ".jsx", ".vue")]:
+        if candidate in code_by_file:
+            return candidate
+    return None
+
+
+def _ts_resolve_import(specifier: str, from_path: str,
+                       code_by_file: dict[str, str],
+                       ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None) -> str | None:
+    """Resolve a TS/JS import specifier to a project file path.
+
+    Relative specifiers (``./`` / ``../``) resolve against the
+    importing file's directory, trying the usual extension and
+    ``index`` variants. A non-relative specifier resolves only
+    through a ``tsconfig``/``jsconfig`` ``paths`` mapping (T7, via
+    ``ts_paths``): the longest-prefix pattern wins, its targets are
+    tried in declaration order, each relative to ``baseUrl``. The
+    target must be a file in ``code_by_file``; bare package imports,
+    ``node_modules`` and anything outside the project fail closed.
+    """
+    if specifier.startswith(("./", "../")):
+        base = posixpath.normpath(posixpath.join(posixpath.dirname(from_path), specifier))
+        return _ts_resolve_candidate(base, code_by_file)
+    if ts_paths is None:
+        return None
+    base_url, patterns = ts_paths
+    best: tuple[str, str | None, list[str], str] | None = None
+    for prefix, suffix, targets in patterns:
+        if suffix is None:
+            # Exact pattern: only the specifier itself matches.
+            if specifier != prefix:
+                continue
+            middle = ""
+        else:
+            if not specifier.startswith(prefix) or not specifier.endswith(suffix):
+                continue
+            if len(specifier) < len(prefix) + len(suffix):
+                continue
+            middle = specifier[len(prefix):len(specifier) - len(suffix) if suffix else len(specifier)]
+        if best is None or len(prefix) > len(best[0]):
+            best = (prefix, suffix, targets, middle)
+    if best is None:
+        return None
+    prefix, _suffix, targets, middle = best
+    for target in targets:
+        substituted = target.replace("*", middle, 1)
+        base = posixpath.normpath(posixpath.join(base_url, substituted)) if base_url else posixpath.normpath(substituted)
+        resolved = _ts_resolve_candidate(base, code_by_file)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _ts_cross_file_instance_bindings(
+        code_by_file: dict[str, str],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None) -> dict[str, dict[tuple[str, str], tuple[str, str]]]:
+    """Map files to cross-file (class, attribute) -> (target file, class) bindings.
+
+    The TS mirror of ``_python_imported_identity_helpers`` for instance
+    attributes: for each file, take the ``_ts_class_scan`` candidates
+    and resolve every constructed name to a (file, class) target (T14);
+    when all names resolve to the same target in another file, record
+    the cross-file binding. A target in the same file is a same-file
+    T2 binding, not a cross-file one. When the constructed name is a
+    named import (or a default import, T11) resolving to a project
+    file that defines the imported name as a top-level class, record
+    the cross-file binding. The import may be relative or a
+    ``tsconfig`` path alias (T7). The T2 disqualification rule applies
+    first: an attribute with a non-construction binding or two
+    different constructed classes is dropped here too.
+    """
+    result: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
+    for path, source in code_by_file.items():
+        if path.lower().endswith(".py"):
+            continue
+        _methods, _ranges, candidates, class_names, _defined, _a, _p = _ts_class_scan(path, source)
+        # V4: instance attributes bound in Vue Options API methods
+        # share the same candidate map, keyed on the synthetic class
+        # `__vue_options__`.
+        _om, _or, _od, opt_candidates = _ts_vue_options_methods(path, source)
+        for key, constructed in opt_candidates.items():
+            candidates.setdefault(key, set()).update(constructed)
+        imports = _ts_import_bindings(path, source)
+        bindings: dict[tuple[str, str], tuple[str, str]] = {}
+        def _resolve(name: str | None) -> tuple[str, str] | None:
+            # T14: resolve one constructed name to its (file, class)
+            # target, or None when it resolves nowhere. The T3/T9/T11
+            # single-name rules are unchanged; only the caller is new.
+            if name is None or name in class_names:
+                return (path, name) if name is not None else None
+            default_import = False
+            if "." in name:
+                # T9: a namespaced construction, `new ns.Class(...)`,
+                # resolves through the namespace import, not a named
+                # import; the class must be a top-level class of the
+                # namespace's target file.
+                namespace, imported = name.split(".", 1)
+                specifier = _ts_namespace_imports(path, source).get(namespace)
+                if specifier is None:
+                    return None
+            else:
+                binding = imports.get(name)
+                if binding is not None:
+                    specifier, imported = binding
+                else:
+                    # T11: a default import, `import Helper from
+                    # "./auth"`, binds to the target file's
+                    # default-exported class; the class name is read
+                    # from the target file below.
+                    specifier = _ts_default_import_bindings(path, source).get(name)
+                    if specifier is None:
+                        return None
+                    default_import = True
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+            if target is None or target == path:
+                return None
+            if default_import:
+                imported = _ts_default_export_class(target, code_by_file[target])
+                if imported is None:
+                    return None
+            _m, _r, _c, target_classes, _d, _a, _p = _ts_class_scan(target, code_by_file[target])
+            if imported not in target_classes:
+                return None
+            return (target, imported)
+
+        for (cls, attr), constructed in candidates.items():
+            # T14: every constructed name must resolve to the same
+            # cross-file (file, class); a name that resolves nowhere,
+            # or two names resolving to different targets, drops the
+            # attribute (fail closed). A target in this file is the
+            # same-file T2 binding, not a cross-file one.
+            resolved = {_resolve(name) for name in constructed}
+            if None in resolved or len(resolved) != 1:
+                continue
+            target = next(iter(resolved))
+            if target is None or target[0] == path:
+                continue
+            bindings[(cls, attr)] = target
+        if bindings:
+            result[path] = bindings
+    return result
+
+
+def _ts_base_classes(
+        code_by_file: dict[str, str],
+        ts_paths: tuple[str, list[tuple[str, str | None, list[str]]]] | None = None) -> dict[str, dict[str, tuple[str, str]]]:
+    """Map files to {class: (base file, base class)} for TS/JS extends clauses.
+
+    Only ``class X extends Y`` with a bare-identifier base counts: the
+    base resolves to a top-level class of the same file first, else
+    through a named import (T3, relative or a ``tsconfig`` path alias,
+    T7) to a project file defining it. An expression base
+    (``extends mixin(...)``), a namespaced base (``extends ns.Base``)
+    or an unresolvable base leaves the class without a base (fail
+    closed). Only top-level classes are recorded.
+    """
+    result: dict[str, dict[str, tuple[str, str]]] = {}
+    for path, source in code_by_file.items():
+        if path.lower().endswith(".py"):
+            continue
+        _m, _r, _c, class_names, _d, _a, _p = _ts_class_scan(path, source)
+        imports = _ts_import_bindings(path, source)
+        bases: dict[str, tuple[str, str]] = {}
+        for line in source.splitlines():
+            match = _TS_EXTENDS_RE.match(_strip_ts_comment(line))
+            if not match:
+                continue
+            cls, base = match.group(1), match.group(2)
+            if cls not in class_names:
+                continue
+            if base in class_names:
+                bases[cls] = (path, base)
+                continue
+            binding = imports.get(base)
+            if binding is None:
+                continue
+            specifier, imported = binding
+            target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
+            if target is None or target == path:
+                continue
+            _m2, _r2, _c2, target_classes, _d2, _a2, _p2 = _ts_class_scan(
+                target, code_by_file[target])
+            if imported in target_classes:
+                bases[cls] = (target, imported)
+        if bases:
+            result[path] = bases
+    return result
+
+
+def _ts_method_profile(file: str, cls: str, method: str,
+                       profiles: dict[str, dict[tuple[str, str], dict[str, Any]]],
+                       defined: dict[str, set[tuple[str, str]]],
+                       bases: dict[str, dict[str, tuple[str, str]]],
+                       skip_self: bool = False) -> dict[str, Any] | None:
+    """Resolve a method to its single identity return profile, walking the extends chain.
+
+    The class itself first (unless ``skip_self``, for ``super`` calls,
+    which skip the current class): defined but without an identity
+    profile means shadowed -- return None and do not walk up. Not
+    defined: walk up the extends chain (at most 8 levels, cycle-safe);
+    each ancestor either defines the method (profile or shadowed None)
+    or not (continue). A profile carries the defining file's path.
+    """
+    if not skip_self and (cls, method) in defined.get(file, set()):
+        return profiles.get(file, {}).get((cls, method))
+    seen: set[tuple[str, str]] = set()
+    current_file, current_class = file, cls
+    for _ in range(8):
+        base = bases.get(current_file, {}).get(current_class)
+        if base is None:
+            return None
+        base_file, base_class = base
+        if (base_file, base_class) in seen:
+            return None
+        seen.add((base_file, base_class))
+        if (base_class, method) in defined.get(base_file, set()):
+            return profiles.get(base_file, {}).get((base_class, method))
+        current_file, current_class = base_file, base_class
+    return None
+
+
+def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
+    """Map (class, attribute) pairs to the class constructed for them, for TS/JS.
+
+    The TS mirror of ``_python_instance_attribute_classes``: for each
+    top-level class, collect ``this.<attr> = new <Class>(...)``
+    assignments across its directly defined methods (including the
+    constructor and nested arrow functions, whose bodies capture
+    ``this``; nested ``function`` declarations and nested classes do
+    not) plus class field declarations with a ``new`` initializer
+    (``private helper = new AuthHelper();``). An attribute qualifies
+    only when every such binding constructs the same top-level class
+    defined in the same file; any other assignment shape, a different
+    class, or a class not defined in this file disqualifies it.
+    """
+    if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
+        return {}
+    _methods, _ranges, candidates, class_names, _defined, _a, _p = _ts_class_scan(path, source)
+    # V4: instance attributes bound in Vue Options API methods
+    # (created() and friends) share the same candidate map, keyed on
+    # the synthetic class `__vue_options__`.
+    _om, _or, _od, opt_candidates = _ts_vue_options_methods(path, source)
+    for key, constructed in opt_candidates.items():
+        candidates.setdefault(key, set()).update(constructed)
+    bindings: dict[tuple[str, str], str] = {}
+    for key, constructed in candidates.items():
+        if len(constructed) == 1:
+            only = next(iter(constructed))
+            if only is not None and only in class_names:
+                bindings[key] = only
+    return bindings
+
+
+def _python_factory_return_classes(path: str, source: str) -> dict[str, str]:
+    """Map top-level factory function names to the class they construct.
+
+    A top-level ``def`` (not ``async def`` -- an async factory call
+    returns a coroutine, not an instance) qualifies only when it has at
+    least one return and every return directly constructs the same
+    top-level class defined in the same file (``return <Class>(...)``,
+    arguments ignored). Any other return (``None``, a variable, an
+    attribute call, another class, a valueless return) or no return at
+    all disqualifies the factory. Returns inside nested functions or
+    classes are excluded, same traversal as
+    ``_python_class_method_returns``. A function defined twice is
+    ambiguous and dropped.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    by_name: dict[str, list[str | None]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        returns: list[ast.Return] = []
+        stack = list(node.body)
+        while stack:
+            item = stack.pop()
+            if isinstance(item, ast.Return):
+                returns.append(item)
+            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            else:
+                stack.extend(ast.iter_child_nodes(item))
+        constructed: str | None = None
+        if returns:
+            for ret in returns:
+                value = ret.value
+                if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                        and value.func.id in class_names):
+                    constructed = None
+                    break
+                if constructed is None:
+                    constructed = value.func.id
+                elif constructed != value.func.id:
+                    constructed = None
+                    break
+        by_name.setdefault(node.name, []).append(constructed)
+    return {name: outcomes[0] for name, outcomes in by_name.items()
+            if len(outcomes) == 1 and outcomes[0] is not None}
+
+
+def _python_instance_attribute_candidates(
+        path: str, source: str) -> dict[tuple[str, str], set[str | None]]:
+    """Map (class, attribute) pairs to their constructed class names.
+
+    For each top-level class, collect ``self.<attr> = <Name>(...)``
+    assignments across its directly defined methods (including
+    assignments inside nested definitions, whose closures still capture
+    ``self``). The constructed name is the called class itself when it
+    is a top-level class of the same file, else the class a same-file
+    factory function constructs (see
+    ``_python_factory_return_classes``); any other assignment shape, or
+    a call of an unknown name, records ``None``; a two-segment
+    attribute call (``auth.AuthHelper()``) records the dotted name
+    ``"auth.AuthHelper"`` for module-binding resolution. The raw names are kept
+    (unlike ``_python_instance_attribute_classes``) so cross-file
+    resolution can tell an imported class from a non-construction
+    shape. Non-Python files and syntax-invalid Python produce no
+    candidates.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    factory_classes = _python_factory_return_classes(path, source)
+    candidates: dict[tuple[str, str], set[str | None]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for item in ast.walk(method):
+                targets: list[ast.expr] = []
+                value: ast.expr | None = None
+                if isinstance(item, ast.Assign):
+                    targets = item.targets
+                    value = item.value
+                elif isinstance(item, ast.AnnAssign) and item.value is not None:
+                    targets = [item.target]
+                    value = item.value
+                else:
+                    continue
+                if isinstance(value, ast.Call):
+                    func = value.func
+                    if isinstance(func, ast.Name):
+                        if func.id in class_names:
+                            constructed: str | None = func.id
+                        else:
+                            # A same-file factory resolves to its class; any
+                            # other bare-name call keeps its raw name so
+                            # cross-file resolution can tell an imported class
+                            # from a non-construction shape.
+                            constructed = factory_classes.get(func.id, func.id)
+                    elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                        # P15: exactly two segments, `auth.AuthHelper()`;
+                        # three or more segments are not a bare Name here
+                        # and fall through to None (fail closed).
+                        constructed = f"{func.value.id}.{func.attr}"
+                    else:
+                        constructed = None
+                else:
+                    constructed = None
+                for target in targets:
+                    if not (isinstance(target, ast.Attribute)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == "self"):
+                        continue
+                    key = (node.name, target.attr)
+                    candidates.setdefault(key, set()).add(constructed)
+    return candidates
+
+
+def _python_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, str], str]:
+    """Map (class, attribute) pairs to the class constructed for them.
+
+    For each top-level class, collect ``self.<attr> = <ClassName>(...)``
+    assignments across its directly defined methods (including assignments
+    inside nested definitions, whose closures still capture ``self``).
+    An assignment may also call a same-file factory function whose every
+    return constructs the same class (see
+    ``_python_factory_return_classes``). An attribute qualifies only when
+    every such assignment constructs the same top-level class defined in
+    the same file; any other assignment shape, a different class, or a
+    class not defined in this file disqualifies it. Non-Python files and
+    syntax-invalid Python produce no bindings. This filters the raw
+    candidate sets of ``_python_instance_attribute_candidates``.
+    """
+    class_names = _python_top_level_class_names(source)
+    candidates = _python_instance_attribute_candidates(path, source)
+    bindings: dict[tuple[str, str], str] = {}
+    for key, constructed in candidates.items():
+        if len(constructed) == 1:
+            only = next(iter(constructed))
+            if only is not None and only in class_names:
+                bindings[key] = only
+    return bindings
+
+
+def _python_cross_file_instance_bindings(
+        code_by_file: dict[str, str]) -> dict[str, dict[tuple[str, str], tuple[str, str]]]:
+    """Map files to cross-file (class, attribute) -> (target file, class) bindings.
+
+    The Python mirror of ``_ts_cross_file_instance_bindings`` for
+    instance attributes: for each file, take the
+    ``_python_instance_attribute_candidates`` and resolve every
+    constructed name to a (file, class) target (P18); when all names
+    resolve to the same target in another file, record the cross-file
+    binding. A target in the same file is a same-file P8/P13 binding,
+    not a cross-file one. When the constructed name is a
+    ``from``-imported class resolving to a project file that directly
+    defines the imported name as a top-level class, record the
+    cross-file binding. A dotted constructed name
+    (``auth.AuthHelper()``) resolves instead through the file's module
+    bindings (P15): the module local name maps to a scanned module,
+    and the target file must directly define the class. A dotted name
+    whose imported name is not a class may instead be a factory
+    function of the target file (P17): when the target file's
+    ``_python_factory_return_classes`` maps it to a class, the binding
+    records that class. A bare imported
+    name that is not a class may instead be a factory function of the
+    target file (P16): when the target file's
+    ``_python_factory_return_classes`` maps it to a class, the binding
+    records that class. The import may be absolute or relative (``from
+    .auth import AuthHelper``); an ``as`` alias binds under the local
+    name. A local name shadowed by a module-level definition or
+    assignment, imported from two different modules, or imported from a
+    module outside the scan is dropped (fail closed). Re-exports are
+    not followed: the target file must directly define the class. The
+    P8 disqualification rule applies first: an attribute with a
+    non-construction binding or two different constructed classes is
+    dropped here too.
+    """
+    module_index = _python_module_index(code_by_file)
+    result: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
+    for path, source in code_by_file.items():
+        if not path.lower().endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(source, filename=path)
+        except (SyntaxError, ValueError):
+            continue
+        class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+        shadowed = _python_module_level_shadowed_names(tree)
+        caller_package = _package_for_module(_module_for_path(path), path)
+        imports: dict[str, set[tuple[str, str]]] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if node.level and node.level > 0:
+                absolute = _relative_module(caller_package, node.level, node.module)
+            else:
+                absolute = node.module
+            if absolute is None:
+                continue
+            target_path = module_index.get(absolute)
+            if target_path is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                imports.setdefault(alias.asname or alias.name, set()).add(
+                    (target_path, alias.name))
+        candidates = _python_instance_attribute_candidates(path, source)
+        module_bindings = _python_module_bindings(path, source, module_index)
+        bindings: dict[tuple[str, str], tuple[str, str]] = {}
+        def _resolve(name: str | None) -> tuple[str, str] | None:
+            # P18: resolve one constructed name to its (file, class)
+            # target, or None when it resolves nowhere. The P14-P17
+            # single-name rules are unchanged; only the caller is new.
+            if name is None or name in shadowed:
+                return None
+            if name in class_names:
+                return (path, name)
+            if "." in name:
+                # P15/P17: a two-segment module-attribute construction,
+                # `auth.AuthHelper()` or `auth.make_auth_helper()`; the
+                # module resolves through the P6/P11 module bindings.
+                module_local, imported_name = name.split(".", 1)
+                module = module_bindings.get(module_local)
+                if module is None:
+                    return None
+                target_path = module_index.get(module)
+                if target_path is None:
+                    return None
+                if imported_name in _python_top_level_class_names(code_by_file[target_path]):
+                    return (target_path, imported_name)
+                factory_classes = _python_factory_return_classes(
+                    target_path, code_by_file[target_path])
+                constructed_class = factory_classes.get(imported_name)
+                if constructed_class is None:
+                    return None
+                return (target_path, constructed_class)
+            targets = imports.get(name)
+            if not targets or len(targets) != 1:
+                return None
+            target_path, imported_name = next(iter(targets))
+            if imported_name in _python_top_level_class_names(code_by_file[target_path]):
+                return (target_path, imported_name)
+            # P16: the imported name may be a factory function whose
+            # every return constructs the same top-level class of the
+            # target file (P13 rules, applied to the target file).
+            factory_classes = _python_factory_return_classes(
+                target_path, code_by_file[target_path])
+            constructed_class = factory_classes.get(imported_name)
+            if constructed_class is None:
+                return None
+            return (target_path, constructed_class)
+
+        for (cls, attr), constructed in candidates.items():
+            # P18: every constructed name must resolve to the same
+            # cross-file (file, class); a name that resolves nowhere,
+            # or two names resolving to different targets, drops the
+            # attribute (fail closed). A target in this file is the
+            # same-file P8/P13 binding, not a cross-file one.
+            resolved = {_resolve(name) for name in constructed}
+            if None in resolved or len(resolved) != 1:
+                continue
+            target = next(iter(resolved))
+            if target is None or target[0] == path:
+                continue
+            bindings[(cls, attr)] = target
+        if bindings:
+            result[path] = bindings
+    return result
+
+
+def _python_module_index(code_by_file: dict[str, str]) -> dict[str, str]:
+    """Map dotted module names to project files, dropping ambiguous ones.
+
+    Module names follow ``python_resolver._module_for_path`` (``a/b.py`` ->
+    ``a.b``, ``a/b/__init__.py`` -> ``a.b``). A module name claimed by
+    more than one file is dropped entirely.
+    """
+    candidates: dict[str, set[str]] = {}
+    for path in sorted(code_by_file):
+        if not path.lower().endswith(".py"):
+            continue
+        candidates.setdefault(_module_for_path(path), set()).add(path)
+    return {module: next(iter(paths)) for module, paths in candidates.items()
+            if len(paths) == 1}
+
+
+def _python_top_level_function_names(source: str) -> set[str]:
+    """Top-level function names defined in one Python source (AST, fail-closed)."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    return {node.name for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _python_imported_identity_helpers(
+    path: str, source: str, module_index: dict[str, str],
+    helper_maps: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """Resolve ``from``-imported identity-return helpers for one file.
+
+    Only top-level ``from <module> import <name> [as <alias>]`` whose
+    target file directly defines a qualifying helper under the original
+    name. Star imports, submodule imports (``from . import x``), modules
+    outside the scan, missing or unqualified target names, and names
+    shadowed by a local top-level function are all skipped. Re-exports
+    (the target file itself importing the name) are not followed.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    caller_package = _package_for_module(_module_for_path(path), path)
+    local_names = _python_top_level_function_names(source)
+    imported: dict[str, dict[str, Any]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        if node.level and node.level > 0:
+            absolute = _relative_module(caller_package, node.level, node.module)
+        else:
+            absolute = node.module
+        if absolute is None:
+            continue
+        target_path = module_index.get(absolute)
+        if target_path is None:
+            continue
+        target_helpers = helper_maps.get(target_path, {})
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            local_name = alias.asname or alias.name
+            if local_name in local_names or local_name in imported:
+                continue
+            helper = target_helpers.get(alias.name)
+            if helper is None:
+                continue
+            imported[local_name] = {
+                **helper,
+                "path": target_path,
+                "function": f"{absolute}.{alias.name}",
+            }
+    return imported
+
+
+def _python_imported_class_bindings(
+    path: str, source: str, module_index: dict[str, str],
+    code_by_file: dict[str, str],
+) -> dict[str, tuple[str, str]]:
+    """Resolve ``from``-imported classes for one file (P22).
+
+    Only top-level ``from <module> import <Class> [as <alias>]``
+    whose target file directly defines the imported name as a
+    top-level class. A local name shadowed by a module-level
+    definition or assignment, imported from two different modules,
+    or imported from a module outside the scan is dropped (fail
+    closed). Re-exports are not followed. Factories are not
+    resolved here: an imported name that is a function of the
+    target file maps to nothing (P16 factory locals are out of
+    scope for P22).
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    caller_package = _package_for_module(_module_for_path(path), path)
+    shadowed = _python_module_level_shadowed_names(tree)
+    imports: dict[str, set[tuple[str, str]]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        if node.level and node.level > 0:
+            absolute = _relative_module(caller_package, node.level, node.module)
+        else:
+            absolute = node.module
+        if absolute is None:
+            continue
+        target_path = module_index.get(absolute)
+        if target_path is None:
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            imports.setdefault(alias.asname or alias.name, set()).add(
+                (target_path, alias.name))
+    result: dict[str, tuple[str, str]] = {}
+    for local_name, targets in imports.items():
+        if local_name in shadowed or len(targets) != 1:
+            continue
+        target_path, imported_name = next(iter(targets))
+        if imported_name in _python_top_level_class_names(code_by_file[target_path]):
+            result[local_name] = (target_path, imported_name)
+    return result
+
+
+def _python_module_level_shadowed_names(tree: ast.Module) -> set[str]:
+    """Module-level names that shadow an import: top-level defs/classes
+    and simple module-level assignment targets."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def _python_module_bindings(path: str, source: str,
+                            module_index: dict[str, str]) -> dict[str, str]:
+    """Map local names to dotted modules for one file's top-level imports.
+
+    ``import a.b.c`` binds the top-level name ``a`` to module ``a``;
+    ``import a.b.c as x`` binds ``x`` to ``a.b.c``; ``from P import M``
+    binds ``M`` (or its alias) to ``P.M`` only when ``P.M`` is a scanned
+    module (otherwise ``M`` is a function import, which is P5 territory).
+    Relative imports resolve against the caller's package; ``from . import
+    M`` binds ``M`` to the current package plus ``.M``. Star imports bind
+    nothing. A local name shadowed by a module-level definition or
+    assignment is dropped.
+    """
+    if not path.lower().endswith(".py"):
+        return {}
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError):
+        return {}
+    caller_package = _package_for_module(_module_for_path(path), path)
+    shadowed = _python_module_level_shadowed_names(tree)
+    bindings: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    local, module = alias.asname, alias.name
+                else:
+                    local = module = alias.name.split(".")[0]
+                if local not in shadowed:
+                    bindings.setdefault(local, module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is None:
+                base = _relative_module(caller_package, node.level, None)
+            elif node.level and node.level > 0:
+                base = _relative_module(caller_package, node.level, node.module)
+            else:
+                base = node.module
+            if base is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                candidate = f"{base}.{alias.name}" if base else alias.name
+                if candidate not in module_index:
+                    continue
+                local = alias.asname or alias.name
+                if local not in shadowed:
+                    bindings.setdefault(local, candidate)
+    return bindings
+
+
+def _resolve_module_attribute_helper(
+    chain: str, bindings: dict[str, str], module_index: dict[str, str],
+    helper_maps: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Resolve ``a.b.c(...)`` to an identity-return helper, or None.
+
+    ``a`` must be a module binding; the candidate module is the bound
+    module plus the middle chain segments, and the last segment is the
+    helper name. The candidate module must be in the scan and the target
+    file must directly define a qualifying helper under that name.
+    """
+    parts = chain.split(".")
+    if len(parts) < 2:
+        return None
+    base = bindings.get(parts[0])
+    if base is None:
+        return None
+    module = base + ("." + ".".join(parts[1:-1]) if len(parts) > 2 else "")
+    target_path = module_index.get(module)
+    if target_path is None:
+        return None
+    helper = helper_maps.get(target_path, {}).get(parts[-1])
+    if helper is None:
+        return None
+    return {**helper, "path": target_path, "function": f"{module}.{parts[-1]}"}
+
+
+def extract_identity_evidence(code_by_file: dict[str, str],
+                              function_owners_by_file: dict[str, dict[int, str]] | None = None,
+                              ts_config: str | None = None) -> list[dict[str, Any]]:
+    """Extract identity evidence plus bounded, same-scope local-variable propagation.
+
+    Propagation is intentionally limited to straight-line assignments within one
+    brace/indent scope. Entering or leaving a block resets aliases; function and
+    class declarations reset them too. This is not interprocedural taint analysis.
+
+    ``function_owners_by_file`` (P3) optionally supplies, per non-Python file, a
+    line-to-symbol map built from the TS parser's function line ranges
+    (``js_ts_parser.ts_function_owners``). Python files always keep their
+    AST-proven owners; without the map, non-Python records stay owner-less
+    (``UNKNOWN``), exactly as before.
+
+    ``ts_config`` (T7) optionally supplies the root tsconfig/jsconfig text;
+    its ``compilerOptions.paths`` mapping lets cross-file TS imports
+    resolve through path aliases (``@/auth``) as well as relative
+    paths. Without it, aliased imports fail closed, exactly as before.
+    """
+    records: list[dict[str, Any]] = []
+    assignment = re.compile(
+        r"^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(.*?)\s*;?\s*$"
+    )
+    identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
+    bare_call = re.compile(r"([A-Za-z_$][\w$]*)\s*\(.*\)$")
+    attr_call = re.compile(r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*\(.*\)$")
+    # V2: a `.vue` file is scanned through its line-padded `<script>` text
+    # (template/style braces never reach the brace-depth tracking), so every
+    # TS precompute and the per-file line loop below use the effective
+    # source. Padding keeps line numbers equal to the file's, and records
+    # still carry the `.vue` path. A `.vue` file without a `<script>` block
+    # scans as empty. Python precomputes keep the original text.
+    effective_code_by_file = {
+        file_path: (vue_script_for_adapter(file_source) or "")
+        if file_path.lower().endswith(".vue") else file_source
+        for file_path, file_source in code_by_file.items()
+    }
+    # T7: the root tsconfig/jsconfig `paths` mapping, parsed once and
+    # threaded into every cross-file TS resolver below.
+    ts_paths = _tsconfig_paths(ts_config)
+    module_index = _python_module_index(code_by_file)
+    same_file_helpers = {
+        file_path: _python_identity_return_helpers(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
+    same_file_methods = _python_all_identity_return_methods(code_by_file)
+    py_defined_methods = {
+        file_path: set(_python_class_method_returns(file_path, file_source))
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
+    py_base_classes = _python_base_classes(code_by_file)
+    same_file_instance_bindings = {
+        file_path: _python_instance_attribute_classes(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
+    py_cross_instance_bindings = _python_cross_file_instance_bindings(code_by_file)
+    # P23: raw per-file method scans (params + assigns, including
+    # `__init__`) for the constructor-argument fallback.
+    py_method_scans = {
+        file_path: _python_class_method_returns(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
+    py_imported_class_bindings = {
+        file_path: _python_imported_class_bindings(
+            file_path, file_source, module_index, code_by_file)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
+    module_bindings = {
+        file_path: _python_module_bindings(file_path, file_source, module_index)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
+    ts_same_file_methods = _ts_all_identity_return_methods(effective_code_by_file, ts_paths)
+    ts_same_file_functions = {
+        file_path: _ts_top_level_function_profiles(file_path, file_source)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    ts_named_function_bindings = _ts_named_function_bindings(effective_code_by_file, ts_same_file_functions, ts_paths)
+    ts_namespace_import_bindings = _ts_namespace_import_bindings(effective_code_by_file, ts_paths)
+    ts_same_file_ranges = {
+        file_path: _ts_class_method_ranges(file_path, file_source)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    ts_same_file_instance = {
+        file_path: _ts_instance_attribute_classes(file_path, file_source)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    ts_cross_instance_bindings = _ts_cross_file_instance_bindings(effective_code_by_file, ts_paths)
+    ts_imported_class_bindings = {
+        file_path: _ts_imported_class_bindings(
+            file_path, file_source, effective_code_by_file, ts_paths)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    ts_defined_methods = {
+        file_path: _ts_class_scan(file_path, file_source)[4]
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    ts_base_classes = _ts_base_classes(effective_code_by_file, ts_paths)
+    # T19: raw per-file class scans (methods + assigns + params,
+    # including constructors) for the constructor-argument fallback.
+    ts_class_scans = {
+        file_path: _ts_class_scan(file_path, file_source)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    # V3: Vue Options API `methods:` blocks scan as a synthetic class
+    # `__vue_options__`; merge their profiles, ranges and defined sets
+    # into the class-based maps so the T1 `this` branch resolves them.
+    # The defined merge is what makes a profile-less options method
+    # shadow (rather than walk a nonexistent extends chain).
+    ts_vue_options = {
+        file_path: _ts_vue_options_methods(file_path, file_source)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
+    for file_path, (opt_methods, opt_ranges, opt_defined, _opt_attrs) in ts_vue_options.items():
+        if opt_methods:
+            ts_same_file_methods.setdefault(file_path, {}).update(
+                _ts_direct_identity_profiles(file_path, opt_methods))
+        if opt_ranges:
+            ts_same_file_ranges.setdefault(file_path, {}).update(opt_ranges)
+        if opt_defined:
+            ts_defined_methods.setdefault(file_path, set()).update(opt_defined)
+    for path, source in sorted(effective_code_by_file.items()):
+        if path.lower().endswith(".py"):
+            function_owners = _python_function_owners(path, source)
+            imported_helpers = _python_imported_identity_helpers(
+                path, source, module_index, same_file_helpers)
+            return_helpers = dict(imported_helpers)
+            for name, helper in same_file_helpers.get(path, {}).items():
+                return_helpers[name] = {**helper, "path": path, "function": name}
+            bindings = module_bindings.get(path, {})
+            method_helpers = same_file_methods.get(path, {})
+            class_ranges = _python_class_method_ranges(path, source)
+            instance_bindings = same_file_instance_bindings.get(path, {})
+            cross_instance_bindings = py_cross_instance_bindings.get(path, {})
+            local_class_imports = py_imported_class_bindings.get(path, {})
+            local_class_names = _python_top_level_class_names(source)
+            local_function_names = _python_top_level_function_names(source)
+            ts_method_helpers = {}
+            ts_class_ranges = {}
+            ts_instance_bindings = {}
+            ts_cross_bindings = {}
+            ts_has_base = False
+            ts_file_functions = {}
+            ts_file_named_functions = {}
+            ts_file_namespaces = {}
+            py_has_base = path in py_base_classes
+        elif function_owners_by_file is not None:
+            supplied = function_owners_by_file.get(path)
+            function_owners = supplied if isinstance(supplied, dict) else {}
+            return_helpers = {}
+            bindings = {}
+            method_helpers = {}
+            class_ranges = {}
+            instance_bindings = {}
+            cross_instance_bindings = {}
+            local_class_imports = ts_imported_class_bindings.get(path, {})
+            local_class_names = _ts_class_scan(path, source)[3]
+            local_function_names = set(_ts_top_level_function_returns(path, source))
+            ts_method_helpers = ts_same_file_methods.get(path, {})
+            ts_class_ranges = ts_same_file_ranges.get(path, {})
+            ts_instance_bindings = ts_same_file_instance.get(path, {})
+            ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
+            ts_has_base = path in ts_base_classes
+            ts_file_functions = ts_same_file_functions.get(path, {})
+            ts_file_named_functions = ts_named_function_bindings.get(path, {})
+            ts_file_namespaces = ts_namespace_import_bindings.get(path, {})
+            py_has_base = False
+        else:
+            function_owners = {}
+            return_helpers = {}
+            bindings = {}
+            method_helpers = {}
+            class_ranges = {}
+            instance_bindings = {}
+            cross_instance_bindings = {}
+            local_class_imports = ts_imported_class_bindings.get(path, {})
+            local_class_names = _ts_class_scan(path, source)[3]
+            local_function_names = set(_ts_top_level_function_returns(path, source))
+            ts_method_helpers = ts_same_file_methods.get(path, {})
+            ts_class_ranges = ts_same_file_ranges.get(path, {})
+            ts_instance_bindings = ts_same_file_instance.get(path, {})
+            ts_cross_bindings = ts_cross_instance_bindings.get(path, {})
+            ts_has_base = path in ts_base_classes
+            ts_file_functions = ts_same_file_functions.get(path, {})
+            ts_file_named_functions = ts_named_function_bindings.get(path, {})
+            ts_file_namespaces = ts_namespace_import_bindings.get(path, {})
+            py_has_base = False
+        aliases: dict[str, dict[str, Any]] = {}
+        # P22: locals bound by direct construction, e.g.
+        # `auth = MidAuth()` -> {"auth": (path, "MidAuth")}; cleared
+        # wherever `aliases` is cleared, invalidated by reassignment.
+        local_classes: dict[str, tuple[str, str]] = {}
+        # P23/T19: the positional constructor arguments recorded with
+        # each local construction, e.g. `auth = MidAuth(request)` ->
+        # {"auth": ["request"]}; cleared wherever `local_classes` is.
+        local_ctor_args: dict[str, list[str]] = {}
+        brace_depth = 0
+        previous_depth = 0
+        previous_indent = 0
+        python_scope_indent: int | None = None
+        is_python = path.lower().endswith(".py")
+        all_lines = source.splitlines()
+        for line_no, line in enumerate(all_lines, 1):
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if is_python:
+                if re.match(r"(?:async\s+)?(?:def|class)\s+", stripped):
+                    aliases.clear()
+                    local_classes.clear()
+                    local_ctor_args.clear()
+                    python_scope_indent = indent
+                elif python_scope_indent is not None and stripped and indent <= python_scope_indent:
+                    aliases.clear()
+                    local_classes.clear()
+                    local_ctor_args.clear()
+                    python_scope_indent = None
+                elif stripped and indent < previous_indent:
+                    aliases.clear()
+                    local_classes.clear()
+                    local_ctor_args.clear()
+                current_scope = python_scope_indent if python_scope_indent is not None else 0
+            else:
+                if brace_depth != previous_depth:
+                    aliases.clear()
+                    local_classes.clear()
+                    local_ctor_args.clear()
+                if re.search(r"\b(?:function|class)\b|=>\s*\{", line):
+                    aliases.clear()
+                    local_classes.clear()
+                    local_ctor_args.clear()
+                current_scope = brace_depth
+
+            trusted = sorted(set(match.group(0) for match in _TRUSTED.finditer(line)))
+            request_values = sorted(set(match.group(0) for match in _REQUEST.finditer(line)))
+            owner_fields = sorted(set(match.group(1).lower() for match in _OWNER_FIELD.finditer(line)))
+            comparisons = []
+            for match in _COMPARE.finditer(line):
+                comparisons.append({
+                    "resource_field": match.group(1).lower(),
+                    "identity_expression": match.group(2),
+                    "operator": re.search(r"(?:===|==|!==|!=)", match.group(0)).group(0),
+                })
+            assignment_match = assignment.match(line)
+            assigned_variable = None
+            if assignment_match:
+                candidate_name, candidate_rhs = assignment_match.groups()
+                candidate_rhs = candidate_rhs.strip().rstrip(";")
+                if _TRUSTED.fullmatch(candidate_rhs) or _REQUEST.fullmatch(candidate_rhs):
+                    assigned_variable = candidate_name
+
+            kinds: list[tuple[str, dict[str, Any]]] = []
+            if trusted:
+                kinds.append(("authenticated_identity_source", {"identity_expressions": trusted}))
+            if request_values:
+                kinds.append(("request_controlled_identity_input", {"request_expressions": request_values}))
+            if comparisons:
+                kinds.append(("resource_owner_comparison", {"comparisons": comparisons}))
+
+            # P2: a DB call may span lines (SQL on one line, parameters on
+            # the next). Join the call on balanced parens (at most 10
+            # physical lines) and run the sink checks on the joined text;
+            # the record still lands on the call's first line.
+            call_match = _DB_CALL.search(line)
+            effective_line = line
+            call_end_line = line_no
+            multi_line_call = False
+            if call_match:
+                joined = _join_balanced_call(all_lines, line_no - 1, call_match.end() - 1)
+                if joined is not None:
+                    effective_line, end_index = joined
+                    call_end_line = end_index + 1
+                    multi_line_call = call_end_line > line_no
+            sink = bool(call_match and _OWNER_PREDICATE.search(effective_line))
+            if sink:
+                sink_span: dict[str, Any] = {"multi_line_call": multi_line_call}
+                if multi_line_call:
+                    sink_span["call_lines"] = [line_no, call_end_line]
+                parameter_code = _call_parameter_code(effective_line, call_match.end() - 1)
+                parameter_expressions = _call_parameter_expressions(effective_line, call_match.end() - 1)
+                parameter_trusted = sorted(set(
+                    match.group(0) for match in _TRUSTED.finditer(parameter_code)
+                ))
+                parameter_request = sorted(set(
+                    match.group(0) for match in _REQUEST.finditer(parameter_code)
+                ))
+                # Record only binding arguments that are exactly a bare identifier
+                # (optionally wrapped as a one-item list/tuple). Compound expressions
+                # are deliberately excluded from interprocedural matching.
+                binding_parameters = sorted({
+                    candidate
+                    for expression in parameter_expressions
+                    for candidate in [expression.strip().strip("[](), \t\r\n")]
+                    if re.fullmatch(r"[A-Za-z_$][\w$]*", candidate)
+                })
+                if binding_parameters:
+                    kinds.append(("sql_owner_parameter_binding", {
+                        "resource_fields": owner_fields,
+                        "binding_parameters": binding_parameters,
+                        "binding_status": "EXACT_BARE_IDENTIFIER_ARGUMENT",
+                        **sink_span,
+                    }))
+                if parameter_trusted:
+                    kinds.append(("direct_authenticated_identity_to_sql_owner_binding", {
+                        "identity_expressions": parameter_trusted, "resource_fields": owner_fields,
+                        "binding_status": (
+                            "MULTI_LINE_CALL_PARAMETER_EXPRESSION" if multi_line_call
+                            else "SAME_LINE_PARAMETER_EXPRESSION"
+                        ),
+                        **sink_span,
+                    }))
+                if parameter_request:
+                    kinds.append(("direct_request_identity_to_sql_owner_binding", {
+                        "request_expressions": parameter_request, "resource_fields": owner_fields,
+                        "binding_status": (
+                            "MULTI_LINE_CALL_PARAMETER_EXPRESSION" if multi_line_call
+                            else "SAME_LINE_PARAMETER_EXPRESSION"
+                        ),
+                        **sink_span,
+                    }))
+                # Resolve aliases only in non-literal positional arguments after
+                # the SQL argument; names in SQL text or trailing expressions do not count.
+                used_names = set(identifier.findall(parameter_code))
+                for name in sorted(used_names):
+                    origin = aliases.get(name)
+                    if not origin:
+                        continue
+                    binding_status = ("INTERPROCEDURAL_SINGLE_HOP_RETURN"
+                                      if origin.get("via_return")
+                                      else "INTRAPROCEDURAL_LINEAR_ASSIGNMENT")
+                    if origin["kind"] == "trusted":
+                        kinds.append(("direct_authenticated_identity_to_sql_owner_binding", {
+                            "identity_expressions": [origin["expression"]],
+                            "resource_fields": owner_fields,
+                            "binding_status": binding_status,
+                            "propagation": origin["propagation"] + [
+                                {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}
+                            ],
+                            **sink_span,
+                        }))
+                    elif origin["kind"] == "request":
+                        kinds.append(("direct_request_identity_to_sql_owner_binding", {
+                            "request_expressions": [origin["expression"]],
+                            "resource_fields": owner_fields,
+                            "binding_status": binding_status,
+                            "propagation": origin["propagation"] + [
+                                {"path": path, "line": line_no, "sink": "SQL_OWNER_PREDICATE"}
+                            ],
+                            **sink_span,
+                        }))
+
+            for kind, details in kinds:
+                if assigned_variable and kind in {
+                    "authenticated_identity_source", "request_controlled_identity_input"
+                }:
+                    details["source_variable"] = assigned_variable
+                if details.get("binding_status") == "INTRAPROCEDURAL_LINEAR_ASSIGNMENT":
+                    scope = "INTRAPROCEDURAL_LINEAR_ASSIGNMENT"
+                elif details.get("binding_status") == "INTERPROCEDURAL_SINGLE_HOP_RETURN":
+                    scope = "INTERPROCEDURAL_SINGLE_HOP_RETURN"
+                elif details.get("multi_line_call"):
+                    scope = "MULTI_LINE_CALL"
+                else:
+                    scope = "SAME_LINE_PATTERN"
+                row = {
+                    "evidence_id": "", "kind": kind, "source": path, "line": line_no,
+                    "details": details, "confidence": "STATIC_INFERENCE",
+                    "verification_status": "NOT_VERIFIED", "scope": scope,
+                    "owner_symbol_id": function_owners.get(line_no),
+                    "owner_resolution_status": "RESOLVED" if line_no in function_owners else "UNKNOWN",
+                }
+                row["evidence_id"] = _id(row)
+                records.append(row)
+
+            # Track only simple direct assignments. Reassignment to an unknown
+            # expression invalidates the alias instead of retaining stale identity.
+            match = assignment.match(line)
+            if match and not sink:
+                name, rhs = match.groups()
+                rhs = rhs.strip().rstrip(";")
+                if _TRUSTED.fullmatch(rhs):
+                    aliases[name] = {"kind": "trusted", "expression": rhs, "line": line_no,
+                                     "propagation": [{"path": path, "line": line_no, "variable": name}]}
+                elif _REQUEST.fullmatch(rhs):
+                    aliases[name] = {"kind": "request", "expression": rhs, "line": line_no,
+                                     "propagation": [{"path": path, "line": line_no, "variable": name}]}
+                elif re.fullmatch(r"[A-Za-z_$][\w$]*", rhs) and rhs in aliases:
+                    aliases[name] = {**aliases[rhs],
+                                     "propagation": aliases[rhs]["propagation"] + [
+                                         {"path": path, "line": line_no, "variable": name}
+                                     ]}
+                elif re.fullmatch(r"[A-Za-z_$][\w$]*", rhs) and rhs in local_classes:
+                    # P24/T20: copying a locally constructed instance
+                    # binds the new name to the same class (snapshot, not
+                    # a reference), and carries the constructor arguments
+                    # along so a P23/T19 fallback still resolves through
+                    # the copy. Chained copies work because the target
+                    # lands in local_classes itself.
+                    local_classes[name] = local_classes[rhs]
+                    if rhs in local_ctor_args:
+                        local_ctor_args[name] = list(local_ctor_args[rhs])
+                    else:
+                        local_ctor_args.pop(name, None)
+                elif (return_helpers or bindings or method_helpers
+                        or instance_bindings or cross_instance_bindings
+                        or local_class_imports or local_class_names
+                        or ts_method_helpers
+                        or ts_instance_bindings or ts_cross_bindings
+                        or ts_has_base or py_has_base
+                        or ts_file_functions or ts_file_named_functions
+                        or ts_file_namespaces):
+                    # P4/P5: one hop through a same-file or from-imported
+                    # helper, e.g. uid = get_uid(req). Only a bare call
+                    # counts: no method call, no await, no attribute access
+                    # after the call.
+                    call_match = bare_call.fullmatch(rhs)
+                    helper = return_helpers.get(call_match.group(1)) if call_match else None
+                    if helper is None and call_match:
+                        # T6: a top-level TS/JS function, same file first,
+                        # then a named import (the P5 mirror for TS
+                        # functions).
+                        helper = ts_file_functions.get(call_match.group(1))
+                        if helper is None:
+                            helper = ts_file_named_functions.get(call_match.group(1))
+                    if helper is None:
+                        # P6: one hop through a module binding, e.g.
+                        # uid = server.utils.get_uid(req).
+                        attr_match = attr_call.fullmatch(rhs)
+                        if attr_match:
+                            helper = _resolve_module_attribute_helper(
+                                attr_match.group(1), bindings, module_index,
+                                same_file_helpers)
+                        if helper is None and attr_match:
+                            # P7: one hop through a method of the enclosing
+                            # class, e.g. uid = self.get_uid(req) or
+                            # uid = cls.get_uid(req). P9: when the enclosing
+                            # class does not define the method, walk up the
+                            # extends chain (a definition without an identity
+                            # profile shadows the base and stops the walk).
+                            parts = attr_match.group(1).split(".")
+                            if len(parts) == 2 and parts[0] in ("self", "cls"):
+                                enclosing = class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    helper = _python_method_profile(
+                                        path, enclosing, parts[1],
+                                        same_file_methods, py_defined_methods,
+                                        py_base_classes)
+                            elif len(parts) == 2 and parts[0] == "this":
+                                # T1: one hop through a method of the
+                                # enclosing TS/JS class, e.g.
+                                # uid = this.get_uid(req). T4: when the
+                                # enclosing class does not define the
+                                # method, walk up the extends chain (a
+                                # definition without an identity profile
+                                # shadows the base and stops the walk).
+                                enclosing = ts_class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    helper = _ts_method_profile(
+                                        path, enclosing, parts[1],
+                                        ts_same_file_methods, ts_defined_methods,
+                                        ts_base_classes)
+                            elif len(parts) == 2 and parts[0] == "super":
+                                # T4: one hop through the direct base
+                                # class, e.g. uid = super.get_uid(req).
+                                enclosing = ts_class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    helper = _ts_method_profile(
+                                        path, enclosing, parts[1],
+                                        ts_same_file_methods, ts_defined_methods,
+                                        ts_base_classes, skip_self=True)
+                            elif len(parts) == 2 and parts[0] in local_classes:
+                                # P22/T18: one hop through a method of a
+                                # locally constructed instance, e.g.
+                                # auth = MidAuth(); uid = auth.get_uid(req)
+                                # or const auth = new MidAuth();
+                                # uid = auth.getUid(req). The profile walks
+                                # the class hierarchy (P9/P10, T4), so an
+                                # inherited method binds. P23/T19: when the
+                                # method has no profile because it returns
+                                # an attribute bound in the constructor,
+                                # fall back to resolving that attribute
+                                # through the recorded constructor
+                                # arguments.
+                                target_file, target_class = local_classes[parts[0]]
+                                if is_python:
+                                    helper = _python_method_profile(
+                                        target_file, target_class, parts[1],
+                                        same_file_methods, py_defined_methods,
+                                        py_base_classes)
+                                    if helper is None:
+                                        helper = _python_ctor_return_resolution(
+                                            target_file, target_class, parts[1],
+                                            local_ctor_args.get(parts[0], []),
+                                            py_method_scans, py_defined_methods)
+                                else:
+                                    helper = _ts_method_profile(
+                                        target_file, target_class, parts[1],
+                                        ts_same_file_methods, ts_defined_methods,
+                                        ts_base_classes)
+                                    if helper is None:
+                                        helper = _ts_ctor_return_resolution(
+                                            target_file, target_class, parts[1],
+                                            local_ctor_args.get(parts[0], []),
+                                            ts_class_scans)
+                            elif len(parts) == 2:
+                                # T6: one hop through a namespace import,
+                                # e.g. import * as auth from "./auth";
+                                # uid = auth.get_uid(req). The helper is a
+                                # top-level function of the target file.
+                                target_file = ts_file_namespaces.get(parts[0])
+                                if target_file is not None:
+                                    helper = ts_same_file_functions.get(
+                                        target_file, {}).get(parts[1])
+                            elif len(parts) == 3 and parts[0] == "this":
+                                # T2: one hop through an instance attribute
+                                # bound in the enclosing TS/JS class, e.g.
+                                # uid = this.helper.get_uid(req).
+                                enclosing = ts_class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    target = ts_instance_bindings.get((enclosing, parts[1]))
+                                    if target is not None:
+                                        # T4: the helper's class may itself
+                                        # inherit the method.
+                                        helper = _ts_method_profile(
+                                            path, target, parts[2],
+                                            ts_same_file_methods, ts_defined_methods,
+                                            ts_base_classes)
+                                    else:
+                                        # T3: the attribute's class lives in
+                                        # another file, brought in by a named
+                                        # import; the profile carries the
+                                        # target file's path.
+                                        cross = ts_cross_bindings.get((enclosing, parts[1]))
+                                        if cross is not None:
+                                            target_file, target_class = cross
+                                            helper = _ts_method_profile(
+                                                target_file, target_class, parts[2],
+                                                ts_same_file_methods, ts_defined_methods,
+                                                ts_base_classes)
+                            elif len(parts) == 3 and parts[0] == "self":
+                                # P8: one hop through an instance attribute
+                                # bound in the enclosing class, e.g.
+                                # uid = self.helper.get_uid(req).
+                                enclosing = class_ranges.get(line_no)
+                                if enclosing is not None:
+                                    target = instance_bindings.get((enclosing, parts[1]))
+                                    if target is not None:
+                                        # P9: the helper's class may itself
+                                        # inherit the method.
+                                        helper = _python_method_profile(
+                                            path, target, parts[2],
+                                            same_file_methods, py_defined_methods,
+                                            py_base_classes)
+                                    else:
+                                        # P14: the attribute's class is
+                                        # imported from another file.
+                                        cross = cross_instance_bindings.get(
+                                            (enclosing, parts[1]))
+                                        if cross is not None:
+                                            target_file, target_class = cross
+                                            helper = _python_method_profile(
+                                                target_file, target_class, parts[2],
+                                                same_file_methods, py_defined_methods,
+                                                py_base_classes)
+                    if helper is None:
+                        # P9: one hop through the direct base class, e.g.
+                        # uid = super().get_uid(req). P10: also the
+                        # two-argument form, e.g.
+                        # uid = super(PhotoHandler, self).get_uid(req),
+                        # which starts the MRO walk after the named class.
+                        # (attr_call cannot match this: its dotted prefix
+                        # contains "()".)
+                        super_match = _PY_SUPER_CALL_RHS.fullmatch(rhs)
+                        if super_match:
+                            enclosing = class_ranges.get(line_no)
+                            if enclosing is not None:
+                                helper = _python_method_profile(
+                                    path, enclosing, super_match.group(3),
+                                    same_file_methods, py_defined_methods,
+                                    py_base_classes, skip_self=True,
+                                    after=super_match.group(2))
+                    if helper is not None:
+                        aliases[name] = {
+                            "kind": helper["kind"], "expression": helper["expression"],
+                            "line": line_no, "via_return": True,
+                            "propagation": (
+                                helper.get("delegation", []) +
+                                [{"path": helper["path"], "line": return_line,
+                                  "function": helper["function"],
+                                  "returns": helper["expression"]}
+                                 for return_line in helper["return_lines"]]
+                                + [{"path": path, "line": line_no, "variable": name}]
+                            ),
+                        }
+                    else:
+                        aliases.pop(name, None)
+                        # P22/T18: a bare call constructing a known class
+                        # binds the local name to that class (Python), and
+                        # a `new <Class>(...)` right-hand side does the
+                        # same for TS/JS; a later `local.method(...)` call
+                        # then resolves through it. P23/T19: the call's
+                        # positional arguments are recorded alongside, so
+                        # a method returning a constructor-bound attribute
+                        # can resolve through them. Any other right-hand
+                        # side invalidates the local binding instead of
+                        # retaining it.
+                        if call_match is not None:
+                            constructed = call_match.group(1)
+                            if (constructed in local_class_names
+                                    and constructed not in local_function_names):
+                                local_classes[name] = (path, constructed)
+                                local_ctor_args[name] = (
+                                    _split_call_args(rhs, rhs.index("(")) or [])
+                            elif constructed in local_class_imports:
+                                local_classes[name] = local_class_imports[constructed]
+                                local_ctor_args[name] = (
+                                    _split_call_args(rhs, rhs.index("(")) or [])
+                            else:
+                                local_classes.pop(name, None)
+                                local_ctor_args.pop(name, None)
+                        elif not is_python:
+                            constructed = _ts_constructed_class(rhs)
+                            if (constructed is not None and "." not in constructed
+                                    and constructed in local_class_names
+                                    and constructed not in local_function_names):
+                                local_classes[name] = (path, constructed)
+                                local_ctor_args[name] = _ts_new_call_args(rhs) or []
+                            elif (constructed is not None and "." not in constructed
+                                    and constructed in local_class_imports):
+                                local_classes[name] = local_class_imports[constructed]
+                                local_ctor_args[name] = _ts_new_call_args(rhs) or []
+                            else:
+                                local_classes.pop(name, None)
+                                local_ctor_args.pop(name, None)
+                        else:
+                            local_classes.pop(name, None)
+                            local_ctor_args.pop(name, None)
+                else:
+                    aliases.pop(name, None)
+
+            if not is_python:
+                previous_depth = brace_depth
+                brace_depth += line.count("{") - line.count("}")
+                if brace_depth != previous_depth:
+                    aliases.clear()
+                    local_classes.clear()
+                    local_ctor_args.clear()
+            previous_indent = indent
+    records.sort(key=lambda item: (item["source"], item["line"], item["kind"], item["evidence_id"]))
+    return records

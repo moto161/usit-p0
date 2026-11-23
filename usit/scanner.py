@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-import ast, base64, hashlib, json, os, re, sys, tempfile, time, shutil
+import ast, base64, hashlib, json, os, posixpath, re, sys, tempfile, time, shutil
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
@@ -9,6 +9,8 @@ from .python_resolver import resolve_python_calls
 from .parser_contract import CONTRACT_VERSION, parser_capabilities, adapt_graph_v1
 from .file_understanding import build_file_understanding, verify_understanding_identities
 from .js_ts_parser import analyze_js_ts_project, parser_availability
+from .vue_parser import vue_script_for_adapter, extract_vue_template_bindings, resolve_vue_bindings
+from .angular_parser import find_angular_components, find_inline_templates, inline_template_for_binding, extract_angular_template_bindings, resolve_angular_bindings
 from .safety import (MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_READ_BYTES, MAX_SCAN_SECONDS,
                      MAX_OUTPUT_BYTES, MAX_CONCURRENCY, MAX_PARSER_TASK_SECONDS, ScanAuthorization, ScanBlocked,
                      canonical_project, canonical_output, is_reparse_point, overlaps)
@@ -520,12 +522,27 @@ def analyze_file(root: Path, path: Path, *, raw_bytes: bytes | None = None) -> d
     row['analysis_degradation']=_degradation_metadata(row, lang)
     return row
 
+MAX_PREVIOUS_MANIFEST_BYTES = 50 * 1024 * 1024
+
+
 def load_previous(out: Path) -> dict[str,str]:
+    """Load the optional incremental baseline as bounded, no-follow input.
+
+    A missing, malformed, oversized, linked or otherwise unsafe prior manifest
+    is not trusted as an incremental baseline; the scan safely falls back to a
+    full classification instead of following or allocating an unbounded file.
+    """
     p=out/'scan_manifest.json'
     try:
-        data=json.loads(p.read_text('utf-8'))
-        return {x['path']:x['sha256'] for x in data.get('files',[]) if 'path' in x and 'sha256' in x}
-    except (OSError,ValueError,TypeError): return {}
+        raw=safeio.read_bounded_no_follow(p, MAX_PREVIOUS_MANIFEST_BYTES)
+        data=json.loads(raw)
+        if not isinstance(data, dict) or not isinstance(data.get('files', []), list):
+            return {}
+        return {x['path']:x['sha256'] for x in data.get('files', [])
+                if isinstance(x, dict) and isinstance(x.get('path'), str)
+                and isinstance(x.get('sha256'), str)}
+    except (OSError,ValueError,TypeError,json.JSONDecodeError):
+        return {}
 
 def _edge(source: str, target: str, etype: str, ev: dict, **extra: Any) -> dict[str,Any]:
     e={'source':source,'target':target,'type':etype,'evidence':ev}
@@ -973,8 +990,18 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
         # root tsconfig/jsconfig) to the adapter.  The adapter then analyzes
         # in-memory content and never re-opens a project file by path, eliminating
         # the check-then-read race on JS/TS source that P0.7.4 still carried.
-        js_ts_source={rel:content_by_path[rel] for rel in content_by_path
-                      if Path(rel).suffix.lower() in {'.js','.jsx','.mjs','.cjs','.ts','.tsx'}}
+        # V1: a Vue SFC is not TypeScript, so only its <script> block (line
+        # padded, so adapter line numbers stay file-relative) is handed to
+        # the adapter; the template bindings are extracted separately below.
+        js_ts_source={}
+        for rel in content_by_path:
+            suffix=Path(rel).suffix.lower()
+            if suffix in {'.js','.jsx','.mjs','.cjs','.ts','.tsx'}:
+                js_ts_source[rel]=content_by_path[rel]
+            elif suffix=='.vue':
+                script=vue_script_for_adapter(content_by_path[rel])
+                if script is not None:
+                    js_ts_source[rel]=script
         js_ts_config={}
         for rel,raw in raw_by_rel.items():
             name=Path(rel).name
@@ -994,7 +1021,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
     if any(d.get('code') in fatal_parser_codes for d in js_ts_result.get('project_diagnostics',[])):
         code=next(d['code'] for d in js_ts_result.get('project_diagnostics',[]) if d.get('code') in fatal_parser_codes)
         raise ScanBlocked(code,'The JavaScript/TypeScript parser did not complete; no graph was published.')
-    js_ts_paths={r['path'] for r in rows if r.get('language') in {'JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX'}}
+    js_ts_paths={r['path'] for r in rows if r.get('language') in {'JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX','Vue'}}
     js_ts_capabilities=parser_capabilities()['languages']
     if not js_ts_result.get('available'):
         for language in ('JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX'):
@@ -1010,6 +1037,9 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             row['symbols']=parsed.get('symbols',[])
             row['imports']=parsed.get('imports',[])
             row['calls']=parsed.get('calls',[])
+            row['route_handlers']=parsed.get('route_handlers',[])
+            row['ui_event_bindings']=parsed.get('ui_event_bindings',[])
+            row['api_client_calls']=parsed.get('api_client_calls',[])
             row['analysis_diagnostics']=parsed.get('diagnostics',[])
             row['syntax_status']=parsed.get('syntax_status','UNKNOWN')
             row['parser']={**js_ts_capabilities[row['language']],'parser_name':parsed.get('parser_name','typescript-compiler-api'),
@@ -1038,6 +1068,51 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
                 diags.append({'code':'SEMANTIC_PARSER_UNAVAILABLE','severity':'UNKNOWN',
                     'message':'Text candidates are not semantic parse results; syntax validity is not measured.'})
         row['analysis_degradation']=_degradation_metadata(row, row['language'])
+    # V1: Vue template event bindings resolve against the merged script
+    # symbols (adapter output when available, regex candidates otherwise).
+    for row in rows:
+        if row.get('language') != 'Vue':
+            continue
+        text = content_by_path.get(row['path'])
+        if not isinstance(text, str):
+            row['vue_event_bindings'] = []
+            continue
+        row['vue_event_bindings'] = resolve_vue_bindings(
+            extract_vue_template_bindings(text), row.get('symbols', []), row['path'])
+    # A1: Angular template event bindings: a component .ts row declares its
+    # template via templateUrl; the bindings live on the template (.html)
+    # row and resolve against the component row's merged method symbols.
+    # A templateUrl escaping the project never matches a row (fail-closed).
+    rows_by_path = {row['path']: row for row in rows}
+    for row in rows:
+        if row.get('language') not in {'TypeScript', 'TypeScript/JSX', 'JavaScript', 'JavaScript/JSX'}:
+            continue
+        text = content_by_path.get(row['path'])
+        if not isinstance(text, str):
+            continue
+        for component in find_angular_components(text):
+            template_rel = posixpath.normpath(posixpath.join(
+                posixpath.dirname(row['path']), component['template_url']))
+            template_row = rows_by_path.get(template_rel)
+            if template_row is None:
+                continue
+            template_text = content_by_path.get(template_rel)
+            if not isinstance(template_text, str):
+                continue
+            template_row.setdefault('angular_event_bindings', []).extend(
+                resolve_angular_bindings(
+                    extract_angular_template_bindings(template_text),
+                    row.get('symbols', []), template_rel, row['path']))
+        # A2: inline `template:` strings live in the component file itself;
+        # their bindings hang on the component row (evidence path is the .ts
+        # file, at the template's file lines).
+        for inline in find_inline_templates(text):
+            padded = inline_template_for_binding(
+                inline["text"], inline["start_line"], inline["start_column"])
+            row.setdefault('angular_event_bindings', []).extend(
+                resolve_angular_bindings(
+                    extract_angular_template_bindings(padded),
+                    row.get('symbols', []), row['path'], row['path']))
     # P0.7.4: cross-file resolution runs as a supervised *subprocess* task too,
     # obeying the same per-task timeout and concurrency cap as per-file analysis.
     # The worker receives the Python source text the parent already read (never
@@ -1059,7 +1134,7 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
         raise ScanBlocked('PARSER_CRASHED',
                           f'Cross-file resolution failed ({type(exc).__name__}); no graph was published.') from exc
     for row in rows:
-        if row.get('language')!='Python' and row.get('language') not in {'JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX'}:
+        if row.get('language')!='Python' and row.get('language') not in {'JavaScript','JavaScript/JSX','TypeScript','TypeScript/JSX','Vue'}:
             for call in row.get('calls',[]):
                 call['heuristic_resolved_candidate']=bool(call.get('resolved'))
                 call['resolved']=False
@@ -1073,9 +1148,14 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
         categories[r['category']]=categories.get(r['category'],0)+1
     markers=build_markers(root,paths)
     nodes=[]; edges=[]
+    all_symbol_ids = {
+        'symbol:' + row['path'] + '#' + symbol['name'] + ':' + str(symbol['line'])
+        for row in rows for symbol in row.get('symbols', [])
+    }
     for f in rows:
         fid='file:'+f['path']; nodes.append({'id':fid,'type':'file','label':f['path'],'category':f['category'],'language':f['language'],'module':f.get('module'),'evidence':{'path':f['path']}})
         defined_ids={}
+        defined_symbol_ids=set()
         for s in f['symbols']:
             sid='symbol:'+f['path']+'#'+s['name']+':'+str(s['line'])
             module_symbol=next((x for x in f.get('module_symbols',[]) if x['name']==s['name'] and x['line']==s['line']),None)
@@ -1084,10 +1164,136 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             nodes.append(node)
             edges.append(_edge(fid,sid,'defines',{'path':f['path'],'line':s['line']},method='extractor',confidence='medium'))
             defined_ids[s['name']]=sid
+            defined_symbol_ids.add(sid)
         for dep in f['imports']:
             did='dependency:'+dep['name']
             if not any(n['id']==did for n in nodes): nodes.append({'id':did,'type':'dependency','label':dep['name'],'evidence':{'path':f['path'],'line':dep['line']}})
             edges.append(_edge(fid,did,'imports',{'path':f['path'],'line':dep['line'],'excerpt':dep.get('evidence','')},method=dep.get('method','regex'),confidence='medium'))
+        for route_handler in f.get('route_handlers', []):
+            state = route_handler.get('resolution_status', 'UNKNOWN')
+            target = route_handler.get('target') or {}
+            # The binding edge method follows the row language: the TypeScript
+            # Compiler API produces these rows for JS/TS, the Python AST
+            # resolver produces the same shape for Python.
+            binding_method = ('python-route-handler-binding' if f.get('language') == 'Python'
+                              else 'typescript-route-handler-binding')
+            extras = {
+                'resolution_status': state,
+                'handler_reference': route_handler.get('handler_reference', ''),
+                'route_method': route_handler.get('method', ''),
+                'route_path': route_handler.get('path', ''),
+                'evidence_chain': route_handler.get('evidence_chain', []),
+                'candidate': True,
+                'verified': False,
+                'verification_status': 'NOT_VERIFIED',
+            }
+            if state == 'RESOLVED' and target.get('id') in all_symbol_ids:
+                extras['resolved'] = True
+                edges.append(_edge(fid, target['id'], 'references',
+                    {'path': f['path'], 'line': route_handler.get('line'),
+                     'column': route_handler.get('column'),
+                     'handler_reference': route_handler.get('handler_reference')},
+                    method=binding_method, confidence='high', **extras))
+            else:
+                extras['resolved'] = False
+                if route_handler.get('candidate_targets'):
+                    extras['candidate_targets'] = route_handler['candidate_targets']
+                edges.append(_edge(fid, 'unresolved-route-handler:' + f['path'] + ':' +
+                    str(route_handler.get('line')) + ':' + str(route_handler.get('handler_reference')),
+                    'references', {'path': f['path'], 'line': route_handler.get('line'),
+                    'handler_reference': route_handler.get('handler_reference')},
+                    method=binding_method, confidence='low', **extras))
+        for api_call in f.get('api_client_calls', []):
+            call_id = 'api-client-call:' + f['path'] + ':' + str(api_call.get('line')) + ':' + str(api_call.get('column') or 0)
+            if not any(n['id'] == call_id for n in nodes):
+                nodes.append({'id': call_id, 'type': 'api_client_call',
+                    'label': (api_call.get('method') or 'UNKNOWN') + ' ' + (api_call.get('path') or api_call.get('url_expression') or 'dynamic URL'),
+                    'evidence': {'path': f['path'], 'line': api_call.get('line'),
+                                 'resolution_status': api_call.get('resolution_status')}})
+            source_id = api_call.get('caller_symbol_id')
+            if source_id not in all_symbol_ids:
+                source_id = fid
+            edges.append(_edge(source_id, call_id, 'references',
+                {'path': f['path'], 'line': api_call.get('line'), 'column': api_call.get('column'),
+                 'callee': api_call.get('callee'), 'url_expression': api_call.get('url_expression')},
+                method='typescript-api-client-call', confidence='medium',
+                route_method=api_call.get('method'), route_path=api_call.get('path'),
+                resolution_status=api_call.get('resolution_status'),
+                caller_symbol_id=api_call.get('caller_symbol_id'), candidate=True, verified=False,
+                verification_status='NOT_VERIFIED', confidence_level='STATIC_INFERENCE'))
+        for ui_binding in f.get('ui_event_bindings', []):
+            state = ui_binding.get('resolution_status', 'UNKNOWN')
+            target = ui_binding.get('target') or {}
+            extras = {'resolution_status': state, 'event_name': ui_binding.get('event_name', ''),
+                'binding_expression': ui_binding.get('binding_expression'), 'candidate': True,
+                'verified': False, 'verification_status': 'NOT_VERIFIED',
+                'evidence_chain': ui_binding.get('evidence_chain', [])}
+            target_id = target.get('id') if state == 'RESOLVED' else None
+            if target_id not in all_symbol_ids:
+                target_id = 'unresolved-ui-event:' + f['path'] + ':' + str(ui_binding.get('line')) + ':' + str(ui_binding.get('event_name'))
+                if not any(n['id'] == target_id for n in nodes):
+                    nodes.append({'id': target_id, 'type': 'unresolved',
+                        'label': ui_binding.get('binding_expression') or ui_binding.get('event_name') or 'UI event',
+                        'evidence': {'path': f['path'], 'line': ui_binding.get('line'), 'resolution_status': state}})
+                extras['resolved'] = False
+                if ui_binding.get('candidate_targets'):
+                    extras['candidate_targets'] = ui_binding['candidate_targets']
+            else:
+                extras['resolved'] = True
+            edges.append(_edge(fid, target_id, 'references',
+                {'path': f['path'], 'line': ui_binding.get('line'), 'column': ui_binding.get('column'),
+                 'event_name': ui_binding.get('event_name'), 'binding_expression': ui_binding.get('binding_expression')},
+                method='typescript-jsx-event-handler-binding', confidence='high' if extras['resolved'] else 'low', **extras))
+        # V1: Vue SFC template bindings, same shape as the JSX ones above.
+        for ui_binding in f.get('vue_event_bindings', []):
+            state = ui_binding.get('resolution_status', 'UNKNOWN')
+            target = ui_binding.get('target') or {}
+            extras = {'resolution_status': state, 'event_name': ui_binding.get('event_name', ''),
+                'binding_expression': ui_binding.get('binding_expression'), 'candidate': True,
+                'verified': False, 'verification_status': 'NOT_VERIFIED',
+                'evidence_chain': ui_binding.get('evidence_chain', [])}
+            target_id = target.get('id') if state == 'RESOLVED' else None
+            if target_id not in all_symbol_ids:
+                target_id = 'unresolved-ui-event:' + f['path'] + ':' + str(ui_binding.get('line')) + ':' + str(ui_binding.get('event_name'))
+                if not any(n['id'] == target_id for n in nodes):
+                    nodes.append({'id': target_id, 'type': 'unresolved',
+                        'label': ui_binding.get('binding_expression') or ui_binding.get('event_name') or 'UI event',
+                        'evidence': {'path': f['path'], 'line': ui_binding.get('line'), 'resolution_status': state}})
+                extras['resolved'] = False
+                if ui_binding.get('candidate_targets'):
+                    extras['candidate_targets'] = ui_binding['candidate_targets']
+            else:
+                extras['resolved'] = True
+            edges.append(_edge(fid, target_id, 'references',
+                {'path': f['path'], 'line': ui_binding.get('line'), 'column': ui_binding.get('column'),
+                 'event_name': ui_binding.get('event_name'), 'binding_expression': ui_binding.get('binding_expression')},
+                method='vue-template-event-handler-binding', confidence='high' if extras['resolved'] else 'low', **extras))
+        # A1: Angular template bindings, same shape as the Vue ones above.
+        # The edge source is the template (.html) file node; the target is
+        # the handler method symbol in the component .ts file.
+        for ui_binding in f.get('angular_event_bindings', []):
+            state = ui_binding.get('resolution_status', 'UNKNOWN')
+            target = ui_binding.get('target') or {}
+            extras = {'resolution_status': state, 'event_name': ui_binding.get('event_name', ''),
+                'binding_expression': ui_binding.get('binding_expression'), 'candidate': True,
+                'verified': False, 'verification_status': 'NOT_VERIFIED',
+                'evidence_chain': ui_binding.get('evidence_chain', [])}
+            target_id = target.get('id') if state == 'RESOLVED' else None
+            if target_id not in all_symbol_ids:
+                target_id = 'unresolved-ui-event:' + f['path'] + ':' + str(ui_binding.get('line')) + ':' + str(ui_binding.get('event_name'))
+                if not any(n['id'] == target_id for n in nodes):
+                    nodes.append({'id': target_id, 'type': 'unresolved',
+                        'label': ui_binding.get('binding_expression') or ui_binding.get('event_name') or 'UI event',
+                        'evidence': {'path': f['path'], 'line': ui_binding.get('line'), 'resolution_status': state}})
+                extras['resolved'] = False
+                if ui_binding.get('candidate_targets'):
+                    extras['candidate_targets'] = ui_binding['candidate_targets']
+            else:
+                extras['resolved'] = True
+            edges.append(_edge(fid, target_id, 'references',
+                {'path': f['path'], 'line': ui_binding.get('line'), 'column': ui_binding.get('column'),
+                 'event_name': ui_binding.get('event_name'), 'binding_expression': ui_binding.get('binding_expression')},
+                method='angular-template-event-handler-binding', confidence='high' if extras['resolved'] else 'low', **extras))
         for c in f['calls']:
             state=c.get('resolution_status','UNKNOWN')
             target=c.get('target') or {}
@@ -1109,8 +1315,24 @@ def _scan_project_impl(root: Path, out: Path, force: bool, paths: list[Path], ra
             if c.get('candidate_targets'): extras['candidate_targets']=c['candidate_targets']
             if c.get('evidence_chain'): extras['evidence_chain']=c['evidence_chain']
             if c.get('diagnostic'): extras['diagnostic']=c['diagnostic']
+            # Preserve parameter mapping only for a uniquely resolved call.
+            # Unsupported shapes remain explicit but never publish partial mappings.
+            if state == 'RESOLVED' and c.get('argument_binding_status'):
+                extras['argument_binding_status'] = c['argument_binding_status']
+                extras['argument_bindings'] = (
+                    c.get('argument_bindings', [])
+                    if c.get('argument_binding_status') == 'EXACT_STATIC_MAPPING' else []
+                )
             if target:
                 extras['target_location']={'path':target['file'],'line':target['line'],'qualified_name':target.get('qualified_name')}
+            caller_id=c.get('caller_symbol_id')
+            if caller_id in defined_symbol_ids:
+                extras['caller_symbol_id']=caller_id
+                caller=c.get('caller') or {}
+                extras['caller_location']={'path':f['path'],'line':caller.get('line'),'name':caller.get('name')}
+            # graph-v1 requires every relationship source to remain a file node.
+            # Preserve precise function ownership as call-edge metadata until a
+            # versioned graph schema can represent function-originating edges.
             edges.append(_edge(fid,tid,'calls',ev,method=c.get('method','regex'),confidence=c.get('confidence','low'),**extras))
         for fc in f.get('framework_candidates',[]):
             cid='candidate:'+fc['kind']

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -36,6 +37,14 @@ class VerificationCaptureTests(unittest.TestCase):
             approval_ref="unit-test-authorization",
             **kwargs,
         )
+
+    def test_verify_manifest_rejects_oversized_manifest_input(self):
+        manifest = self.evidence_parent / "evidence_manifest.json"
+        with manifest.open("wb") as stream:
+            stream.truncate(50 * 1024 * 1024 + 1)
+        result = capture.verify_manifest(self.evidence_parent)
+        self.assertFalse(result["valid"])
+        self.assertTrue(any("size limit" in error for error in result["errors"]))
 
     def test_success_captures_separate_streams_and_valid_manifest(self):
         result = self.run_capture(
@@ -95,7 +104,19 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertTrue(result.manifest_valid)
 
     def test_keyboard_interrupt_terminates_child_and_records_returncode(self):
-        with patch.object(capture.time, "sleep", side_effect=KeyboardInterrupt):
+        # Interrupt only the polling loop. subprocess.wait() shares the time
+        # module and must be allowed to wait for the terminated child.
+        original_sleep = capture.time.sleep
+        should_interrupt = True
+
+        def interrupt_once(delay):
+            nonlocal should_interrupt
+            if should_interrupt:
+                should_interrupt = False
+                raise KeyboardInterrupt
+            return original_sleep(delay)
+
+        with patch.object(capture.time, "sleep", side_effect=interrupt_once):
             result = self.run_capture("import time; time.sleep(10)", poll_interval=0.01)
         self.assertEqual(result.status, "INTERRUPTED")
         self.assertTrue(result.interrupted)
@@ -166,6 +187,35 @@ class VerificationCaptureTests(unittest.TestCase):
         self.assertFalse(verified["valid"])
         self.assertTrue(any("mismatch" in error for error in verified["errors"]))
 
+    def test_manifest_signature_status_without_key_is_not_checked(self):
+        result = self.run_capture("pass")
+        verified = capture.verify_manifest(result.evidence_dir)
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["signature_status"], "NOT_CHECKED")
+
+    def test_signed_manifest_verifies_with_key_and_tamper_is_invalid(self):
+        from usit.evidence_signing import generate_run_key, sign_document
+
+        result = self.run_capture("pass")
+        manifest_path = Path(result.manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        key = generate_run_key()
+        manifest["signature"] = sign_document(manifest, key)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        verified = capture.verify_manifest(result.evidence_dir, hmac_key=key)
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["signature_status"], "VALID")
+        # Tampering with an artifact after signing breaks the artifact hash
+        # and the signature is computed over the manifest content, so the
+        # manifest itself is unchanged here; instead tamper the manifest's
+        # recorded hash to break the signature.
+        manifest["artifacts"][0]["sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        verified = capture.verify_manifest(result.evidence_dir, hmac_key=key)
+        self.assertFalse(verified["valid"])
+        self.assertEqual(verified["signature_status"], "INVALID")
+        self.assertTrue(any("signature is INVALID" in error for error in verified["errors"]))
+
     def test_manifest_omitting_required_artifact_is_detected(self):
         result = self.run_capture("pass")
         manifest_path = Path(result.manifest_path)
@@ -196,6 +246,265 @@ class VerificationCaptureTests(unittest.TestCase):
                 approval_ref=" ",
             )
         self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+
+    def test_explicit_child_environment_is_passed_without_shell(self):
+        env = os.environ.copy()
+        env["USIT_CAPTURE_ENV_TEST"] = "expected-value"
+        result = capture.capture_run(
+            [sys.executable, "-c", "import os; print(os.environ['USIT_CAPTURE_ENV_TEST'])"],
+            project_root=self.project,
+            evidence_parent=self.evidence_parent,
+            files=["input.txt"],
+            approval_ref="unit-test-authorization",
+            env=env,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(
+            (Path(result.evidence_dir) / "stdout.log").read_text(encoding="utf-8").strip(),
+            "expected-value",
+        )
+
+
+    def test_isolated_run_rejected_when_parent_is_not_root_or_not_posix(self):
+        # Fail-closed: isolation needs a root parent on POSIX. Mock the
+        # platform checks so no real process is ever started. The POSIX
+        # name is mocked too: on Windows os.name is "nt", so the POSIX
+        # check would fire before the root check; create=True because
+        # os.geteuid does not exist on Windows at all.
+        with patch.object(os, "geteuid", return_value=1000, create=True), \
+             patch.object(os, "name", "posix"), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "run as root"):
+                self.run_capture("pass", user="nobody")
+            popen.assert_not_called()
+        self.assertEqual(list(self.evidence_parent.iterdir()), [])
+        # E1: on Windows isolation is a supported path (not a POSIX-only
+        # refusal); without a runner password it is refused before any
+        # process starts.
+        with patch.object(os, "name", "nt"), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "requires user_password"):
+                self.run_capture("pass", user="nobody")
+            popen.assert_not_called()
+        self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+    def test_runner_password_requires_user_and_windows(self):
+        secret = "E1-test-secret-password"
+        with self.assertRaisesRegex(ValueError, "requires a runner user"):
+            self.run_capture("pass", user_password=secret)
+        # A password with a user is legal on Windows (it is the logon
+        # password), so only POSIX rejects it here; on Windows the call
+        # proceeds to user resolution and fails because "nobody" does not
+        # exist. Either way the secret never appears in the message.
+        expected = "does not exist" if os.name == "nt" else "only supported on Windows"
+        with self.assertRaisesRegex(ValueError, expected) as ctx:
+            self.run_capture("pass", user="nobody", user_password=secret)
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_windows_runner_user_resolution(self):
+        # Fake the Windows helper module so the resolution branches are
+        # exercised on any platform (the real module refuses to import
+        # off Windows). Patch the module attribute, not sys.modules: once
+        # any earlier call imported the real module, the package attribute
+        # shadows a sys.modules patch (fromlist lookup), which broke this
+        # test on Windows CI.
+        fake = types.SimpleNamespace(
+            is_parent_admin=lambda: True,
+            user_exists=lambda name: name == "usit-runner",
+        )
+        with patch.object(os, "name", "nt"), \
+             patch.object(capture, "windows_runner", fake), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            name, uid = capture._resolve_runner_user("usit-runner")
+            self.assertEqual((name, uid), ("usit-runner", None))
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                capture._resolve_runner_user("no-such-user")
+            with self.assertRaisesRegex(ValueError, "username string, not a UID"):
+                capture._resolve_runner_user(1234)
+            popen.assert_not_called()
+        fake_non_admin = types.SimpleNamespace(
+            is_parent_admin=lambda: False, user_exists=lambda name: True)
+        with patch.object(os, "name", "nt"), \
+             patch.object(capture, "windows_runner", fake_non_admin):
+            with self.assertRaisesRegex(ValueError, "run as administrator"):
+                capture._resolve_runner_user("usit-runner")
+
+    def test_windows_runner_module_refuses_non_windows_import(self):
+        if os.name == "nt":
+            self.skipTest("windows_runner imports fine on Windows")
+        import importlib
+
+        with self.assertRaisesRegex(ValueError, "Windows platform"):
+            importlib.import_module("usit.windows_runner")
+
+    def test_unknown_runner_user_is_rejected_without_starting_process(self):
+        # Mock a root parent on POSIX plus a pwd stand-in whose lookups
+        # always miss, so the test reaches the "does not exist" check on
+        # any platform: CI runners are non-root, and Windows has no pwd
+        # module at all. Without these the parent/platform check fires
+        # first and the expected message never appears.
+        def _missing(name):
+            raise KeyError(name)
+
+        def _missing_uid(uid):
+            raise KeyError(uid)
+
+        fake_pwd = types.SimpleNamespace(getpwnam=_missing, getpwuid=_missing_uid)
+        with patch.object(os, "geteuid", return_value=0, create=True), \
+             patch.object(os, "name", "posix"), \
+             patch.object(capture, "pwd", fake_pwd), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                self.run_capture("pass", user="usit-definitely-does-not-exist-12345")
+            popen.assert_not_called()
+        self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+    def test_root_runner_user_is_rejected_without_starting_process(self):
+        # Same platform mocking as above, with a pwd stand-in that only
+        # knows the root entry, so the test reaches the "must not be
+        # root" check on any platform.
+        root = types.SimpleNamespace(pw_name="root", pw_uid=0)
+
+        def _getpwnam(name):
+            if name == "root":
+                return root
+            raise KeyError(name)
+
+        def _getpwuid(uid):
+            if uid == 0:
+                return root
+            raise KeyError(uid)
+
+        fake_pwd = types.SimpleNamespace(getpwnam=_getpwnam, getpwuid=_getpwuid)
+        with patch.object(os, "geteuid", return_value=0, create=True), \
+             patch.object(os, "name", "posix"), \
+             patch.object(capture, "pwd", fake_pwd), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "must not be root"):
+                self.run_capture("pass", user=0)
+            with self.assertRaisesRegex(ValueError, "must not be root"):
+                self.run_capture("pass", user="root")
+            popen.assert_not_called()
+        self.assertEqual(list(self.evidence_parent.iterdir()), [])
+
+
+class PipeChannelTests(unittest.TestCase):
+    """D1: parent-held pipe output channels (POSIX only)."""
+
+    def setUp(self) -> None:
+        if os.name != "posix":
+            self.skipTest("pipe channels require a POSIX platform")
+        self.temp = tempfile.TemporaryDirectory(prefix="usit-vcapture-pipe-")
+        self.base = Path(self.temp.name)
+        self.project = self.base / "project"
+        self.evidence_parent = self.base / "evidence"
+        self.project.mkdir()
+        self.evidence_parent.mkdir()
+        (self.project / "input.txt").write_text("before\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def run_pipe_capture(self, code: str, channels, **kwargs):
+        return capture.capture_run(
+            [sys.executable, "-c", code],
+            project_root=self.project,
+            evidence_parent=self.evidence_parent,
+            files=["input.txt"],
+            approval_ref="unit-test-authorization",
+            pipe_channels=channels,
+            **kwargs,
+        )
+
+    def test_pipe_channel_delivers_child_output(self):
+        junit = capture.open_pipe_channel("junit", 1024 * 1024)
+        imports = capture.open_pipe_channel("runtime_imports", 1024 * 1024)
+        # Mirror production: the child writes via /dev/fd/<N> paths.
+        code = (
+            f"open('/dev/fd/{junit.write_fd}', 'wb').write(b'<testsuites/>');"
+            f"open('/dev/fd/{imports.write_fd}', 'wb').write(b'{{\"ok\": true}}')"
+        )
+        result = self.run_pipe_capture(code, [junit, imports])
+        self.assertEqual(result.status, "PASS", result.errors)
+        self.assertEqual(result.pipe_errors, ())
+        self.assertEqual(result.pipe_outputs["junit"], b"<testsuites/>")
+        self.assertEqual(result.pipe_outputs["runtime_imports"], b'{"ok": true}')
+        summary = result.to_dict()["pipe_outputs"]
+        self.assertEqual(summary["junit"]["bytes"], len(b"<testsuites/>"))
+
+    def test_pipe_channel_drains_more_than_pipe_buffer(self):
+        # 200 KiB exceeds the 64 KiB pipe buffer: without concurrent
+        # draining the child would block forever.
+        channel = capture.open_pipe_channel("big", 1024 * 1024)
+        code = (
+            f"import os; os.write({channel.write_fd}, b'x' * 200 * 1024)"
+        )
+        result = self.run_pipe_capture(code, [channel], timeout=30)
+        self.assertEqual(result.status, "PASS", result.errors)
+        self.assertEqual(result.pipe_errors, ())
+        self.assertEqual(len(result.pipe_outputs["big"]), 200 * 1024)
+
+    def test_pipe_channel_overrun_is_refused(self):
+        channel = capture.open_pipe_channel("small", 16)
+        code = f"import os; os.write({channel.write_fd}, b'y' * 1024)"
+        result = self.run_pipe_capture(code, [channel], timeout=30)
+        self.assertEqual(result.status, "NOT_VERIFIED", result.errors)
+        self.assertTrue(any("exceeded 16 bytes" in item for item in result.pipe_errors))
+        # Only the capped prefix is kept; the run is refused, never trusted.
+        self.assertEqual(result.pipe_outputs["small"], b"y" * 16)
+
+    def test_pipe_channel_empty_output_is_recorded(self):
+        channel = capture.open_pipe_channel("empty", 1024)
+        result = self.run_pipe_capture("pass", [channel])
+        self.assertEqual(result.status, "PASS", result.errors)
+        self.assertEqual(result.pipe_outputs["empty"], b"")
+        self.assertEqual(result.pipe_errors, ())
+
+    def test_pipe_channel_rejects_invalid_specs(self):
+        first = capture.open_pipe_channel("a", 1024)
+        second = capture.open_pipe_channel("b", 1024)
+        with self.assertRaisesRegex(ValueError, "duplicate pipe channel name"):
+            self.run_pipe_capture("pass", [first, capture.PipeChannel(
+                "a", second.read_fd, second.write_fd, 1024)])
+        with self.assertRaisesRegex(ValueError, "invalid fd"):
+            self.run_pipe_capture("pass", [capture.PipeChannel("x", 1, 99, 1024)])
+        with self.assertRaisesRegex(ValueError, "invalid max_bytes"):
+            self.run_pipe_capture("pass", [capture.PipeChannel("x", 40, 41, 0)])
+        with self.assertRaisesRegex(ValueError, "PipeChannel"):
+            self.run_pipe_capture("pass", [("not-a-channel", 40, 41, 1024)])
+        for channel in (first, second):
+            for fd in (channel.read_fd, channel.write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def test_pipe_channel_reopen_as_other_user_needs_owner_transfer(self):
+        """D1: a pipe re-opened via /dev/fd checks the pipe inode owner.
+
+        A child running as another UID inherits the write fd, but
+        re-opening it through /dev/fd/<N> (how pytest's junitxml plugin
+        writes) re-checks the pipe inode's owner: a root-owned pipe is
+        PermissionError for the runner user. Transferring ownership of
+        the write end with owner_uid makes the re-open succeed.
+        """
+        geteuid = getattr(os, "geteuid", None)
+        runner_name = os.environ.get("USIT_TEST_RUNNER_USER")
+        if geteuid is None or geteuid() != 0 or not runner_name or capture.pwd is None:
+            self.skipTest("needs root and USIT_TEST_RUNNER_USER pointing at an existing user")
+        runner_uid = capture.pwd.getpwnam(runner_name).pw_uid
+        channel = capture.open_pipe_channel("as-runner", 1024 * 1024, owner_uid=runner_uid)
+        code = f"open('/dev/fd/{channel.write_fd}', 'w', encoding='utf-8').write('from-runner')"
+        result = self.run_pipe_capture(code, [channel], user=runner_name)
+        self.assertEqual(result.status, "PASS", result.errors)
+        self.assertEqual(result.pipe_errors, ())
+        self.assertEqual(result.pipe_outputs["as-runner"], b"from-runner")
+
+    def test_open_pipe_channel_refuses_non_posix(self):
+        with patch.object(os, "name", "nt"):
+            with self.assertRaisesRegex(ValueError, "POSIX"):
+                capture.open_pipe_channel("x", 1024)
 
 
 if __name__ == "__main__":

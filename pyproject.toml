@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "usit-p0"
 version = "0.1.0"
-description = "Read-only universal software scanning and test planning engine"
+description = "Evidence-linked software understanding, business analysis, and intelligent test planning toolkit"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["cryptography==50.0.2", "pytest==8.3.5"]
 [project.scripts]
 usit = "usit.cli:main"
 [tool.setuptools.packages.find]

@@ -1,15 +1,5 @@
 name: USIT business-understanding tests
 
-# Main-branch validation workflow (backported with the main-baseline fixes).
-# main never had a workflow file, so no CI ran on PRs targeting main at all.
-# This is the minimal main-adapted version of the feature branch's workflow:
-# the gate is the full filtered discovery (584 tests) on Linux and Windows,
-# plus the main-baseline diagnostic jobs. It deliberately omits the
-# isolation-regression job: UID isolation (capture_run(user=)) exists only on
-# the feature branch, so there is nothing to isolate on main. When
-# feature/understanding-to-test-v1 merges, its workflow (with the full
-# business-understanding gate lists) replaces this file.
-
 # Keep only the newest validation for a branch; push and PR events share
 # the same group so stale queued runs cannot starve the current HEAD.
 concurrency:
@@ -31,6 +21,82 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pinned Python runtime dependencies
+        run: python -m pip install 'cryptography==50.0.2' 'pytest==8.3.5'
+      - name: Install the pinned local TypeScript parser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run required business-understanding and security trust-boundary tests
+        run: python -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_test_result_importer tests.test_pytest_result_importer tests.test_test_report_adapters tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_business_evidence_loop tests.test_business_evidence_loop_b2 tests.test_test_plan_generation tests.test_verification_gap_analyzer tests.test_project_quality_assessment tests.test_business_traceability tests.test_traceability_cli_io tests.test_traceability_template tests.test_business_graph tests.test_graph_validation tests.test_graph_argument_bindings tests.test_database_access tests.test_fix_proposal tests.test_permission_evidence tests.test_python_resolver tests.test_security_test_planner tests.test_identity_evidence tests.test_identity_graph tests.test_runtime_evidence tests.test_android_event_adapter tests.test_ai_gateway tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_ai_evidence_binding  tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_execution_provenance tests.test_evidence_signing tests.test_controlled_pytest tests.test_verification_capture tests.test_p074_identity_ctime tests.test_p0710zrf12_content_verification tests.test_p079_public_paths tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_js_ts_adapter_regressions -v
+      - name: Run USIT self-test
+        run: python -m usit selftest
+      - name: Diagnostic full repository regression suite (non-gating; see step summary)
+        id: full_repository_regression
+        continue-on-error: true
+        run: python -m unittest discover -s tests -v
+      - name: Report full repository regression outcome
+        if: always()
+        env:
+          REGRESSION_OUTCOME: ${{ steps.full_repository_regression.outcome }}
+        run: |
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text(chr(10).join(['### Full repository regression (diagnostic)', '', '- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**', '- This run is non-gating; targeted business-understanding/security tests and USIT self-test are the required gates.']) + chr(10), encoding='utf-8')"
+
+  isolation-regression:
+    # Optional (non-required) Linux job: runs the same gate list as
+    # business-understanding, but as root with USIT_TEST_RUNNER_USER set,
+    # so the UID isolation integration tests in test_controlled_pytest.py
+    # actually run instead of skipping. GitHub Actions runners are
+    # non-root, so the gate step needs sudo; $(which python) is used
+    # because the setup-python interpreter is outside sudo's secure_path.
+    # The variable is set on the sudo command line itself: sudo -E did
+    # not reliably carry it into the test process (run 42982113873
+    # skipped all three integration tests), so it is assigned explicitly.
+    runs-on: ubuntu-latest
+    env:
+      USIT_TEST_RUNNER_USER: usit-runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pinned Python runtime dependencies
+        run: python -m pip install 'cryptography==50.0.2' 'pytest==8.3.5'
+      - name: Install the pinned local TypeScript parser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Create dedicated runner user (idempotent)
+        run: id -u usit-runner >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin usit-runner
+      - name: Diagnose isolation preconditions
+        run: |
+          sudo -E python -c "import os, pwd; print('euid=', os.geteuid()); print('runner-user-env=', repr(os.environ.get('USIT_TEST_RUNNER_USER'))); print('pwnam=', pwd.getpwnam('usit-runner'))"
+          id usit-runner
+      - name: Run required gate as root with dedicated runner user
+        run: sudo USIT_TEST_RUNNER_USER=usit-runner "$(which python)" -m unittest tests.test_business_semantics tests.test_business_test_planner tests.test_business_test_cli tests.test_test_result_importer tests.test_pytest_result_importer tests.test_test_report_adapters tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_business_evidence_loop tests.test_business_evidence_loop_b2 tests.test_test_plan_generation tests.test_verification_gap_analyzer tests.test_project_quality_assessment tests.test_business_traceability tests.test_traceability_cli_io tests.test_traceability_template tests.test_business_graph tests.test_graph_validation tests.test_graph_argument_bindings tests.test_database_access tests.test_fix_proposal tests.test_permission_evidence tests.test_python_resolver tests.test_security_test_planner tests.test_identity_evidence tests.test_identity_graph tests.test_runtime_evidence tests.test_android_event_adapter tests.test_ai_gateway tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_ai_evidence_binding  tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_execution_provenance tests.test_evidence_signing tests.test_controlled_pytest tests.test_verification_capture tests.test_p074_identity_ctime tests.test_p0710zrf12_content_verification tests.test_p079_public_paths tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_js_ts_adapter_regressions -v
+
+  windows-isolation-regression:
+    # Optional (non-required) Windows job: runs the same Windows boundary
+    # list as windows-regression, but with USIT_TEST_RUNNER_USER set, so
+    # the Windows isolation (E1) integration tests in
+    # test_controlled_pytest.py actually run instead of skipping. The
+    # runner user is created with a random password that is masked and
+    # passed to the test step through GITHUB_ENV only; it is never
+    # printed, and the runner VM is discarded after the job. The parent
+    # (the Actions agent) runs as administrator, which the Windows
+    # isolation spawn (CreateProcessWithLogonW) requires.
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      USIT_TEST_RUNNER_USER: usit-runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
           python-version: "3.12"
       - uses: actions/setup-node@v4
         with:
@@ -39,29 +105,22 @@ jobs:
         run: python -m pip install 'cryptography==50.0.2' 'pytest==8.3.5'
       - name: Install the pinned local TypeScript parser
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Run USIT self-test
-        run: python -m usit selftest
-      - name: Run main full regression suite (gating; one known interrupt-test harness case excluded)
+      - name: Create dedicated runner user with a random password
+        shell: powershell
         run: |
-          python - <<'PY'
-          import unittest
-
-          excluded = "VerificationCaptureTests.test_keyboard_interrupt_terminates_child_and_records_returncode"
-          loader = unittest.TestLoader()
-          discovered = loader.discover("tests")
-
-          def filtered(suite):
-              result = unittest.TestSuite()
-              for item in suite:
-                  if isinstance(item, unittest.TestSuite):
-                      result.addTests(filtered(item))
-                  elif not item.id().endswith(excluded):
-                      result.addTest(item)
-              return result
-
-          outcome = unittest.TextTestRunner(verbosity=2).run(filtered(discovered))
-          raise SystemExit(0 if outcome.wasSuccessful() else 1)
-          PY
+          Add-Type -AssemblyName System.Web
+          $password = [System.Web.Security.Membership]::GeneratePassword(24, 4)
+          Write-Output "::add-mask::$password"
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "usit-runner" -Password $secure -Description "USIT isolated test runner" -PasswordNeverExpires
+          if (-not (Get-LocalGroupMember -Group "Users" -Member "usit-runner" -ErrorAction SilentlyContinue)) {
+            Add-LocalGroupMember -Group "Users" -Member "usit-runner"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "USIT_RUNNER_PASSWORD=$password"
+      - name: Run USIT self-test on Windows
+        run: python -m usit selftest
+      - name: Run Windows boundary tests with dedicated runner user
+        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_execution_provenance tests.test_evidence_signing tests.test_controlled_pytest tests.test_verification_capture tests.test_runtime_evidence tests.test_android_event_adapter tests.test_test_result_importer tests.test_traceability_cli_io tests.test_graph_validation tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_business_evidence_loop tests.test_business_evidence_loop_b2 tests.test_test_plan_generation tests.test_p0710zrf12_content_verification tests.test_database_access tests.test_fix_proposal tests.test_business_graph -v
 
   windows-regression:
     runs-on: windows-latest
@@ -82,28 +141,18 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run USIT self-test on Windows
         run: python -m usit selftest
-      - name: Run main full regression suite on Windows (gating; same exclusion as Linux)
-        shell: bash
+      - name: Run Windows security trust-boundary tests
+        run: python -m unittest tests.test_p078_ts_load_boundary tests.test_p079_security_boundary tests.test_p079_public_paths tests.test_ai_evidence_binding tests.test_ai_orchestrator tests.test_ai_claim_review tests.test_execution_provenance tests.test_evidence_signing tests.test_controlled_pytest tests.test_verification_capture tests.test_runtime_evidence tests.test_android_event_adapter tests.test_test_result_importer tests.test_traceability_cli_io tests.test_graph_validation tests.test_scan_attestation tests.test_scan_attestation_cli tests.test_previous_manifest_safety tests.test_coverage_result_importer tests.test_business_evidence_verifier tests.test_business_evidence_loop tests.test_business_evidence_loop_b2 tests.test_test_plan_generation tests.test_p0710zrf12_content_verification tests.test_database_access tests.test_fix_proposal tests.test_business_graph -v
+      - name: Diagnostic full repository regression suite on Windows (non-gating; see step summary)
+        id: full_repository_regression
+        continue-on-error: true
+        run: python -m unittest discover -s tests -v
+      - name: Report Windows full repository regression outcome
+        if: always()
+        env:
+          REGRESSION_OUTCOME: ${{ steps.full_repository_regression.outcome }}
         run: |
-          python - <<'PY'
-          import unittest
-
-          excluded = "VerificationCaptureTests.test_keyboard_interrupt_terminates_child_and_records_returncode"
-          loader = unittest.TestLoader()
-          discovered = loader.discover("tests")
-
-          def filtered(suite):
-              result = unittest.TestSuite()
-              for item in suite:
-                  if isinstance(item, unittest.TestSuite):
-                      result.addTests(filtered(item))
-                  elif not item.id().endswith(excluded):
-                      result.addTest(item)
-              return result
-
-          outcome = unittest.TextTestRunner(verbosity=2).run(filtered(discovered))
-          raise SystemExit(0 if outcome.wasSuccessful() else 1)
-          PY
+          python -c "import os; from pathlib import Path; p=Path(os.environ['GITHUB_STEP_SUMMARY']); p.write_text(chr(10).join(['### Windows full repository regression (diagnostic)', '', '- Outcome: **' + os.environ['REGRESSION_OUTCOME'] + '**', '- This run is non-gating; USIT self-test and Windows trust-boundary tests are the required gates.']) + chr(10), encoding='utf-8')"
 
   main-baseline-regression:
     strategy:
