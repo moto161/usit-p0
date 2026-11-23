@@ -208,6 +208,52 @@ def _call_parameter_expressions(line: str, call_start: int) -> list[str]:
     return cleaned
 
 
+def _split_call_args(text: str, open_paren_index: int) -> list[str] | None:
+    """Split a call's top-level arguments, verbatim (P23/T19).
+
+    ``open_paren_index`` is the index of the opening paren. Returns
+    the stripped argument texts in order (``[]`` for an empty call),
+    or None when the parens do not balance on this line. Unlike
+    ``_call_parameter_expressions`` this keeps every argument
+    (including the first, and string literals verbatim) so a
+    constructor call's positional arguments map 1:1 to its parameters.
+    """
+    depth: list[str] = []
+    quote: str | None = None
+    escaped = False
+    start = open_paren_index + 1
+    args: list[str] = []
+    index = open_paren_index
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char in {"'", '"'} or char == chr(96):
+            quote = char
+        elif char in "([{":
+            depth.append(char)
+        elif char in ")]}":
+            expected = {"(": ")", "[": "]", "{": "}"}
+            if not depth or expected[depth[-1]] != char:
+                return None
+            depth.pop()
+            if not depth:
+                tail = text[start:index].strip()
+                if tail:
+                    args.append(tail)
+                return args
+        elif char == "," and len(depth) == 1:
+            args.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+    return None
+
+
 def _join_balanced_call(lines: list[str], start_index: int, call_start: int) -> tuple[str, int] | None:
     """Join physical lines until the call's parens balance, or None.
 
@@ -371,7 +417,9 @@ def _python_class_method_returns(path: str, source: str) -> dict[
     ``_identity_return_profile``), plus its ``assigns``: the
     ``(attr, line, ast.unparse rhs)`` of ``self.<attr> = <rhs>``
     assignments in the same method (single-target ``ast.Assign`` only,
-    same traversal rules; P21). A (class, method) defined twice
+    same traversal rules; P21), plus its ``params``: the positional
+    parameter names after the first (``self``/``cls``), in order (P23:
+    constructor parameter value flow). A (class, method) defined twice
     merges its returns, matching ``_python_identity_return_methods``.
     """
     if not path.lower().endswith(".py"):
@@ -407,7 +455,10 @@ def _python_class_method_returns(path: str, source: str) -> dict[
                     stack.extend(ast.iter_child_nodes(item))
             entry = methods.setdefault((node.name, method.name),
                                        {"function_line": method.lineno, "returns": [],
-                                        "assigns": []})
+                                        "assigns": [],
+                                        "params": [arg.arg for arg in
+                                                   list(method.args.posonlyargs)
+                                                   + list(method.args.args)][1:]})
             entry["returns"].extend((ret.lineno, ast.unparse(ret.value))
                                     for ret in returns if ret.value is not None)
             entry["assigns"].extend(assigns)
@@ -728,6 +779,129 @@ def _python_attr_return_resolution(
     if kind is None or expr is None:
         return None
     return kind, expr, step
+
+
+def _python_ctor_attr_resolution(
+        path: str, cls: str, attr: str, params: list[str],
+        init: dict[str, Any], ctor_args: list[str]) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Resolve one ``self.<attr>`` through ``__init__`` assignments (P23).
+
+    Every ``self.<attr> = <rhs>`` assignment in ``__init__`` must
+    resolve to the same identity source. A right-hand side is either
+    a bare ``__init__`` parameter (the construction argument at that
+    position must itself be an identity expression) or an identity
+    expression whose leading name is an ``__init__`` parameter (the
+    construction argument substitutes for that name, and the result
+    must match the same pattern). Anything else -- a literal, a local,
+    a ``self.<method>(...)`` call -- fails closed. Keyword arguments
+    and an argument count that does not match the parameter count fail
+    closed. The returned step holds one item per assignment, in
+    source order.
+    """
+    if any(re.match(r"[A-Za-z_]\w*\s*=", arg) for arg in ctor_args):
+        return None
+    if len(ctor_args) != len(params):
+        return None
+    assigns = sorted(
+        (line_no, rhs) for name, line_no, rhs in init.get("assigns", [])
+        if name == attr)
+    if not assigns:
+        return None
+    kind: str | None = None
+    expr: str | None = None
+    step: list[dict[str, Any]] = []
+    for assign_line, rhs in assigns:
+        if re.fullmatch(r"[A-Za-z_]\w*", rhs) and rhs in params:
+            arg = ctor_args[params.index(rhs)]
+            if _TRUSTED.fullmatch(arg):
+                rhs_kind, rhs_expr = "trusted", arg
+            elif _REQUEST.fullmatch(arg):
+                rhs_kind, rhs_expr = "request", arg
+            else:
+                return None
+        else:
+            head = re.match(r"([A-Za-z_]\w*)\.", rhs)
+            if head is None or head.group(1) not in params:
+                return None
+            substituted = ctor_args[params.index(head.group(1))] + rhs[head.end(1):]
+            if _TRUSTED.fullmatch(substituted):
+                rhs_kind, rhs_expr = "trusted", substituted
+            elif _REQUEST.fullmatch(substituted):
+                rhs_kind, rhs_expr = "request", substituted
+            else:
+                return None
+        if kind is None:
+            kind, expr = rhs_kind, rhs_expr
+        elif kind != rhs_kind or expr != rhs_expr:
+            return None
+        step.append({"path": path, "line": assign_line,
+                     "function": f"{cls}.__init__", "returns": rhs_expr})
+    if kind is None or expr is None:
+        return None
+    return kind, expr, step
+
+
+def _python_ctor_return_resolution(
+        target_file: str, target_class: str, method: str,
+        ctor_args: list[str],
+        scans: dict[str, dict[tuple[str, str], dict[str, Any]]],
+        defined: dict[str, set[tuple[str, str]]]) -> dict[str, Any] | None:
+    """Resolve ``return self.<attr>`` through a constructor call (P23).
+
+    Call-site fallback for the P22 local-instance branch: the method
+    has no identity profile (its returns are attribute reads, not
+    direct identity expressions), but it is defined in the target
+    class, and the instance was constructed locally with known
+    positional arguments. Every direct return must be ``self.<attr>``
+    resolving through the same class's ``__init__`` assignments to the
+    same identity source (``_python_ctor_attr_resolution``); the
+    returned profile-like dict carries the ``__init__`` assignment
+    lines as its delegation. Anything else -- a direct identity
+    return, a mixed return, an attribute with no ``__init__``
+    assignment -- fails closed.
+    """
+    if (target_class, method) not in defined.get(target_file, set()):
+        return None
+    methods = scans.get(target_file, {})
+    info = methods.get((target_class, method))
+    if info is None or not info.get("returns"):
+        return None
+    init = methods.get((target_class, "__init__"))
+    if init is None:
+        return None
+    params = init.get("params", [])
+    kind: str | None = None
+    expr: str | None = None
+    seen: dict[str, tuple[str, str, list[dict[str, Any]]]] = {}
+    order: list[str] = []
+    return_lines: list[int] = []
+    for line_no, text in info["returns"]:
+        attr_match = _PY_SELF_ATTR_RETURN_RE.match(text)
+        if attr_match is None:
+            return None
+        attr = attr_match.group(1)
+        if attr not in seen:
+            resolved = _python_ctor_attr_resolution(
+                target_file, target_class, attr, params, init, ctor_args)
+            if resolved is None:
+                return None
+            seen[attr] = resolved
+            order.append(attr)
+        attr_kind, attr_expr, _attr_step = seen[attr]
+        if kind is None:
+            kind, expr = attr_kind, attr_expr
+        elif kind != attr_kind or expr != attr_expr:
+            return None
+        return_lines.append(line_no)
+    if kind is None or expr is None:
+        return None
+    step: list[dict[str, Any]] = []
+    for attr in order:
+        step.extend(seen[attr][2])
+    return {"kind": kind, "expression": expr, "path": target_file,
+            "function": f"{target_class}.{method}",
+            "return_lines": sorted(set(return_lines)),
+            "function_line": info["function_line"], "delegation": step}
 
 
 def _python_all_identity_return_methods(
@@ -1111,14 +1285,64 @@ def _strip_ts_line(line: str) -> str:
     return line.split("//", 1)[0]
 
 
+def _ts_method_params(header: str) -> list[str]:
+    """Parameter names from a TS/JS method header (T19).
+
+    Takes the ``_TS_METHOD_RE`` match text (e.g.
+    ``constructor(req: any) {``) and returns the bare parameter
+    identifiers in order, stripping type annotations and defaults.
+    Any shape the parser cannot read returns [] (fail closed: an
+    empty list never matches a non-empty constructor call).
+    """
+    start = header.find("(")
+    if start < 0:
+        return []
+    depth = 0
+    end = -1
+    for index in range(start, len(header)):
+        char = header[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                end = index
+                break
+    if end < 0:
+        return []
+    inner = header[start + 1:end].strip()
+    if not inner:
+        return []
+    pieces: list[str] = []
+    depth = 0
+    piece_start = 0
+    for index, char in enumerate(inner):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            pieces.append(inner[piece_start:index])
+            piece_start = index + 1
+    pieces.append(inner[piece_start:])
+    params: list[str] = []
+    for piece in pieces:
+        name = re.match(r"[A-Za-z_$][\w$]*", piece.strip())
+        if name is None:
+            return []
+        params.append(name.group(0))
+    return params
+
+
 def _ts_class_scan(path: str, source: str) -> tuple[
         dict[tuple[str, str], list[tuple[int, str]]], dict[int, str],
         dict[tuple[str, str], set[str | None]], set[str], set[tuple[str, str]],
-        dict[tuple[str, str], list[tuple[str, int, str]]]]:
+        dict[tuple[str, str], list[tuple[str, int, str]]],
+        dict[tuple[str, str], list[str]]]:
     """One brace-counting pass over a TS/JS file.
 
     Returns ``(methods, ranges, attr_candidates, class_names, defined,
-    method_assigns)``:
+    method_assigns, method_params)``:
     ``methods`` maps ``(class, method)`` pairs directly defined in a
     top-level class to their direct ``(line, expression)`` returns;
     ``ranges`` maps line numbers to their enclosing top-level class
@@ -1131,7 +1355,10 @@ def _ts_class_scan(path: str, source: str) -> tuple[
     used for the inheritance shadowing check); ``method_assigns`` maps
     ``(class, method)`` pairs to their ``(attr, line, rhs)``
     ``this.<attr> = <rhs>`` assignments (same-method, same traversal
-    rules as returns; T17). Returns inside nested
+    rules as returns; T17; T19 also records constructor frames under
+    the key ``(class, "constructor")``); ``method_params`` maps
+    ``(class, method)`` pairs to their bare parameter names in order
+    (T19: constructor parameter value flow). Returns inside nested
     functions or classes are excluded from both. A method header must
     open its body on the same line; anything else fails closed (no
     method, no returns). Only the direct returns are collected --
@@ -1144,6 +1371,7 @@ def _ts_class_scan(path: str, source: str) -> tuple[
     class_names: set[str] = set()
     defined: set[tuple[str, str]] = set()
     method_assigns: dict[tuple[str, str], list[tuple[str, int, str]]] = {}
+    method_params: dict[tuple[str, str], list[str]] = {}
     # Frames: kind "class" | "method" | "nested", interior brace depth,
     # class name, method name. "nested" covers nested functions and
     # nested classes, whose lines and returns never belong to the outer
@@ -1171,6 +1399,21 @@ def _ts_class_scan(path: str, source: str) -> tuple[
             prefix = stripped[:match_end]
             return depth + prefix.count("{") - prefix.count("}")
 
+        def _flush(frame: dict[str, Any]) -> None:
+            if frame["kind"] != "method":
+                return
+            method_params.setdefault(
+                (frame["class"], frame["method"]), frame.get("params", []))
+            if frame.get("constructor"):
+                # T19: a constructor's assigns are recorded (under the
+                # key (class, "constructor")) even though its returns
+                # never enter `methods`.
+                method_assigns.setdefault(
+                    (frame["class"], frame["method"]), []).extend(frame["assigns"])
+            elif frame["returns"]:
+                methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
+                method_assigns.setdefault((frame["class"], frame["method"]), []).extend(frame["assigns"])
+
         if stripped:
             class_frame = next((f for f in reversed(stack) if f["kind"] == "class"), None)
             method_frame = next((f for f in reversed(stack) if f["kind"] == "method"), None)
@@ -1195,6 +1438,7 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                                       "depth": interior(match.end()),
                                       "class": class_frame["class"], "method": name,
                                       "constructor": name == "constructor",
+                                      "params": _ts_method_params(match.group(0)),
                                       "returns": [], "assigns": []})
                         method_frame = stack[-1]
                         defined.add((class_frame["class"], name))
@@ -1296,16 +1540,10 @@ def _ts_class_scan(path: str, source: str) -> tuple[
                     pending_nested = "function"
         depth += opens - closes
         while stack and stack[-1]["depth"] > depth:
-            frame = stack.pop()
-            if frame["kind"] == "method" and frame["returns"] and not frame.get("constructor"):
-                methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
-                method_assigns.setdefault((frame["class"], frame["method"]), []).extend(frame["assigns"])
+            _flush(stack.pop())
     while stack:
-        frame = stack.pop()
-        if frame["kind"] == "method" and frame["returns"] and not frame.get("constructor"):
-            methods.setdefault((frame["class"], frame["method"]), []).extend(frame["returns"])
-            method_assigns.setdefault((frame["class"], frame["method"]), []).extend(frame["assigns"])
-    return methods, ranges, attr_candidates, class_names, defined, method_assigns
+        _flush(stack.pop())
+    return methods, ranges, attr_candidates, class_names, defined, method_assigns, method_params
 
 
 _VUE_OPTIONS_CLASS = "__vue_options__"
@@ -1354,7 +1592,7 @@ def _ts_vue_options_methods(path: str, source: str) -> tuple[
     attr_candidates: dict[tuple[str, str], set[str | None]] = {}
     if not path.lower().endswith(".vue"):
         return methods, ranges, defined, attr_candidates
-    _m, _r, _c, class_names, _d, _a = _ts_class_scan(path, source)
+    _m, _r, _c, class_names, _d, _a, _p = _ts_class_scan(path, source)
     if _VUE_OPTIONS_CLASS in class_names:
         return methods, ranges, defined, attr_candidates
     # Frames: kind "default" | "methods" | "method" | "nested", interior
@@ -1699,7 +1937,7 @@ def _ts_identity_return_methods(path: str, source: str) -> dict[tuple[str, str],
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
-    methods, _ranges, _candidates, _names, _defined, _assigns = _ts_class_scan(path, source)
+    methods, _ranges, _candidates, _names, _defined, _assigns, _params = _ts_class_scan(path, source)
     return _ts_direct_identity_profiles(path, methods)
 
 
@@ -1773,6 +2011,141 @@ def _ts_attr_return_resolution(
     if kind is None or expr is None:
         return None
     return kind, expr, step
+
+
+def _ts_new_call_args(rhs: str) -> list[str] | None:
+    """Positional arguments of a ``new <Name>(...)`` right-hand side (T19).
+
+    Returns the verbatim argument texts in order (``[]`` for an empty
+    call), or None when the right-hand side is not a bare ``new``
+    construction with balanced parens on this line.
+    """
+    match = _TS_NEW_RE.match(rhs)
+    if match is None:
+        return None
+    open_index = rhs.find("(", match.end(1))
+    if open_index < 0:
+        return []
+    return _split_call_args(rhs, open_index)
+
+
+def _ts_ctor_attr_resolution(
+        path: str, cls: str, attr: str, params: list[str],
+        assigns: list[tuple[str, int, str]],
+        ctor_args: list[str]) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Resolve one ``this.<attr>`` through constructor assignments (T19).
+
+    The TS mirror of ``_python_ctor_attr_resolution``: every
+    ``this.<attr> = <rhs>`` assignment in the constructor must resolve
+    to the same identity source, either a bare constructor parameter
+    (the construction argument at that position must itself be an
+    identity expression) or an identity expression whose leading name
+    is a constructor parameter (the construction argument substitutes
+    for that name, and the result must match the same pattern).
+    Keyword arguments and an argument count that does not match the
+    parameter count fail closed. The returned step holds one item per
+    assignment, in source order.
+    """
+    if any(re.match(r"[A-Za-z_$][\w$]*\s*=", arg) for arg in ctor_args):
+        return None
+    if len(ctor_args) != len(params):
+        return None
+    resolved = sorted(
+        (line_no, rhs) for name, line_no, rhs in assigns if name == attr)
+    if not resolved:
+        return None
+    kind: str | None = None
+    expr: str | None = None
+    step: list[dict[str, Any]] = []
+    for assign_line, rhs in resolved:
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", rhs) and rhs in params:
+            arg = ctor_args[params.index(rhs)]
+            if _TRUSTED.fullmatch(arg):
+                rhs_kind, rhs_expr = "trusted", arg
+            elif _REQUEST.fullmatch(arg):
+                rhs_kind, rhs_expr = "request", arg
+            else:
+                return None
+        else:
+            head = re.match(r"([A-Za-z_$][\w$]*)\.", rhs)
+            if head is None or head.group(1) not in params:
+                return None
+            substituted = ctor_args[params.index(head.group(1))] + rhs[head.end(1):]
+            if _TRUSTED.fullmatch(substituted):
+                rhs_kind, rhs_expr = "trusted", substituted
+            elif _REQUEST.fullmatch(substituted):
+                rhs_kind, rhs_expr = "request", substituted
+            else:
+                return None
+        if kind is None:
+            kind, expr = rhs_kind, rhs_expr
+        elif kind != rhs_kind or expr != rhs_expr:
+            return None
+        step.append({"path": path, "line": assign_line,
+                     "function": f"{cls}.constructor", "returns": rhs_expr})
+    if kind is None or expr is None:
+        return None
+    return kind, expr, step
+
+
+def _ts_ctor_return_resolution(
+        target_file: str, target_class: str, method: str,
+        ctor_args: list[str],
+        scans: dict[str, tuple]) -> dict[str, Any] | None:
+    """Resolve ``return this.<attr>`` through a constructor call (T19).
+
+    The TS mirror of ``_python_ctor_return_resolution``: call-site
+    fallback for the T18 local-instance branch. The method has no
+    identity profile (its returns are attribute reads), but it is
+    defined in the target class, and the instance was constructed
+    locally with known positional arguments. Every direct return must
+    be ``this.<attr>`` resolving through the same class's constructor
+    assignments to the same identity source; the returned profile-like
+    dict carries the constructor assignment lines as its delegation.
+    """
+    scan = scans.get(target_file)
+    if scan is None:
+        return None
+    methods, _ranges, _candidates, _names, defined, method_assigns, method_params = scan
+    if (target_class, method) not in defined:
+        return None
+    returns = methods.get((target_class, method))
+    if not returns:
+        return None
+    params = method_params.get((target_class, "constructor"), [])
+    assigns = method_assigns.get((target_class, "constructor"), [])
+    kind: str | None = None
+    expr: str | None = None
+    seen: dict[str, tuple[str, str, list[dict[str, Any]]]] = {}
+    order: list[str] = []
+    return_lines: list[int] = []
+    for line_no, text in returns:
+        attr_match = _TS_THIS_ATTR_RETURN_RE.match(text)
+        if attr_match is None:
+            return None
+        attr = attr_match.group(1)
+        if attr not in seen:
+            resolved = _ts_ctor_attr_resolution(
+                target_file, target_class, attr, params, assigns, ctor_args)
+            if resolved is None:
+                return None
+            seen[attr] = resolved
+            order.append(attr)
+        attr_kind, attr_expr, _attr_step = seen[attr]
+        if kind is None:
+            kind, expr = attr_kind, attr_expr
+        elif kind != attr_kind or expr != attr_expr:
+            return None
+        return_lines.append(line_no)
+    if kind is None or expr is None:
+        return None
+    step: list[dict[str, Any]] = []
+    for attr in order:
+        step.extend(seen[attr][2])
+    return {"kind": kind, "expression": expr, "path": target_file,
+            "function": f"{target_class}.{method}",
+            "return_lines": sorted(set(return_lines)),
+            "delegation": step}
 
 
 def _ts_all_identity_return_methods(
@@ -1936,7 +2309,7 @@ def _ts_class_method_ranges(path: str, source: str) -> dict[int, str]:
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
-    _methods, ranges, _candidates, _names, _defined, _a = _ts_class_scan(path, source)
+    _methods, ranges, _candidates, _names, _defined, _a, _p = _ts_class_scan(path, source)
     return ranges
 
 
@@ -2343,7 +2716,7 @@ def _ts_cross_file_instance_bindings(
     for path, source in code_by_file.items():
         if path.lower().endswith(".py"):
             continue
-        _methods, _ranges, candidates, class_names, _defined, _a = _ts_class_scan(path, source)
+        _methods, _ranges, candidates, class_names, _defined, _a, _p = _ts_class_scan(path, source)
         # V4: instance attributes bound in Vue Options API methods
         # share the same candidate map, keyed on the synthetic class
         # `__vue_options__`.
@@ -2388,7 +2761,7 @@ def _ts_cross_file_instance_bindings(
                 imported = _ts_default_export_class(target, code_by_file[target])
                 if imported is None:
                     return None
-            _m, _r, _c, target_classes, _d, _a = _ts_class_scan(target, code_by_file[target])
+            _m, _r, _c, target_classes, _d, _a, _p = _ts_class_scan(target, code_by_file[target])
             if imported not in target_classes:
                 return None
             return (target, imported)
@@ -2428,7 +2801,7 @@ def _ts_base_classes(
     for path, source in code_by_file.items():
         if path.lower().endswith(".py"):
             continue
-        _m, _r, _c, class_names, _d, _a = _ts_class_scan(path, source)
+        _m, _r, _c, class_names, _d, _a, _p = _ts_class_scan(path, source)
         imports = _ts_import_bindings(path, source)
         bases: dict[str, tuple[str, str]] = {}
         for line in source.splitlines():
@@ -2448,7 +2821,7 @@ def _ts_base_classes(
             target = _ts_resolve_import(specifier, path, code_by_file, ts_paths)
             if target is None or target == path:
                 continue
-            _m2, _r2, _c2, target_classes, _d2, _a2 = _ts_class_scan(
+            _m2, _r2, _c2, target_classes, _d2, _a2, _p2 = _ts_class_scan(
                 target, code_by_file[target])
             if imported in target_classes:
                 bases[cls] = (target, imported)
@@ -2505,7 +2878,7 @@ def _ts_instance_attribute_classes(path: str, source: str) -> dict[tuple[str, st
     """
     if not path.lower().endswith((".ts", ".tsx", ".js", ".mjs", ".cjs", ".vue")):
         return {}
-    _methods, _ranges, candidates, class_names, _defined, _a = _ts_class_scan(path, source)
+    _methods, _ranges, candidates, class_names, _defined, _a, _p = _ts_class_scan(path, source)
     # V4: instance attributes bound in Vue Options API methods
     # (created() and friends) share the same candidate map, keyed on
     # the synthetic class `__vue_options__`.
@@ -3088,6 +3461,13 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         if file_path.lower().endswith(".py")
     }
     py_cross_instance_bindings = _python_cross_file_instance_bindings(code_by_file)
+    # P23: raw per-file method scans (params + assigns, including
+    # `__init__`) for the constructor-argument fallback.
+    py_method_scans = {
+        file_path: _python_class_method_returns(file_path, file_source)
+        for file_path, file_source in code_by_file.items()
+        if file_path.lower().endswith(".py")
+    }
     py_imported_class_bindings = {
         file_path: _python_imported_class_bindings(
             file_path, file_source, module_index, code_by_file)
@@ -3130,6 +3510,13 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         if not file_path.lower().endswith(".py")
     }
     ts_base_classes = _ts_base_classes(effective_code_by_file, ts_paths)
+    # T19: raw per-file class scans (methods + assigns + params,
+    # including constructors) for the constructor-argument fallback.
+    ts_class_scans = {
+        file_path: _ts_class_scan(file_path, file_source)
+        for file_path, file_source in effective_code_by_file.items()
+        if not file_path.lower().endswith(".py")
+    }
     # V3: Vue Options API `methods:` blocks scan as a synthetic class
     # `__vue_options__`; merge their profiles, ranges and defined sets
     # into the class-based maps so the T1 `this` branch resolves them.
@@ -3219,6 +3606,10 @@ def extract_identity_evidence(code_by_file: dict[str, str],
         # `auth = MidAuth()` -> {"auth": (path, "MidAuth")}; cleared
         # wherever `aliases` is cleared, invalidated by reassignment.
         local_classes: dict[str, tuple[str, str]] = {}
+        # P23/T19: the positional constructor arguments recorded with
+        # each local construction, e.g. `auth = MidAuth(request)` ->
+        # {"auth": ["request"]}; cleared wherever `local_classes` is.
+        local_ctor_args: dict[str, list[str]] = {}
         brace_depth = 0
         previous_depth = 0
         previous_indent = 0
@@ -3232,22 +3623,27 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                 if re.match(r"(?:async\s+)?(?:def|class)\s+", stripped):
                     aliases.clear()
                     local_classes.clear()
+                    local_ctor_args.clear()
                     python_scope_indent = indent
                 elif python_scope_indent is not None and stripped and indent <= python_scope_indent:
                     aliases.clear()
                     local_classes.clear()
+                    local_ctor_args.clear()
                     python_scope_indent = None
                 elif stripped and indent < previous_indent:
                     aliases.clear()
                     local_classes.clear()
+                    local_ctor_args.clear()
                 current_scope = python_scope_indent if python_scope_indent is not None else 0
             else:
                 if brace_depth != previous_depth:
                     aliases.clear()
                     local_classes.clear()
+                    local_ctor_args.clear()
                 if re.search(r"\b(?:function|class)\b|=>\s*\{", line):
                     aliases.clear()
                     local_classes.clear()
+                    local_ctor_args.clear()
                 current_scope = brace_depth
 
             trusted = sorted(set(match.group(0) for match in _TRUSTED.finditer(line)))
@@ -3410,7 +3806,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                      ]}
                 elif (return_helpers or bindings or method_helpers
                         or instance_bindings or cross_instance_bindings
-                        or local_class_imports
+                        or local_class_imports or local_class_names
                         or ts_method_helpers
                         or ts_instance_bindings or ts_cross_bindings
                         or ts_has_base or py_has_base
@@ -3482,18 +3878,33 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                                 # or const auth = new MidAuth();
                                 # uid = auth.getUid(req). The profile walks
                                 # the class hierarchy (P9/P10, T4), so an
-                                # inherited method binds.
+                                # inherited method binds. P23/T19: when the
+                                # method has no profile because it returns
+                                # an attribute bound in the constructor,
+                                # fall back to resolving that attribute
+                                # through the recorded constructor
+                                # arguments.
                                 target_file, target_class = local_classes[parts[0]]
                                 if is_python:
                                     helper = _python_method_profile(
                                         target_file, target_class, parts[1],
                                         same_file_methods, py_defined_methods,
                                         py_base_classes)
+                                    if helper is None:
+                                        helper = _python_ctor_return_resolution(
+                                            target_file, target_class, parts[1],
+                                            local_ctor_args.get(parts[0], []),
+                                            py_method_scans, py_defined_methods)
                                 else:
                                     helper = _ts_method_profile(
                                         target_file, target_class, parts[1],
                                         ts_same_file_methods, ts_defined_methods,
                                         ts_base_classes)
+                                    if helper is None:
+                                        helper = _ts_ctor_return_resolution(
+                                            target_file, target_class, parts[1],
+                                            local_ctor_args.get(parts[0], []),
+                                            ts_class_scans)
                             elif len(parts) == 2:
                                 # T6: one hop through a namespace import,
                                 # e.g. import * as auth from "./auth";
@@ -3590,7 +4001,10 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                         # binds the local name to that class (Python), and
                         # a `new <Class>(...)` right-hand side does the
                         # same for TS/JS; a later `local.method(...)` call
-                        # then resolves through it. Any other right-hand
+                        # then resolves through it. P23/T19: the call's
+                        # positional arguments are recorded alongside, so
+                        # a method returning a constructor-bound attribute
+                        # can resolve through them. Any other right-hand
                         # side invalidates the local binding instead of
                         # retaining it.
                         if call_match is not None:
@@ -3598,23 +4012,32 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                             if (constructed in local_class_names
                                     and constructed not in local_function_names):
                                 local_classes[name] = (path, constructed)
+                                local_ctor_args[name] = (
+                                    _split_call_args(rhs, rhs.index("(")) or [])
                             elif constructed in local_class_imports:
                                 local_classes[name] = local_class_imports[constructed]
+                                local_ctor_args[name] = (
+                                    _split_call_args(rhs, rhs.index("(")) or [])
                             else:
                                 local_classes.pop(name, None)
+                                local_ctor_args.pop(name, None)
                         elif not is_python:
                             constructed = _ts_constructed_class(rhs)
                             if (constructed is not None and "." not in constructed
                                     and constructed in local_class_names
                                     and constructed not in local_function_names):
                                 local_classes[name] = (path, constructed)
+                                local_ctor_args[name] = _ts_new_call_args(rhs) or []
                             elif (constructed is not None and "." not in constructed
                                     and constructed in local_class_imports):
                                 local_classes[name] = local_class_imports[constructed]
+                                local_ctor_args[name] = _ts_new_call_args(rhs) or []
                             else:
                                 local_classes.pop(name, None)
+                                local_ctor_args.pop(name, None)
                         else:
                             local_classes.pop(name, None)
+                            local_ctor_args.pop(name, None)
                 else:
                     aliases.pop(name, None)
 
@@ -3624,6 +4047,7 @@ def extract_identity_evidence(code_by_file: dict[str, str],
                 if brace_depth != previous_depth:
                     aliases.clear()
                     local_classes.clear()
+                    local_ctor_args.clear()
             previous_indent = indent
     records.sort(key=lambda item: (item["source"], item["line"], item["kind"], item["evidence_id"]))
     return records

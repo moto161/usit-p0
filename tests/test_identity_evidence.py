@@ -6499,6 +6499,200 @@ class IdentityLocalInstanceMethodTests(unittest.TestCase):
         self.assertEqual(self._direct_bindings(rows), [])
 
 
+class IdentityCtorParamValueTests(unittest.TestCase):
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    def _load(self, construct="auth = MidAuth(request)",
+              call="uid = auth.get_uid()", tail="uid"):
+        body = (
+            "\n\n"
+            "def load(request):\n"
+            f"    {construct}\n"
+            f"    {call}\n"
+        )
+        if tail == "uid":
+            body += '    cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+        else:
+            body += '    cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (owner,))\n'
+        return body
+
+    def test_same_file_ctor_passes_request_binds(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "\n"
+                "    def get_uid(self):\n"
+                "        return self.uid\n"
+            ) + self._load(),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 12)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["request.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 11, 12])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.__init__")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.get_uid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:repo/photos.py#load:9")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_ctor_bound_request_identity_binds(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req):\n"
+                "        self.uid = req.body.user_id\n"
+                "\n"
+                "    def get_owner(self):\n"
+                "        return self.uid\n"
+            ) + self._load(call="owner = auth.get_owner()", tail="owner"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["request.body.user_id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 11, 12])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.__init__")
+
+    def test_cross_file_ctor_shape_binds(self):
+        rows = extract_identity_evidence({
+            "server/mid.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "\n"
+                "    def get_uid(self):\n"
+                "        return self.uid\n"
+            ),
+            "server/photos.py": (
+                "from server.mid import MidAuth\n"
+            ) + self._load(),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "server/mid.py")
+        self.assertEqual(binding["details"]["propagation"][1]["path"], "server/mid.py")
+        self.assertEqual(binding["details"]["propagation"][2]["path"], "server/photos.py")
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.__init__")
+
+    def test_ctor_passing_identity_expression_directly_binds(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, uid):\n"
+                "        self.uid = uid\n"
+                "\n"
+                "    def get_uid(self):\n"
+                "        return self.uid\n"
+            ) + self._load(construct="auth = MidAuth(request.user.id)"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["identity_expressions"], ["request.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 11, 12])
+
+    def test_two_arg_ctor_binds(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req, mode):\n"
+                "        self.uid = req.user.id\n"
+                "\n"
+                "    def get_uid(self):\n"
+                "        return self.uid\n"
+            ) + self._load(construct='auth = MidAuth(request, "strict")'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 11, 12])
+
+    def test_ctor_bound_attr_returned_by_method_taking_request_binds(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "\n"
+                "    def get_uid(self, req):\n"
+                "        return self.uid\n"
+            ) + self._load(call="uid = auth.get_uid(request)"),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 11, 12])
+
+    def test_literal_ctor_arg_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "\n"
+                "    def get_uid(self):\n"
+                "        return self.uid\n"
+            ) + self._load(construct='auth = MidAuth("guest")'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_init_assigning_literal_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req):\n"
+                '        self.uid = "guest"\n'
+                "\n"
+                "    def get_uid(self):\n"
+                "        return self.uid\n"
+            ) + self._load(),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_local_alias_ctor_arg_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "\n"
+                "    def get_uid(self):\n"
+                "        return self.uid\n"
+            ) + (
+                "\n\n"
+                "def load(request):\n"
+                "    r = request\n"
+                "    auth = MidAuth(r)\n"
+                "    uid = auth.get_uid()\n"
+                '    cursor.execute("SELECT id FROM photos WHERE owner_id = %s", (uid,))\n'
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_keyword_ctor_arg_does_not_bind(self):
+        rows = extract_identity_evidence({
+            "repo/photos.py": (
+                "class MidAuth:\n"
+                "    def __init__(self, req):\n"
+                "        self.uid = req.user.id\n"
+                "\n"
+                "    def get_uid(self):\n"
+                "        return self.uid\n"
+            ) + self._load(construct="auth = MidAuth(req=request)"),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
 class TsSecondHopReturnPropagationTests(unittest.TestCase):
     def _rows_files(self, files, ts_config=None):
         with tempfile.TemporaryDirectory() as td:
@@ -7515,6 +7709,252 @@ class TsLocalInstanceMethodTests(unittest.TestCase):
                 "      const auth = new MidAuth();\n"
                 "    }\n"
                 "    const uid = auth.getUid(req);\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+
+class TsCtorParamValueTests(unittest.TestCase):
+    def _rows_files(self, files, ts_config=None):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, source in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+            if ts_config is not None:
+                (root / "tsconfig.json").write_text(ts_config, encoding="utf-8")
+            js_ts_source = {n: s for n, s in files.items()
+                            if Path(n).suffix.lower() in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")}
+            parsed = analyze_js_ts_project(root, [], js_ts_source=js_ts_source)
+            owners = ts_function_owners(parsed)
+            return extract_identity_evidence(files, owners, ts_config=ts_config)
+
+    def _direct_bindings(self, rows):
+        return [row for row in rows
+                if row["kind"] in ("direct_authenticated_identity_to_sql_owner_binding",
+                                   "direct_request_identity_to_sql_owner_binding")]
+
+    def _ctor_handler(self, import_block, assign="const auth = new MidAuth(req);",
+                      call="const uid = auth.getUid();", tail="uid"):
+        body = (
+            import_block + "\n\n"
+            "export class PhotoHandler {\n"
+            "  load(req: any) {\n"
+            f"    {assign}\n"
+            f"    {call}\n"
+        )
+        if tail == "uid":
+            body += '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+        else:
+            body += '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+        return body + "  }\n}\n"
+
+    _MID_CTOR = (
+        "export class MidAuth {\n"
+        "  constructor(req: any) {\n"
+        "    this.uid = req.user.id;\n"
+        "  }\n"
+        "  getUid() {\n"
+        "    return this.uid;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def test_same_file_ctor_passes_req_binds(self):
+        rows = self._rows_files({
+            "handlers.ts": self._MID_CTOR + "\n" + (
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth(req);\n"
+                "    const uid = auth.getUid();\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 14)
+        self.assertEqual(binding["details"]["binding_status"], "INTERPROCEDURAL_SINGLE_HOP_RETURN")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 13, 14])
+        self.assertEqual(binding["details"]["propagation"][0]["function"], "MidAuth.constructor")
+        self.assertEqual(binding["details"]["propagation"][1]["function"], "MidAuth.getUid")
+        self.assertEqual(binding["owner_symbol_id"], "symbol:handlers.ts#load:11")
+        self.assertEqual(binding["owner_resolution_status"], "RESOLVED")
+
+    def test_ctor_bound_request_identity_binds(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                "export class MidAuth {\n"
+                "  constructor(req: any) {\n"
+                "    this.uid = req.body.user_id;\n"
+                "  }\n"
+                "  getOwner() {\n"
+                "    return this.uid;\n"
+                "  }\n"
+                "}\n"
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth(req);\n"
+                "    const owner = auth.getOwner();\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [owner]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_request_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["request_expressions"], ["req.body.user_id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 13, 14])
+
+    def test_cross_file_named_import_binds(self):
+        rows = self._rows_files({
+            "mid.ts": self._MID_CTOR,
+            "handlers.ts": self._ctor_handler('import { MidAuth } from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 6, 7])
+        self.assertEqual(binding["details"]["propagation"][0]["path"], "mid.ts")
+        self.assertEqual(binding["details"]["propagation"][1]["path"], "mid.ts")
+        self.assertEqual(binding["details"]["propagation"][2]["path"], "handlers.ts")
+
+    def test_ctor_passing_identity_expression_directly_binds(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                "export class MidAuth {\n"
+                "  constructor(uid: any) {\n"
+                "    this.uid = uid;\n"
+                "  }\n"
+                "  getUid() {\n"
+                "    return this.uid;\n"
+                "  }\n"
+                "}\n"
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth(req.user.id);\n"
+                "    const uid = auth.getUid();\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["details"]["identity_expressions"], ["req.user.id"])
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 13, 14])
+
+    def test_cross_file_default_import_binds(self):
+        rows = self._rows_files({
+            "mid.ts": self._MID_CTOR.replace("export class MidAuth {",
+                                             "export default class MidAuth {"),
+            "handlers.ts": self._ctor_handler('import MidAuth from "./mid";'),
+        })
+        binding = next(row for row in rows
+                       if row["kind"] == "direct_authenticated_identity_to_sql_owner_binding")
+        self.assertEqual(binding["line"], 7)
+        self.assertEqual([item["line"] for item in binding["details"]["propagation"]],
+                         [3, 6, 6, 7])
+
+    def test_literal_ctor_arg_does_not_bind(self):
+        rows = self._rows_files({
+            "mid.ts": self._MID_CTOR,
+            "handlers.ts": self._ctor_handler(
+                'import { MidAuth } from "./mid";',
+                assign='const auth = new MidAuth("guest");'),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_returning_other_attribute_does_not_bind(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                "export class MidAuth {\n"
+                "  constructor(req: any) {\n"
+                "    this.uid = req.user.id;\n"
+                "  }\n"
+                "  getUid() {\n"
+                "    return this.other;\n"
+                "  }\n"
+                "}\n"
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth(req);\n"
+                "    const uid = auth.getUid();\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_conflicting_ctor_assignments_do_not_bind(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                "export class MidAuth {\n"
+                "  constructor(req: any) {\n"
+                "    this.uid = req.user.id;\n"
+                '    this.uid = "guest";\n'
+                "  }\n"
+                "  getUid() {\n"
+                "    return this.uid;\n"
+                "  }\n"
+                "}\n"
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth(req);\n"
+                "    const uid = auth.getUid();\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_ctor_assigning_via_local_does_not_bind(self):
+        rows = self._rows_files({
+            "handlers.ts": (
+                "export class MidAuth {\n"
+                "  constructor(req: any) {\n"
+                "    const u = req.user.id;\n"
+                "    this.uid = u;\n"
+                "  }\n"
+                "  getUid() {\n"
+                "    return this.uid;\n"
+                "  }\n"
+                "}\n"
+                "\n"
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth(req);\n"
+                "    const uid = auth.getUid();\n"
+                '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
+                "  }\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(self._direct_bindings(rows), [])
+
+    def test_missing_ctor_arg_does_not_bind(self):
+        rows = self._rows_files({
+            "handlers.ts": self._MID_CTOR + "\n" + (
+                "export class PhotoHandler {\n"
+                "  load(req: any) {\n"
+                "    const auth = new MidAuth();\n"
+                "    const uid = auth.getUid();\n"
                 '    return db.query("SELECT * FROM photos WHERE owner_id = ?", [uid]);\n'
                 "  }\n"
                 "}\n"
